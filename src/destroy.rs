@@ -9,17 +9,21 @@ pub struct Destroy<'a> {
 
 impl Database {
     pub fn destroy(&mut self) -> Destroy {
-        todo!()
+        Destroy {
+            inner: self.inner(),
+        }
     }
 }
 
 impl Destroy<'_> {
+    #[inline]
     pub fn one(&mut self, key: Key) -> bool {
-        todo!()
+        self.inner.destroy(key).is_some()
     }
 
     /// Destroys all provided `keys` and returns the count of the keys that were successfully destroyed.
+    #[inline]
     pub fn all<I: IntoIterator<Item = Key>>(&mut self, keys: I) -> usize {
-        todo!()
+        keys.into_iter().filter(|&key| self.one(key)).count()
     }
 }

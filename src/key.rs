@@ -10,7 +10,7 @@ pub struct Key {
     generation: u32,
 }
 
-struct State;
+pub struct State;
 
 impl Key {
     pub const NULL: Self = Self {
@@ -45,7 +45,7 @@ impl Key {
 impl Item for Key {
     type State = State;
 
-    fn initialize(table: &Table) -> Option<Self::State> {
+    fn initialize(_: &Table) -> Option<Self::State> {
         Some(State)
     }
 }

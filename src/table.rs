@@ -26,7 +26,7 @@ pub struct Table {
     pub(crate) stores: Box<[Store]>,
 }
 
-pub(crate) struct Store {
+pub struct Store {
     meta: Meta,
     data: RwLock<NonNull<()>>,
 }
@@ -84,6 +84,12 @@ impl Store {
     pub unsafe fn drop(&mut self, index: usize, count: usize) {
         let data = *self.data.get_mut();
         (self.meta().drop)(data, index, count);
+    }
+
+    #[inline]
+    pub unsafe fn free(&mut self, count: usize, capacity: usize) {
+        let data = *self.data.get_mut();
+        (self.meta().free)(data, count, capacity);
     }
 
     #[inline]
@@ -212,19 +218,19 @@ impl Tables {
     }
 
     #[inline]
-    pub fn get_shared(&self, index: usize) -> Option<Arc<RwLock<Table>>> {
-        let read = self.0.read();
-        let table = unsafe { &**self.1.get() }.get(index)?.clone();
-        drop(read);
-        Some(table)
-    }
-
-    #[inline]
     pub unsafe fn get_unchecked(&self, index: usize) -> &RwLock<Table> {
         let read = self.0.read();
         let table = &**(&**self.1.get()).get_unchecked(index);
         drop(read);
         table
+    }
+
+    #[inline]
+    pub fn get_shared(&self, index: usize) -> Option<Arc<RwLock<Table>>> {
+        let read = self.0.read();
+        let table = unsafe { &**self.1.get() }.get(index)?.clone();
+        drop(read);
+        Some(table)
     }
 
     #[inline]
@@ -262,9 +268,7 @@ impl Tables {
                 }));
                 let write = RwLockUpgradableReadGuard::upgrade(upgrade);
                 tables.push(table.clone());
-                let read = RwLockWriteGuard::downgrade(write);
-                let tables = &**tables;
-                drop(read);
+                drop(write);
                 table
             }
         }
@@ -316,6 +320,16 @@ impl Table {
             for store in self.stores.iter() {
                 unsafe { store.grow(old_capacity, new_capacity) };
             }
+        }
+    }
+}
+
+impl Drop for Table {
+    fn drop(&mut self) {
+        let count = *self.count.get_mut() as u32 as usize;
+        let capacity = self.keys.get_mut().len();
+        for store in self.stores.iter_mut() {
+            unsafe { store.free(count, capacity) };
         }
     }
 }

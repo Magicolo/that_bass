@@ -12,7 +12,7 @@ use std::{collections::HashSet, marker::PhantomData, sync::Arc};
 pub unsafe trait Template {
     type State;
     fn initialize(context: Context) -> Self::State;
-    unsafe fn apply(self, row: usize, table: &Table);
+    unsafe fn apply(self, state: &Self::State, row: usize, table: &Table);
 }
 
 pub struct Spawn<T: Template>(PhantomData<T>);
@@ -72,8 +72,9 @@ unsafe impl<D: Datum> Template for D {
         context.declare(D::meta());
     }
 
-    unsafe fn apply(self, row: usize, table: &Table) {
-        unsafe { table.stores().get_unchecked(0).write_unlocked_at(row, self) };
+    #[inline]
+    unsafe fn apply(self, _: &Self::State, row: usize, table: &Table) {
+        unsafe { table.stores.get_unchecked(0).write_unlocked_at(row, self) };
     }
 }
 
@@ -82,7 +83,7 @@ unsafe impl Template for () {
     #[inline]
     fn initialize(_: Context) -> Self::State {}
     #[inline]
-    unsafe fn apply(self, _: usize, _: &Table) {}
+    unsafe fn apply(self, _: &Self::State, _: usize, _: &Table) {}
 }
 
 unsafe impl<T1: Template, T2: Template> Template for (T1, T2) {
@@ -93,16 +94,22 @@ unsafe impl<T1: Template, T2: Template> Template for (T1, T2) {
     }
 
     #[inline]
-    unsafe fn apply(self, row: usize, table: &Table) {
-        self.0.apply(row, table);
-        self.1.apply(row, table);
+    unsafe fn apply(self, state: &Self::State, row: usize, table: &Table) {
+        self.0.apply(&state.0, row, table);
+        self.1.apply(&state.1, row, table);
     }
 }
 
 impl<T: Template> Create<'_, T> {
     pub fn all_n<const N: usize>(&self, templates: [T; N]) -> [Key; N] {
         let mut keys = [Key::NULL; N];
-        Self::apply(&self.inner, &self.table, templates.into_iter(), &mut keys);
+        Self::apply(
+            &self.inner,
+            &self.state,
+            &self.table,
+            templates.into_iter(),
+            &mut keys,
+        );
         keys
     }
 
@@ -132,6 +139,7 @@ impl<T: Template> Create<'_, T> {
         self.keys.resize(self.templates.len(), Key::NULL);
         Self::apply(
             &self.inner,
+            &self.state,
             &self.table,
             self.templates.drain(..),
             &mut self.keys,
@@ -157,6 +165,7 @@ impl<T: Template> Create<'_, T> {
 
     fn apply<I: FullIterator<Item = T>>(
         inner: &Inner,
+        state: &T::State,
         table: &RwLock<Table>,
         mut templates: I,
         keys: &mut [Key],
@@ -168,7 +177,7 @@ impl<T: Template> Create<'_, T> {
                     templates
                         .next()
                         .expect("Expected initialize to be called once per template.")
-                        .apply(row.0 + i, table)
+                        .apply(state, row.0 + i, table)
                 }
             })
             .expect("Expected create to succeed.");

@@ -11,6 +11,7 @@ pub mod database;
 pub mod destroy;
 pub mod key;
 pub mod query;
+pub mod slot;
 pub mod table;
 mod utility;
 /*
@@ -56,6 +57,8 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     DuplicateMeta,
+    ReadWriteConflict,
+    WriteWriteConflict,
 }
 
 pub struct Meta {
@@ -109,6 +112,16 @@ impl Meta {
                 |_, _, _| {}
             },
         }
+    }
+
+    #[inline]
+    pub const fn identifier(&self) -> TypeId {
+        self.identifier
+    }
+
+    #[inline]
+    pub const fn name(&self) -> &'static str {
+        self.name
     }
 }
 
@@ -168,15 +181,47 @@ mod tests {
     #[test]
     fn create_all_n_returns_no_null_key() -> Result<(), Error> {
         let database = Database::new();
-        let keys = database.create()?.all_n([(); 2048]);
+        let keys = database.create()?.all_n([(); 1000]);
         assert!(keys.iter().all(|&key| key != Key::NULL));
         Ok(())
     }
 
     #[test]
-    fn fail_when_duplicate_datum_in_template() {
+    fn create_fail_with_duplicate_datum_in_template() {
         let database = Database::new();
         let result = database.create::<(A, A)>();
         assert_eq!(result.err(), Some(Error::DuplicateMeta));
+    }
+
+    #[test]
+    fn query_has_create_one_key() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(());
+        let mut query = database.query::<()>()?;
+        assert!(query.item(key).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn query_has_all_create_all() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.all_n([(); 1000]);
+        let mut query = database.query::<()>()?;
+        assert!(key.into_iter().all(|key| query.item(key).is_some()));
+        Ok(())
+    }
+
+    #[test]
+    fn query_fail_with_write_write() {
+        let database = Database::new();
+        let result = database.query::<(&mut A, &mut A)>();
+        assert_eq!(result.err(), Some(Error::WriteWriteConflict));
+    }
+
+    #[test]
+    fn query_fail_with_read_write() {
+        let database = Database::new();
+        let result = database.query::<(&mut A, &mut A)>();
+        assert_eq!(result.err(), Some(Error::ReadWriteConflict));
     }
 }

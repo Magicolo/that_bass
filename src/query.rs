@@ -9,7 +9,8 @@ use std::{
     any::TypeId,
     collections::{HashMap, VecDeque},
     marker::PhantomData,
-    slice::from_raw_parts,
+    ops::{Deref, DerefMut},
+    slice::{from_raw_parts, from_raw_parts_mut},
 };
 
 pub struct Query<'a, I: Item, F: Filter = ()> {
@@ -36,8 +37,7 @@ pub trait Item {
 }
 
 pub struct Read<T>(usize, PhantomData<T>);
-
-pub struct Guard<T, L>(T, L);
+pub struct Write<T>(usize, PhantomData<T>);
 
 pub trait At<'a> {
     type State;
@@ -50,20 +50,69 @@ pub trait At<'a> {
     unsafe fn item(state: &mut Self::State, index: usize) -> Self::Item;
 }
 
+/// This trait exists solely for the purpose of helping the compiler reason about lifetimes.
+trait With<'a, I: Item> {
+    type Value;
+    fn with(
+        self,
+        item: <I::State as At<'a>>::Item,
+        table: RwLockReadGuard<'a, Table>,
+    ) -> Self::Value;
+}
+
 impl<'a, I: Item, F: Filter> Query<'a, I, F> {
-    pub fn item(
-        &mut self,
-        key: Key,
-    ) -> Option<Guard<<I::State as At>::Item, RwLockReadGuard<Table>>> {
-        self.with(key, |item, table| Guard(item, table))
+    #[inline]
+    pub fn item(&mut self, key: Key) -> Option<impl DerefMut<Target = <I::State as At<'a>>::Item>> {
+        struct Guard<T, L>(T, L);
+        struct WithItem;
+
+        impl<T, L> Deref for Guard<T, L> {
+            type Target = T;
+
+            #[inline]
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
+
+        impl<T, L> DerefMut for Guard<T, L> {
+            #[inline]
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.0
+            }
+        }
+
+        impl<'a, I: Item> With<'a, I> for WithItem {
+            type Value = Guard<<I::State as At<'a>>::Item, RwLockReadGuard<'a, Table>>;
+            fn with(
+                self,
+                item: <<I as Item>::State as At<'a>>::Item,
+                table: RwLockReadGuard<'a, Table>,
+            ) -> Self::Value {
+                Guard(item, table)
+            }
+        }
+        self.with(key, WithItem)
     }
 
+    #[inline]
     pub fn item_with<T>(
         &mut self,
         key: Key,
         with: impl FnOnce(<I::State as At>::Item) -> T,
     ) -> Option<T> {
-        self.with(key, |item, _| with(item))
+        struct WithItem<F, T>(F, PhantomData<T>);
+        impl<'a, I: Item, T, F: FnOnce(<I::State as At<'a>>::Item) -> T> With<'a, I> for WithItem<F, T> {
+            type Value = T;
+            fn with(
+                self,
+                item: <<I as Item>::State as At<'a>>::Item,
+                _: RwLockReadGuard<'a, Table>,
+            ) -> Self::Value {
+                self.0(item)
+            }
+        }
+        self.with(key, WithItem(with, PhantomData))
     }
 
     // pub fn items(&mut self) -> impl Iterator<Item = <I::State as At>::Item> {
@@ -72,6 +121,7 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
     //     })
     // }
 
+    #[inline]
     pub fn items_with(&mut self, mut each: impl FnMut(<I::State as At>::Item)) {
         self.each(|mut state, table| {
             for i in 0..table.count() {
@@ -85,6 +135,7 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
     //         .map(|(mut state, _)| unsafe { I::State::chunk(&mut state) })
     // }
 
+    #[inline]
     pub fn chunks_with(&mut self, mut each: impl FnMut(<I::State as At>::Chunk)) {
         self.each(|mut state, _| each(unsafe { I::State::chunk(&mut state) }));
     }
@@ -108,11 +159,7 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
         }
     }
 
-    fn with<T>(
-        &mut self,
-        key: Key,
-        with: impl FnOnce(<I::State as At>::Item, RwLockReadGuard<Table>) -> T,
-    ) -> Option<T> {
+    fn with<W: With<'a, I>>(&mut self, key: Key, with: W) -> Option<W::Value> {
         Some(loop {
             self.update();
             let Self {
@@ -136,7 +183,7 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
 
             if let Some(mut at_state) = I::State::try_get(item_state, &table_read) {
                 let item = unsafe { I::State::item(&mut at_state, store_index as _) };
-                break with(item, table_read);
+                break with.with(item, table_read);
             }
 
             drop(table_read);
@@ -150,7 +197,7 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
             let mut at_state = I::State::get(item_state, &table_write);
             let table_read = RwLockWriteGuard::downgrade(table_write);
             let item = unsafe { I::State::item(&mut at_state, store_index as _) };
-            break with(item, table_read);
+            break with.with(item, table_read);
         })
     }
 
@@ -261,8 +308,8 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
 }
 
 impl Filter for () {
-    fn filter(&mut self, table: &Table) -> bool {
-        todo!()
+    fn filter(&mut self, _: &Table) -> bool {
+        true
     }
 }
 
@@ -304,22 +351,24 @@ impl<'a, D: Datum> At<'a> for Read<D> {
 
     #[inline]
     fn try_get(&self, table: &Table) -> Option<Self::State> {
-        unsafe {
-            table
-                .stores()
-                .get_unchecked(self.0)
-                .try_read(.., table.count() as _)
-        }
+        todo!()
+        // unsafe {
+        //     table
+        //         .stores()
+        //         .get_unchecked(self.0)
+        //         .try_read(.., table.count() as _)
+        // }
     }
 
     #[inline]
     fn get(&self, table: &Table) -> Self::State {
-        unsafe {
-            table
-                .stores()
-                .get_unchecked(self.0)
-                .read(.., table.count() as _)
-        }
+        todo!()
+        // unsafe {
+        //     table
+        //         .stores()
+        //         .get_unchecked(self.0)
+        //         .read(.., table.count() as _)
+        // }
     }
 
     #[inline]
@@ -330,6 +379,113 @@ impl<'a, D: Datum> At<'a> for Read<D> {
     #[inline]
     unsafe fn item(state: &mut Self::State, index: usize) -> Self::Item {
         Self::chunk(state).get_unchecked(index)
+    }
+}
+
+impl<D: Datum> Item for &mut D {
+    type State = Write<D>;
+
+    fn initialize(table: &Table) -> Option<Self::State> {
+        let (index, _) = table
+            .stores()
+            .iter()
+            .enumerate()
+            .find(|(_, store)| store.meta().identifier == TypeId::of::<D>())?;
+        Some(Write(index, PhantomData))
+    }
+}
+
+impl<'a, D: Datum> At<'a> for Write<D> {
+    type State = (*mut D, usize);
+    type Chunk = &'a mut [D];
+    type Item = &'a mut D;
+
+    #[inline]
+    fn try_get(&self, table: &Table) -> Option<Self::State> {
+        todo!()
+        // unsafe {
+        //     table
+        //         .stores()
+        //         .get_unchecked(self.0)
+        //         .try_read(.., table.count() as _)
+        // }
+    }
+
+    #[inline]
+    fn get(&self, table: &Table) -> Self::State {
+        todo!()
+        // unsafe {
+        //     table
+        //         .stores()
+        //         .get_unchecked(self.0)
+        //         .read(.., table.count() as _)
+        // }
+    }
+
+    #[inline]
+    unsafe fn chunk(state: &mut Self::State) -> Self::Chunk {
+        from_raw_parts_mut(state.0, state.1)
+    }
+
+    #[inline]
+    unsafe fn item(state: &mut Self::State, index: usize) -> Self::Item {
+        Self::chunk(state).get_unchecked_mut(index)
+    }
+}
+
+impl Item for () {
+    type State = ();
+
+    fn initialize(_: &Table) -> Option<Self::State> {
+        Some(())
+    }
+}
+
+impl<'a> At<'a> for () {
+    type State = ();
+    type Chunk = ();
+    type Item = ();
+
+    #[inline]
+    fn try_get(&self, _: &Table) -> Option<Self::State> {
+        Some(())
+    }
+    #[inline]
+    fn get(&self, _: &Table) -> Self::State {}
+    #[inline]
+    unsafe fn chunk(_: &mut Self::State) -> Self::Chunk {}
+    #[inline]
+    unsafe fn item(_: &mut Self::State, _: usize) -> Self::Item {}
+}
+
+impl<I1: Item, I2: Item> Item for (I1, I2) {
+    type State = (I1::State, I2::State);
+
+    fn initialize(table: &Table) -> Option<Self::State> {
+        Some((I1::initialize(table)?, I2::initialize(table)?))
+    }
+}
+
+impl<'a, A1: At<'a>, A2: At<'a>> At<'a> for (A1, A2) {
+    type State = (A1::State, A2::State);
+    type Chunk = (A1::Chunk, A2::Chunk);
+    type Item = (A1::Item, A2::Item);
+
+    #[inline]
+    fn try_get(&self, table: &Table) -> Option<Self::State> {
+        Some((self.0.try_get(table)?, self.1.try_get(table)?))
+    }
+    #[inline]
+    fn get(&self, table: &Table) -> Self::State {
+        (self.0.get(table), self.1.get(table))
+    }
+    #[inline]
+    unsafe fn chunk(state: &mut Self::State) -> Self::Chunk {
+        (A1::chunk(&mut state.0), A2::chunk(&mut state.1))
+    }
+    #[inline]
+    unsafe fn item(state: &mut Self::State, index: usize) -> Self::Item {
+        (A1::item(&mut state.0, index), A2::item(&mut state.1, index))
     }
 }
 
