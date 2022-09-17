@@ -1,9 +1,18 @@
 #![feature(generators)]
 #![feature(iter_from_generator)]
+#![feature(iter_order_by)]
+#![feature(strict_provenance)]
+#![feature(strict_provenance_atomic_ptr)]
+#![feature(type_alias_impl_trait)]
+#![feature(generic_associated_types)]
 
+pub mod create;
 pub mod database;
-pub mod modify;
+pub mod destroy;
+pub mod key;
 pub mod query;
+pub mod table;
+mod utility;
 /*
 COHERENCE RULES:
 - Legend:
@@ -37,28 +46,17 @@ Design an ergonomic and massively parallel database with granular locking and gr
     - The ordering of different deferred operations is currently unclear.
 */
 
-use parking_lot::{
-    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard,
-    RwLockUpgradableReadGuard, RwLockWriteGuard,
-};
 use std::{
     any::{type_name, TypeId},
-    cell::UnsafeCell,
-    collections::{HashMap, HashSet, VecDeque},
-    iter::from_generator,
-    marker::PhantomData,
-    mem::{forget, needs_drop, replace, size_of},
-    ops::{Deref, DerefMut},
+    mem::{forget, needs_drop, size_of},
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
-    slice::{from_raw_parts, from_raw_parts_mut, SliceIndex},
-    sync::{
-        atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering::*},
-        Arc,
-    },
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
-#[derive(Debug)]
-pub enum Error {}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    DuplicateMeta,
+}
 
 pub struct Meta {
     identifier: TypeId,
@@ -114,42 +112,71 @@ impl Meta {
     }
 }
 
+pub fn identify() -> usize {
+    static COUNTER: AtomicUsize = AtomicUsize::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{
-        database::{Database, Key, Table},
-        Datum, Error,
-    };
+    use crate::{database::Database, key::Key, Datum, Error};
+    use std::any::TypeId;
+
+    struct A;
+    struct B;
+    impl Datum for A {}
+    impl Datum for B {}
 
     #[test]
-    fn main() -> Result<(), Error> {
-        #[derive(Default, Clone)]
-        struct Position;
-        struct Velocity;
-        impl Datum for Position {}
-        impl Datum for Velocity {}
-
-        let mut database = Database::new();
-        fn filter(table: &Table) -> bool {
-            true
-        }
-        let mut query1 = database.query_with::<&Position, _>(filter)?;
-        let mut query2 = database.query::<Key>()?;
-        let mut create = database.create()?;
-        let mut destroy = database.destroy();
-
-        for _item in query1.items() {}
-        for _chunk in query1.chunks() {}
-        query1.items_with(|_item| {});
-        query1.chunks_with(|_chunk| {});
-        query1.item_with(Key::NULL, |_item| {});
-        create.one(Position);
-        create.all([Position]);
-        create.clones(100, Position);
-        create.defaults(100);
-        destroy.one(Key::NULL);
-        destroy.all([Key::NULL]);
-        destroy.all(query2.items());
+    fn create_adds_a_table() -> Result<(), Error> {
+        let database = Database::new();
+        assert_eq!(database.tables().len(), 0);
+        database.create::<()>()?;
+        assert_eq!(database.tables().len(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn create_adds_a_table_with_datum() -> Result<(), Error> {
+        let database = Database::new();
+        assert_eq!(database.tables().len(), 0);
+        database.create::<A>()?;
+        let table = database.tables().next().unwrap();
+        assert!(table.has(TypeId::of::<A>()));
+        Ok(())
+    }
+
+    #[test]
+    fn create_adds_a_table_with_data() -> Result<(), Error> {
+        let database = Database::new();
+        assert_eq!(database.tables().len(), 0);
+        database.create::<(A, B)>()?;
+        let table = database.tables().next().unwrap();
+        assert!(table.has(TypeId::of::<A>()));
+        assert!(table.has(TypeId::of::<B>()));
+        Ok(())
+    }
+
+    #[test]
+    fn create_one_returns_non_null_key() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(());
+        assert_ne!(key, Key::NULL);
+        Ok(())
+    }
+
+    #[test]
+    fn create_all_n_returns_no_null_key() -> Result<(), Error> {
+        let database = Database::new();
+        let keys = database.create()?.all_n([(); 2048]);
+        assert!(keys.iter().all(|&key| key != Key::NULL));
+        Ok(())
+    }
+
+    #[test]
+    fn fail_when_duplicate_datum_in_template() {
+        let database = Database::new();
+        let result = database.create::<(A, A)>();
+        assert_eq!(result.err(), Some(Error::DuplicateMeta));
     }
 }
