@@ -11,7 +11,6 @@ pub mod database;
 pub mod destroy;
 pub mod key;
 pub mod query;
-pub mod slot;
 pub mod table;
 mod utility;
 /*
@@ -133,12 +132,14 @@ pub fn identify() -> usize {
 #[cfg(test)]
 mod tests {
     use crate::{database::Database, key::Key, Datum, Error};
-    use std::any::TypeId;
+    use std::{any::TypeId, collections::HashSet, thread::scope};
 
     struct A;
     struct B;
+    struct C(usize);
     impl Datum for A {}
     impl Datum for B {}
+    impl Datum for C {}
 
     #[test]
     fn create_adds_a_table() -> Result<(), Error> {
@@ -187,6 +188,15 @@ mod tests {
     }
 
     #[test]
+    fn create_all_n_returns_distinct_keys() -> Result<(), Error> {
+        let database = Database::new();
+        let mut set = HashSet::new();
+        let keys = database.create()?.all_n([(); 1000]);
+        assert!(keys.iter().all(|&key| set.insert(key)));
+        Ok(())
+    }
+
+    #[test]
     fn create_fail_with_duplicate_datum_in_template() {
         let database = Database::new();
         let result = database.create::<(A, A)>();
@@ -194,7 +204,71 @@ mod tests {
     }
 
     #[test]
-    fn query_has_create_one_key() -> Result<(), Error> {
+    fn create_all_n_in_query_does_not_deadlock() -> Result<(), Error> {
+        let database = Database::new();
+        let create = database.create()?;
+        let key = create.one(());
+        let mut query = database.query::<Key>()?;
+        let _key = query.item(key).unwrap();
+        create.all_n([(); 1000]);
+        Ok(())
+    }
+
+    #[test]
+    fn destroy_one_fails_with_null_key() {
+        let database = Database::new();
+        assert_eq!(database.destroy().one(Key::NULL), false);
+    }
+
+    #[test]
+    fn destroy_one_true_with_create_one() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create::<()>()?.one(());
+        assert!(database.destroy().one(key));
+        Ok(())
+    }
+
+    #[test]
+    fn destroy_all_with_create_all_n() -> Result<(), Error> {
+        let database = Database::new();
+        let keys = database.create::<()>()?.all_n([(); 1000]);
+        assert_eq!(database.destroy().all(keys), 1000);
+        Ok(())
+    }
+
+    #[test]
+    fn destroy_one_in_query_does_not_deadlock() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(());
+        let mut query = database.query::<Key>()?;
+        let key = query.item(key).unwrap();
+        database.destroy().one(*key);
+        Ok(())
+    }
+
+    #[test]
+    fn destroy_one_delays_resolution_in_query() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(());
+        let mut query1 = database.query::<()>()?;
+        let mut query2 = database.query::<()>()?;
+        {
+            let guard = query1.item(key).unwrap();
+            assert!(database.destroy().one(key));
+            // `items` will have the destroyed key.
+            assert!(query2.items().next().is_some());
+            // `item(key)` will not.
+            assert!(query2.item(key).is_none());
+            drop(guard);
+        }
+        assert!(query1.item(key).is_none());
+        assert!(query2.items().next().is_none());
+        assert!(query2.item(key).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn query_is_some_create_one_key() -> Result<(), Error> {
         let database = Database::new();
         let key = database.create()?.one(());
         let mut query = database.query::<()>()?;
@@ -203,7 +277,17 @@ mod tests {
     }
 
     #[test]
-    fn query_has_all_create_all() -> Result<(), Error> {
+    fn query_is_none_destroy_one_key() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(());
+        let mut query = database.query::<()>()?;
+        database.destroy().one(key);
+        assert!(query.item(key).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn query_is_some_all_create_all() -> Result<(), Error> {
         let database = Database::new();
         let key = database.create()?.all_n([(); 1000]);
         let mut query = database.query::<()>()?;
@@ -212,16 +296,67 @@ mod tests {
     }
 
     #[test]
-    fn query_fail_with_write_write() {
+    fn query_is_some_remain_destroy_all() -> Result<(), Error> {
         let database = Database::new();
-        let result = database.query::<(&mut A, &mut A)>();
-        assert_eq!(result.err(), Some(Error::WriteWriteConflict));
+        let keys = database.create()?.all_n([(); 1000]);
+        let mut query = database.query::<()>()?;
+        database.destroy().all(keys[..500].into_iter().copied());
+        assert!(keys[500..]
+            .into_iter()
+            .all(|&key| query.item(key).is_some()));
+        assert!(keys[..500]
+            .into_iter()
+            .all(|&key| query.item(key).is_none()));
+        Ok(())
     }
 
     #[test]
-    fn query_fail_with_read_write() {
+    fn query_is_err_with_write_write() {
+        assert_eq!(
+            Database::new().query::<(&mut A, &mut A)>().err(),
+            Some(Error::WriteWriteConflict)
+        );
+    }
+
+    #[test]
+    fn query_is_err_with_read_write() {
+        assert_eq!(
+            Database::new().query::<(&A, &mut A)>().err(),
+            Some(Error::ReadWriteConflict)
+        );
+        assert_eq!(
+            Database::new().query::<(&mut A, &A)>().err(),
+            Some(Error::ReadWriteConflict)
+        );
+    }
+
+    #[test]
+    fn query_reads_same_datum_as_create_one() -> Result<(), Error> {
         let database = Database::new();
-        let result = database.query::<(&mut A, &mut A)>();
-        assert_eq!(result.err(), Some(Error::ReadWriteConflict));
+        let key = database.create()?.one(C(1));
+        let mut query = database.query::<&C>()?;
+        assert_eq!(query.item(key).unwrap().0, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn query1_reads_datum_written_by_query2() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(C(1));
+        let mut query1 = database.query::<&C>()?;
+        let mut query2 = database.query::<&mut C>()?;
+        query2.item(key).unwrap().0 += 1;
+        assert_eq!(query1.item(key).unwrap().0, 2);
+        Ok(())
+    }
+
+    fn boba() -> Result<(), Error> {
+        let database = Database::new();
+        let create = database.create()?;
+        let key = create.one(());
+        let mut query = database.query::<Key>()?;
+        let key = query.item(key).unwrap();
+        scope(|scope| create.all_n([(); 1000]));
+        Ok(())
     }
 }

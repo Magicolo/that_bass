@@ -1,20 +1,21 @@
+use parking_lot::{MappedRwLockReadGuard, MappedRwLockWriteGuard};
+
 use crate::{
-    database::{Database, Inner},
+    database::{Database, TableRead, TableWrite},
     key::Key,
-    table::Table,
     Datum, Error,
 };
-use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use std::{
     any::TypeId,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
+    iter::from_generator,
     marker::PhantomData,
+    mem::transmute,
     ops::{Deref, DerefMut},
-    slice::{from_raw_parts, from_raw_parts_mut},
 };
 
 pub struct Query<'a, I: Item, F: Filter = ()> {
-    inner: &'a Inner,
+    database: &'a Database,
     index: usize,
     indices: HashMap<usize, usize>,
     states: Vec<(usize, I::State)>,
@@ -23,17 +24,23 @@ pub struct Query<'a, I: Item, F: Filter = ()> {
     _marker: PhantomData<fn(I)>,
 }
 
+pub struct Context<'a> {
+    read: &'a mut HashSet<TypeId>,
+    write: &'a mut HashSet<TypeId>,
+}
+
 pub trait Filter {
-    fn filter(&mut self, table: &Table) -> bool;
+    fn filter(&mut self, table: &TableRead) -> bool;
 }
 
 pub struct Not<F: Filter>(F);
 
 pub struct Has<D: Datum>(PhantomData<D>);
 
-pub trait Item {
+pub unsafe trait Item {
     type State: for<'a> At<'a>;
-    fn initialize(table: &Table) -> Option<Self::State>;
+    fn initialize(table: &TableRead) -> Option<Self::State>;
+    fn validate(context: Context) -> Result<(), Error>;
 }
 
 pub struct Read<T>(usize, PhantomData<T>);
@@ -44,8 +51,8 @@ pub trait At<'a> {
     type Chunk;
     type Item;
 
-    fn try_get(&self, table: &Table) -> Option<Self::State>;
-    fn get(&self, table: &Table) -> Self::State;
+    fn try_get(&self, table: &TableRead) -> Option<Self::State>;
+    fn get(&self, table: &TableWrite) -> Self::State;
     unsafe fn chunk(state: &mut Self::State) -> Self::Chunk;
     unsafe fn item(state: &mut Self::State, index: usize) -> Self::Item;
 }
@@ -53,41 +60,68 @@ pub trait At<'a> {
 /// This trait exists solely for the purpose of helping the compiler reason about lifetimes.
 trait With<'a, I: Item> {
     type Value;
-    fn with(
-        self,
-        item: <I::State as At<'a>>::Item,
-        table: RwLockReadGuard<'a, Table>,
-    ) -> Self::Value;
+    fn with(self, item: <I::State as At<'a>>::Item, table: TableRead<'a>) -> Self::Value;
+}
+
+impl Context<'_> {
+    pub fn own(&mut self) -> Context {
+        Context {
+            read: self.read,
+            write: self.write,
+        }
+    }
+
+    pub fn read<T: 'static>(&mut self) -> Result<(), Error> {
+        let identifier = TypeId::of::<T>();
+        if self.write.contains(&identifier) {
+            Err(Error::ReadWriteConflict)
+        } else {
+            self.read.insert(identifier);
+            Ok(())
+        }
+    }
+
+    pub fn write<T: 'static>(&mut self) -> Result<(), Error> {
+        let identifier = TypeId::of::<T>();
+        if self.read.contains(&identifier) {
+            Err(Error::ReadWriteConflict)
+        } else if self.write.insert(identifier) {
+            Ok(())
+        } else {
+            Err(Error::WriteWriteConflict)
+        }
+    }
+}
+
+pub struct Guard<'a, T>(T, TableRead<'a>);
+
+impl<T> Deref for Guard<'_, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for Guard<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl<'a, I: Item, F: Filter> Query<'a, I, F> {
     #[inline]
-    pub fn item(&mut self, key: Key) -> Option<impl DerefMut<Target = <I::State as At<'a>>::Item>> {
-        struct Guard<T, L>(T, L);
+    pub fn item(&mut self, key: Key) -> Option<Guard<<I::State as At<'a>>::Item>> {
         struct WithItem;
-
-        impl<T, L> Deref for Guard<T, L> {
-            type Target = T;
-
-            #[inline]
-            fn deref(&self) -> &Self::Target {
-                &self.0
-            }
-        }
-
-        impl<T, L> DerefMut for Guard<T, L> {
-            #[inline]
-            fn deref_mut(&mut self) -> &mut Self::Target {
-                &mut self.0
-            }
-        }
-
         impl<'a, I: Item> With<'a, I> for WithItem {
-            type Value = Guard<<I::State as At<'a>>::Item, RwLockReadGuard<'a, Table>>;
+            type Value = Guard<'a, <I::State as At<'a>>::Item>;
+            #[inline]
             fn with(
                 self,
                 item: <<I as Item>::State as At<'a>>::Item,
-                table: RwLockReadGuard<'a, Table>,
+                table: TableRead<'a>,
             ) -> Self::Value {
                 Guard(item, table)
             }
@@ -101,56 +135,69 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
         key: Key,
         with: impl FnOnce(<I::State as At>::Item) -> T,
     ) -> Option<T> {
-        struct WithItem<F, T>(F, PhantomData<T>);
-        impl<'a, I: Item, T, F: FnOnce(<I::State as At<'a>>::Item) -> T> With<'a, I> for WithItem<F, T> {
+        struct WithItem<'a, F, T>(&'a Database, F, PhantomData<T>);
+        impl<'a, I: Item, T, F: FnOnce(<I::State as At<'a>>::Item) -> T> With<'a, I>
+            for WithItem<'a, F, T>
+        {
             type Value = T;
+            #[inline]
             fn with(
                 self,
                 item: <<I as Item>::State as At<'a>>::Item,
-                _: RwLockReadGuard<'a, Table>,
+                _: TableRead<'a>,
             ) -> Self::Value {
-                self.0(item)
+                self.1(item)
             }
         }
-        self.with(key, WithItem(with, PhantomData))
+        self.with(key, WithItem(self.database, with, PhantomData))
     }
 
-    // pub fn items(&mut self) -> impl Iterator<Item = <I::State as At>::Item> {
-    //     self.iterate().flat_map(|(mut state, table)| {
-    //         (0..table.count()).map(move |i| unsafe { I::State::item(&mut state, i as usize) })
-    //     })
-    // }
-
-    #[inline]
-    pub fn items_with(&mut self, mut each: impl FnMut(<I::State as At>::Item)) {
-        self.each(|mut state, table| {
-            for i in 0..table.count() {
-                each(unsafe { I::State::item(&mut state, i as usize) });
-            }
+    pub fn items(&mut self) -> impl Iterator<Item = <I::State as At<'a>>::Item> + '_ {
+        self.iterate().flat_map(|(mut at_state, table_read)| {
+            (0..table_read.inner().count()).map(move |i| {
+                // Keep `table_read` alive.
+                let _guard = &table_read;
+                unsafe { I::State::item(&mut at_state, i as usize) }
+            })
         })
     }
 
-    // pub fn chunks(&mut self) -> impl Iterator<Item = <I::State as At>::Chunk> {
-    //     self.iterate()
-    //         .map(|(mut state, _)| unsafe { I::State::chunk(&mut state) })
-    // }
+    #[inline]
+    pub fn items_with(&mut self, mut each: impl FnMut(<I::State as At>::Item)) {
+        for (mut at_state, table_read) in self.iterate() {
+            for i in 0..table_read.inner().count() {
+                each(unsafe { I::State::item(&mut at_state, i as usize) });
+            }
+            drop(table_read);
+        }
+    }
+
+    pub fn chunks(&mut self) -> impl Iterator<Item = Guard<<I::State as At<'a>>::Chunk>> {
+        self.iterate().map(|(mut at_state, table_read)| {
+            Guard(unsafe { I::State::chunk(&mut at_state) }, table_read)
+        })
+    }
 
     #[inline]
     pub fn chunks_with(&mut self, mut each: impl FnMut(<I::State as At>::Chunk)) {
-        self.each(|mut state, _| each(unsafe { I::State::chunk(&mut state) }));
+        for (mut at_state, table_read) in self.iterate() {
+            each(unsafe { I::State::chunk(&mut at_state) });
+            drop(table_read);
+        }
     }
 
     /// Ensure that all tables have been filtered or initialized.
     fn update(&mut self) {
-        while let Some(table) = self.inner.tables.get(self.index) {
-            let table_read = table.read();
+        while let Some(table) = self.database.tables.get(self.index) {
+            let table_read = self.database.table_read(table);
             if self.filter.filter(&table_read) {
-                if let Some(state) = I::initialize(&table_read) {
-                    drop(table_read);
-                    self.indices.insert(self.index, self.states.len());
-                    self.states.push((self.index, state));
-                } else {
-                    drop(table_read);
+                match I::initialize(&table_read) {
+                    Some(state) => {
+                        drop(table_read);
+                        self.indices.insert(self.index, self.states.len());
+                        self.states.push((self.index, state));
+                    }
+                    None => drop(table_read),
                 }
             } else {
                 drop(table_read);
@@ -163,20 +210,20 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
         Some(loop {
             self.update();
             let Self {
-                inner,
+                database,
                 indices,
                 states,
                 ..
             } = &*self;
-            let slot = self.inner.slots.get(key)?;
+            let slot = self.database.keys.get(key)?;
             let (table_index, store_index) = slot.indices();
             let &state_index = match indices.get(&(table_index as usize)) {
                 Some(index) => index,
                 None => return None,
             };
             let (_, item_state) = unsafe { states.get_unchecked(state_index) };
-            let table = unsafe { inner.tables.get_unchecked(table_index as usize) };
-            let table_read = table.read();
+            let table = unsafe { database.tables.get_unchecked(table_index as usize) };
+            let table_read = database.table_read(table);
             if slot.indices() != (table_index, store_index) {
                 continue;
             }
@@ -189,191 +236,144 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
             drop(table_read);
             // It is allowed that there be interleaving of other thread operations here as long as the
             // `slot.indices` are checked each time a table lock is acquired.
-            let table_write = table.write();
+            let table_write = database.table_write(table);
             if slot.indices() != (table_index, store_index) {
                 continue;
             }
 
             let mut at_state = I::State::get(item_state, &table_write);
-            let table_read = RwLockWriteGuard::downgrade(table_write);
+            let table_read = table_write.downgrade();
             let item = unsafe { I::State::item(&mut at_state, store_index as _) };
             break with.with(item, table_read);
         })
     }
 
-    // fn iterate(
-    //     &mut self,
-    // ) -> impl Iterator<Item = (<I::State as At>::State, RwLockReadGuard<Table>)> {
-    //     from_generator(|| {
-    //         self.update();
+    #[inline]
+    fn iterate(&mut self) -> impl Iterator<Item = (<I::State as At<'a>>::State, TableRead)> {
+        from_generator(|| {
+            self.update();
 
-    //         // Try to execute the query using only read locks on tables. This should succeed unless there is contention over
-    //         // the store locks which would cause the `I::State::get` call to fail.
-    //         for (state_index, (table_index, item_state)) in self.states.iter().enumerate() {
-    //             if let Some(table) = self.inner.tables.get(*table_index) {
-    //                 let table_read = table.read();
-    //                 match I::State::try_get(item_state, &table_read) {
-    //                     Some(at_state) => yield (at_state, table_read),
-    //                     None => {
-    //                         drop(table_read);
-    //                         self.queue.push_back(state_index);
-    //                     }
-    //                 }
-    //             }
-    //         }
-
-    //         // Try again to execute the tables that previously failed to take their store locks by still using only read
-    //         // locks on tables hoping that there is no more contention.
-    //         let mut count = self.queue.len();
-    //         while let Some(state_index) = self.queue.pop_front() {
-    //             if let Some((table_index, item_state)) = self.states.get(state_index) {
-    //                 if let Some(table) = self.inner.tables.get(*table_index) {
-    //                     let table_read = table.read();
-    //                     match I::State::try_get(item_state, &table_read) {
-    //                         Some(at_state) => {
-    //                             count = self.queue.len();
-    //                             yield (at_state, table_read);
-    //                         }
-    //                         None if count == 0 => {
-    //                             drop(table_read);
-    //                             // Since no table can make progress, escalate to a write lock.
-    //                             let table_write = table.write();
-    //                             let at_state = I::State::get(item_state, &table_write);
-    //                             count = self.queue.len();
-    //                             let table_read = RwLockWriteGuard::downgrade(table_write);
-    //                             yield (at_state, table_read);
-    //                         }
-    //                         None => {
-    //                             drop(table_read);
-    //                             self.queue.push_back(state_index);
-    //                             count -= 1;
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     })
-    // }
-
-    fn each(&mut self, mut each: impl FnMut(<I::State as At>::State, &Table)) {
-        self.update();
-
-        // Try to execute the query using only read locks on tables. This should succeed unless there is contention over
-        // the store locks which would cause the `I::State::get` call to fail.
-        for (state_index, (table_index, item_state)) in self.states.iter().enumerate() {
-            if let Some(table) = self.inner.tables.get(*table_index) {
-                let table_read = table.read();
-                if let Some(at_state) = I::State::try_get(item_state, &table_read) {
-                    each(at_state, &table_read);
-                    continue;
+            // Try to execute the query using only read locks on tables. This should succeed unless there is contention over
+            // the store locks which would cause the `I::State::get` call to fail.
+            for (state_index, (table_index, item_state)) in self.states.iter().enumerate() {
+                let table = unsafe { self.database.tables.get_unchecked(*table_index) };
+                match self.database.table_try_read(table) {
+                    Some(table_read) => match I::State::try_get(item_state, &table_read) {
+                        Some(at_state) => yield (at_state, table_read),
+                        None => drop(table_read),
+                    },
+                    None => self.queue.push_back(state_index),
                 }
-                drop(table_read);
-                self.queue.push_back(state_index);
             }
-        }
 
-        // Try again to execute the tables that previously failed to take their store locks by still using only read
-        // locks on tables hoping that there is no more contention.
-        let mut count = self.queue.len();
-        while let Some(state_index) = self.queue.pop_front() {
-            if let Some((table_index, item_state)) = self.states.get(state_index) {
-                if let Some(table) = self.inner.tables.get(*table_index) {
-                    let table_read = table.read();
-                    if let Some(at_state) = I::State::try_get(item_state, &table_read) {
-                        each(at_state, &table_read);
-                        drop(table);
+            // Try again to execute the tables that previously failed to take their store locks by still using only read
+            // locks on tables hoping that there is no more contention.
+            let mut count = self.queue.len();
+            while let Some(state_index) = self.queue.pop_front() {
+                let (table_index, item_state) = unsafe { self.states.get_unchecked(state_index) };
+                let table = unsafe { self.database.tables.get_unchecked(*table_index) };
+                let table_read = self.database.table_read(table);
+                match I::State::try_get(item_state, &table_read) {
+                    Some(at_state) => {
                         count = self.queue.len();
-                        continue;
+                        yield (at_state, table_read);
                     }
-
-                    if count == 0 {
+                    None if count == 0 => {
                         drop(table_read);
+                        count = self.queue.len();
                         // Since no table can make progress, escalate to a write lock.
-                        let table_write = table.write();
+                        let table_write = self.database.table_write(table);
                         let at_state = I::State::get(item_state, &table_write);
-                        let table_read = RwLockWriteGuard::downgrade(table_write);
-                        each(at_state, &table_read);
-                        drop(table_read);
-                        count = self.queue.len();
-                        continue;
+                        let table_read = table_write.downgrade();
+                        yield (at_state, table_read);
                     }
-
-                    drop(table_read);
-                    self.queue.push_back(state_index);
-                    count -= 1;
+                    None => {
+                        drop(table_read);
+                        self.queue.push_back(state_index);
+                        count -= 1;
+                    }
                 }
             }
-        }
+        })
     }
 }
 
 impl Filter for () {
-    fn filter(&mut self, _: &Table) -> bool {
+    fn filter(&mut self, _: &TableRead) -> bool {
         true
     }
 }
 
 impl<F: Filter> Filter for Not<F> {
-    fn filter(&mut self, table: &Table) -> bool {
+    fn filter(&mut self, table: &TableRead) -> bool {
         !self.0.filter(table)
     }
 }
 
 impl<D: Datum> Filter for Has<D> {
-    fn filter(&mut self, table: &Table) -> bool {
-        table.has(TypeId::of::<D>())
+    fn filter(&mut self, table: &TableRead) -> bool {
+        table.table().has(TypeId::of::<D>())
     }
 }
 
-impl<F: FnMut(&Table) -> bool> Filter for F {
-    fn filter(&mut self, table: &Table) -> bool {
+impl<F: FnMut(&TableRead) -> bool> Filter for F {
+    fn filter(&mut self, table: &TableRead) -> bool {
         self(table)
     }
 }
 
-impl<D: Datum> Item for &D {
+unsafe impl<D: Datum> Item for &D {
     type State = Read<D>;
 
-    fn initialize(table: &Table) -> Option<Self::State> {
+    fn initialize(table: &TableRead) -> Option<Self::State> {
         let (index, _) = table
+            .inner()
             .stores()
             .iter()
             .enumerate()
             .find(|(_, store)| store.meta().identifier == TypeId::of::<D>())?;
         Some(Read(index, PhantomData))
     }
+
+    fn validate(mut context: Context) -> Result<(), Error> {
+        context.read::<D>()
+    }
 }
 
 impl<'a, D: Datum> At<'a> for Read<D> {
-    type State = (*const D, usize);
+    type State = MappedRwLockReadGuard<'a, [D]>;
     type Chunk = &'a [D];
     type Item = &'a D;
 
     #[inline]
-    fn try_get(&self, table: &Table) -> Option<Self::State> {
-        todo!()
-        // unsafe {
-        //     table
-        //         .stores()
-        //         .get_unchecked(self.0)
-        //         .try_read(.., table.count() as _)
-        // }
+    fn try_get(&self, table: &TableRead) -> Option<Self::State> {
+        let guard = unsafe {
+            table
+                .inner()
+                .stores()
+                .get_unchecked(self.0)
+                .try_read::<D, _>(.., table.inner().count() as _)
+        };
+        // TODO: Fix this...
+        unsafe { transmute(guard) }
     }
 
     #[inline]
-    fn get(&self, table: &Table) -> Self::State {
-        todo!()
-        // unsafe {
-        //     table
-        //         .stores()
-        //         .get_unchecked(self.0)
-        //         .read(.., table.count() as _)
-        // }
+    fn get(&self, table: &TableWrite) -> Self::State {
+        let guard = unsafe {
+            table
+                .inner()
+                .stores()
+                .get_unchecked(self.0)
+                .read::<D, _>(.., table.inner().count() as _)
+        };
+        // TODO: Fix this...
+        unsafe { transmute(guard) }
     }
 
     #[inline]
     unsafe fn chunk(state: &mut Self::State) -> Self::Chunk {
-        from_raw_parts(state.0, state.1)
+        &*(state as *mut Self::State)
     }
 
     #[inline]
@@ -382,49 +382,58 @@ impl<'a, D: Datum> At<'a> for Read<D> {
     }
 }
 
-impl<D: Datum> Item for &mut D {
+unsafe impl<D: Datum> Item for &mut D {
     type State = Write<D>;
 
-    fn initialize(table: &Table) -> Option<Self::State> {
+    fn initialize(table: &TableRead) -> Option<Self::State> {
         let (index, _) = table
+            .inner()
             .stores()
             .iter()
             .enumerate()
             .find(|(_, store)| store.meta().identifier == TypeId::of::<D>())?;
         Some(Write(index, PhantomData))
     }
+
+    fn validate(mut context: Context) -> Result<(), Error> {
+        context.write::<D>()
+    }
 }
 
 impl<'a, D: Datum> At<'a> for Write<D> {
-    type State = (*mut D, usize);
+    type State = MappedRwLockWriteGuard<'a, [D]>;
     type Chunk = &'a mut [D];
     type Item = &'a mut D;
 
     #[inline]
-    fn try_get(&self, table: &Table) -> Option<Self::State> {
-        todo!()
-        // unsafe {
-        //     table
-        //         .stores()
-        //         .get_unchecked(self.0)
-        //         .try_read(.., table.count() as _)
-        // }
+    fn try_get(&self, table: &TableRead) -> Option<Self::State> {
+        let guard = unsafe {
+            table
+                .inner()
+                .stores()
+                .get_unchecked(self.0)
+                .try_read::<D, _>(.., table.inner().count() as _)
+        };
+        // TODO: Fix this...
+        unsafe { transmute(guard) }
     }
 
     #[inline]
-    fn get(&self, table: &Table) -> Self::State {
-        todo!()
-        // unsafe {
-        //     table
-        //         .stores()
-        //         .get_unchecked(self.0)
-        //         .read(.., table.count() as _)
-        // }
+    fn get(&self, table: &TableWrite) -> Self::State {
+        let guard = unsafe {
+            table
+                .inner()
+                .stores()
+                .get_unchecked(self.0)
+                .read::<D, _>(.., table.inner().count() as _)
+        };
+        // TODO: Fix this...
+        unsafe { transmute(guard) }
     }
 
     #[inline]
     unsafe fn chunk(state: &mut Self::State) -> Self::Chunk {
-        from_raw_parts_mut(state.0, state.1)
+        &mut *(state as *mut Self::State)
     }
 
     #[inline]
@@ -433,11 +442,15 @@ impl<'a, D: Datum> At<'a> for Write<D> {
     }
 }
 
-impl Item for () {
+unsafe impl Item for () {
     type State = ();
 
-    fn initialize(_: &Table) -> Option<Self::State> {
+    fn initialize(_: &TableRead) -> Option<Self::State> {
         Some(())
+    }
+
+    fn validate(_: Context) -> Result<(), Error> {
+        Ok(())
     }
 }
 
@@ -447,22 +460,28 @@ impl<'a> At<'a> for () {
     type Item = ();
 
     #[inline]
-    fn try_get(&self, _: &Table) -> Option<Self::State> {
+    fn try_get(&self, _: &TableRead) -> Option<Self::State> {
         Some(())
     }
     #[inline]
-    fn get(&self, _: &Table) -> Self::State {}
+    fn get(&self, _: &TableWrite) -> Self::State {}
     #[inline]
     unsafe fn chunk(_: &mut Self::State) -> Self::Chunk {}
     #[inline]
     unsafe fn item(_: &mut Self::State, _: usize) -> Self::Item {}
 }
 
-impl<I1: Item, I2: Item> Item for (I1, I2) {
+unsafe impl<I1: Item, I2: Item> Item for (I1, I2) {
     type State = (I1::State, I2::State);
 
-    fn initialize(table: &Table) -> Option<Self::State> {
+    fn initialize(table: &TableRead) -> Option<Self::State> {
         Some((I1::initialize(table)?, I2::initialize(table)?))
+    }
+
+    fn validate(mut context: Context) -> Result<(), Error> {
+        I1::validate(context.own())?;
+        I2::validate(context.own())?;
+        Ok(())
     }
 }
 
@@ -472,11 +491,11 @@ impl<'a, A1: At<'a>, A2: At<'a>> At<'a> for (A1, A2) {
     type Item = (A1::Item, A2::Item);
 
     #[inline]
-    fn try_get(&self, table: &Table) -> Option<Self::State> {
+    fn try_get(&self, table: &TableRead) -> Option<Self::State> {
         Some((self.0.try_get(table)?, self.1.try_get(table)?))
     }
     #[inline]
-    fn get(&self, table: &Table) -> Self::State {
+    fn get(&self, table: &TableWrite) -> Self::State {
         (self.0.get(table), self.1.get(table))
     }
     #[inline]
@@ -491,12 +510,22 @@ impl<'a, A1: At<'a>, A2: At<'a>> At<'a> for (A1, A2) {
 
 impl Database {
     pub fn query<I: Item>(&self) -> Result<Query<I>, Error> {
-        // TODO: Fail when an invalid query is detected (ex: `Query<(&mut Position, &mut Position)>`).
-        todo!()
+        self.query_with(())
     }
 
     pub fn query_with<I: Item, F: Filter>(&self, filter: F) -> Result<Query<I, F>, Error> {
-        // TODO: Fail when an invalid query is detected (ex: `Query<(&mut Position, &mut Position)>`).
-        todo!()
+        I::validate(Context {
+            read: &mut HashSet::new(),
+            write: &mut HashSet::new(),
+        })?;
+        Ok(Query {
+            database: self,
+            index: 0,
+            indices: HashMap::new(),
+            states: Vec::new(),
+            queue: VecDeque::new(),
+            filter,
+            _marker: PhantomData,
+        })
     }
 }

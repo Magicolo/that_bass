@@ -6,11 +6,10 @@ use parking_lot::{
 use std::{
     any::TypeId,
     cell::UnsafeCell,
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     iter::FusedIterator,
-    ops::Deref,
     ptr::NonNull,
-    slice::{from_raw_parts, from_raw_parts_mut, Iter, SliceIndex},
+    slice::{from_raw_parts, from_raw_parts_mut, SliceIndex},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -20,6 +19,11 @@ use std::{
 pub struct Table {
     index: u32,
     types: HashSet<TypeId>,
+    pub(crate) inner: RwLock<Inner>,
+    pub(crate) defer: RwLock<VecDeque<Defer>>,
+}
+
+pub(crate) struct Inner {
     pub(crate) count: AtomicU64,
     pub(crate) keys: UnsafeCell<Vec<Key>>,
     /// Stores are ordered consistently between tables.
@@ -31,7 +35,25 @@ pub struct Store {
     data: RwLock<NonNull<()>>,
 }
 
-pub(crate) struct Tables(RwLock<()>, UnsafeCell<Vec<Arc<RwLock<Table>>>>);
+pub(crate) struct Tables {
+    /// The lock is seperated from the tables because once a table is dereferenced from the `tables` vector, it no longer
+    /// needs to have its lifetime tied to a `RwLockReadGuard`. This is safe because the addresses of tables are stable
+    /// (guaranteed by the `Arc` indirection) and no mutable references are ever given out.
+    lock: RwLock<()>,
+    tables: UnsafeCell<Vec<Arc<Table>>>,
+}
+
+pub(crate) enum Defer {
+    Add {
+        keys: Box<[Key]>,
+        row_index: u32,
+        row_count: usize,
+        initialize: Box<dyn FnMut(usize, &[Store])>,
+    },
+    Remove {
+        row_index: u32,
+    },
+}
 
 impl Store {
     pub fn new(meta: Meta, capacity: usize) -> Self {
@@ -54,42 +76,52 @@ impl Store {
     #[inline]
     pub unsafe fn copy(source: (&mut Self, usize), target: (&Self, usize), count: usize) {
         debug_assert_eq!(source.0.meta().identifier, target.0.meta().identifier);
-        (source.0.meta().copy)(
+        let &Meta { copy, .. } = source.0.meta();
+        copy(
             (*source.0.data.get_mut(), source.1),
             (*target.0.data.data_ptr(), target.1),
             count,
         );
     }
 
-    pub unsafe fn grow(&self, old_capacity: usize, new_capacity: usize) {
+    pub unsafe fn grow(&mut self, old_capacity: usize, new_capacity: usize) {
         debug_assert!(old_capacity < new_capacity);
-        let mut data_write = self.data.write();
-        let old_data = *data_write;
-        let new_data = (self.meta().allocate)(new_capacity);
-        (self.meta().copy)((old_data, 0), (new_data, 0), old_capacity);
-        (self.meta().free)(old_data, 0, old_capacity);
-        *data_write = new_data;
+        let &Meta {
+            allocate,
+            free,
+            copy,
+            ..
+        } = self.meta();
+        let data = self.data.get_mut();
+        let old_data = *data;
+        let new_data = allocate(new_capacity);
+        copy((old_data, 0), (new_data, 0), old_capacity);
+        free(old_data, 0, old_capacity);
+        *data = new_data;
     }
 
     /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the store.
     /// The ranges 'source_index..source_index + count' and 'target_index..target_index + count' must not overlap.
     #[inline]
     pub unsafe fn squash(&mut self, source_index: usize, target_index: usize, count: usize) {
+        let &Meta { copy, drop, .. } = self.meta();
         let data = *self.data.get_mut();
-        (self.meta().drop)(data, target_index, count);
-        (self.meta().copy)((data, source_index), (data, target_index), count);
+        drop(data, target_index, count);
+        copy((data, source_index), (data, target_index), count);
     }
 
     #[inline]
     pub unsafe fn drop(&mut self, index: usize, count: usize) {
+        let &Meta { drop, .. } = self.meta();
         let data = *self.data.get_mut();
-        (self.meta().drop)(data, index, count);
+        drop(data, index, count);
     }
 
     #[inline]
     pub unsafe fn free(&mut self, count: usize, capacity: usize) {
+        let &Meta { free, .. } = self.meta();
         let data = *self.data.get_mut();
-        (self.meta().free)(data, count, capacity);
+        free(data, count, capacity);
     }
 
     #[inline]
@@ -177,66 +209,54 @@ impl Store {
 
 impl Tables {
     pub fn new() -> Self {
-        Self(RwLock::new(()), Vec::new().into())
+        Self {
+            lock: RwLock::new(()),
+            tables: Vec::new().into(),
+        }
     }
 
-    pub fn iter(&self) -> impl FullIterator<Item = impl Deref<Target = Table> + '_> {
-        struct Iterate<'a>(Iter<'a, Arc<RwLock<Table>>>, RwLockReadGuard<'a, ()>);
-        impl<'a> Iterator for Iterate<'a> {
-            type Item = RwLockReadGuard<'a, Table>;
+    #[inline]
+    pub fn iter(&self) -> impl FullIterator<Item = &Table> {
+        struct Iterate<'a, I: FullIterator<Item = &'a Table>>(I, RwLockReadGuard<'a, ()>);
+        impl<'a, I: FullIterator<Item = &'a Table>> Iterator for Iterate<'a, I> {
+            type Item = &'a Table;
 
             #[inline]
             fn next(&mut self) -> Option<Self::Item> {
-                Some(self.0.next()?.read())
+                self.0.next()
             }
         }
-        impl<'a> ExactSizeIterator for Iterate<'a> {
+        impl<'a, I: FullIterator<Item = &'a Table>> ExactSizeIterator for Iterate<'a, I> {
             #[inline]
             fn len(&self) -> usize {
                 self.0.len()
             }
         }
-        impl<'a> DoubleEndedIterator for Iterate<'a> {
+        impl<'a, I: FullIterator<Item = &'a Table>> DoubleEndedIterator for Iterate<'a, I> {
             #[inline]
             fn next_back(&mut self) -> Option<Self::Item> {
-                Some(self.0.next_back()?.read())
+                self.0.next_back()
             }
         }
-        impl<'a> FusedIterator for Iterate<'a> {}
+        impl<'a, I: FullIterator<Item = &'a Table>> FusedIterator for Iterate<'a, I> {}
 
-        let read = self.0.read();
-        let tables = unsafe { &**self.1.get() };
-        Iterate(tables.iter(), read)
+        let read = self.lock.read();
+        let tables = unsafe { &**self.tables.get() };
+        Iterate(tables.iter().map(|table| &**table), read)
     }
 
     #[inline]
-    pub fn get(&self, index: usize) -> Option<&RwLock<Table>> {
-        let read = self.0.read();
-        let table = &**unsafe { &**self.1.get() }.get(index)?;
+    pub fn get(&self, index: usize) -> Option<&Table> {
+        let read = self.lock.read();
+        let table = &**unsafe { &**self.tables.get() }.get(index)?;
         drop(read);
         Some(table)
     }
 
     #[inline]
-    pub unsafe fn get_unchecked(&self, index: usize) -> &RwLock<Table> {
-        let read = self.0.read();
-        let table = &**(&**self.1.get()).get_unchecked(index);
-        drop(read);
-        table
-    }
-
-    #[inline]
-    pub fn get_shared(&self, index: usize) -> Option<Arc<RwLock<Table>>> {
-        let read = self.0.read();
-        let table = unsafe { &**self.1.get() }.get(index)?.clone();
-        drop(read);
-        Some(table)
-    }
-
-    #[inline]
-    pub unsafe fn get_shared_unchecked(&self, index: usize) -> Arc<RwLock<Table>> {
-        let read = self.0.read();
-        let table = (&**self.1.get()).get_unchecked(index).clone();
+    pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
+        let read = self.lock.read();
+        let table = &**(&**self.tables.get()).get_unchecked(index);
         drop(read);
         table
     }
@@ -247,11 +267,11 @@ impl Tables {
         metas: Vec<Meta>,
         types: HashSet<TypeId>,
         capacity: usize,
-    ) -> Arc<RwLock<Table>> {
-        let upgrade = self.0.upgradable_read();
-        let tables = unsafe { &mut *self.1.get() };
+    ) -> Arc<Table> {
+        let upgrade = self.lock.upgradable_read();
+        let tables = unsafe { &mut *self.tables.get() };
 
-        match tables.iter().find(|table| table.read().types == types) {
+        match tables.iter().find(|table| table.types == types) {
             Some(table) => table.clone(),
             None => {
                 let stores: Box<[Store]> = metas
@@ -259,13 +279,17 @@ impl Tables {
                     .map(|meta| Store::new(meta, capacity))
                     .collect();
                 let index = tables.len() as _;
-                let table = Arc::new(RwLock::new(Table {
-                    index,
+                let inner = Inner {
                     count: 0.into(),
-                    types,
                     keys: vec![Key::NULL; capacity].into(),
                     stores,
-                }));
+                };
+                let table = Arc::new(Table {
+                    index,
+                    types,
+                    inner: RwLock::new(inner),
+                    defer: RwLock::new(VecDeque::new()),
+                });
                 let write = RwLockUpgradableReadGuard::upgrade(upgrade);
                 tables.push(table.clone());
                 drop(write);
@@ -275,12 +299,30 @@ impl Tables {
     }
 }
 
+unsafe impl Send for Tables {}
+unsafe impl Sync for Tables {}
+
 impl Table {
     #[inline]
     pub const fn index(&self) -> u32 {
         self.index
     }
 
+    #[inline]
+    pub fn has(&self, identifier: TypeId) -> bool {
+        self.types.contains(&identifier)
+    }
+
+    #[inline]
+    pub(crate) fn defer(&self, defer: Defer) {
+        self.defer.write().push_back(defer);
+    }
+}
+
+unsafe impl Send for Table {}
+unsafe impl Sync for Table {}
+
+impl Inner {
     #[inline]
     pub fn count(&self) -> u32 {
         self.count.load(Ordering::Acquire) as _
@@ -292,18 +334,8 @@ impl Table {
     }
 
     #[inline]
-    pub fn has(&self, identifier: TypeId) -> bool {
-        self.types.contains(&identifier)
-    }
-
-    #[inline]
     pub fn keys(&self) -> &[Key] {
         unsafe { (&*self.keys.get()).get_unchecked(0..self.count() as usize) }
-    }
-
-    #[inline]
-    pub fn metas(&self) -> impl FullIterator<Item = &Meta> {
-        self.stores.iter().map(|store| store.meta())
     }
 
     #[inline]
@@ -311,20 +343,20 @@ impl Table {
         &self.stores
     }
 
-    pub fn grow(&mut self, capacity: u32) {
+    pub fn grow(&mut self, capacity: usize) {
         let keys = self.keys.get_mut();
         let old_capacity = keys.capacity();
-        keys.resize(capacity as _, Key::NULL);
-        let new_capacity = keys.capacity();
-        if old_capacity < new_capacity {
-            for store in self.stores.iter() {
+        if old_capacity < capacity {
+            keys.resize(capacity as _, Key::NULL);
+            let new_capacity = keys.capacity();
+            for store in self.stores.iter_mut() {
                 unsafe { store.grow(old_capacity, new_capacity) };
             }
         }
     }
 }
 
-impl Drop for Table {
+impl Drop for Inner {
     fn drop(&mut self) {
         let count = *self.count.get_mut() as u32 as usize;
         let capacity = self.keys.get_mut().len();
