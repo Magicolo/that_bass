@@ -1,10 +1,6 @@
 #![feature(generators)]
 #![feature(iter_from_generator)]
-#![feature(iter_order_by)]
-#![feature(strict_provenance)]
-#![feature(strict_provenance_atomic_ptr)]
 #![feature(type_alias_impl_trait)]
-#![feature(generic_associated_types)]
 
 pub mod create;
 pub mod database;
@@ -350,13 +346,28 @@ mod tests {
         Ok(())
     }
 
+    // #[test]
     fn boba() -> Result<(), Error> {
         let database = Database::new();
         let create = database.create()?;
-        let key = create.one(());
-        let mut query = database.query::<Key>()?;
-        let key = query.item(key).unwrap();
-        scope(|scope| create.all_n([(); 1000]));
+        let mut query = database.query::<()>()?;
+        let result = scope(|scope| {
+            let create = &create;
+            let query = &mut query;
+            let mut handles = Vec::new();
+            let mut counts = Vec::new();
+            for _ in 0..100 {
+                handles.push(scope.spawn(move || create.all_n([(); 10000])));
+                counts.push(query.items().count());
+            }
+            for handle in handles {
+                match handle.join() {
+                    Ok(_) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(counts)
+        });
         Ok(())
     }
 }

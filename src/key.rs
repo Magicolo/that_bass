@@ -1,8 +1,8 @@
 use parking_lot::RwLock;
 
 use crate::{
-    database::{TableRead, TableWrite},
     query::{At, Context, Item},
+    table::{Store, Table},
     Error,
 };
 use std::{
@@ -70,7 +70,7 @@ impl Key {
 unsafe impl Item for Key {
     type State = State;
 
-    fn initialize(_: &TableRead) -> Option<Self::State> {
+    fn initialize(_: &Table) -> Option<Self::State> {
         Some(State)
     }
 
@@ -85,13 +85,11 @@ impl<'a> At<'a> for State {
     type Item = Key;
 
     #[inline]
-    fn try_get(&self, table: &TableRead) -> Option<Self::State> {
-        let keys = table.inner().keys();
-        Some((keys.as_ptr(), keys.len()))
+    fn try_get(&self, keys: &[Key], stores: &[Store]) -> Option<Self::State> {
+        Some(self.get(keys, stores))
     }
     #[inline]
-    fn get(&self, table: &TableWrite) -> Self::State {
-        let keys = table.inner().keys();
+    fn get(&self, keys: &[Key], _: &[Store]) -> Self::State {
         (keys.as_ptr(), keys.len())
     }
     #[inline]
@@ -226,6 +224,7 @@ impl Slot {
 
     #[inline]
     pub fn initialize(&self, generation: u32, table: u32, store: u32) {
+        debug_assert!(generation < u32::MAX);
         self.generation.store(generation, Release);
         self.update(table, store);
     }

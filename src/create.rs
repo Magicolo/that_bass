@@ -119,6 +119,7 @@ impl<T: Template> Create<'_, T> {
     where
         T: Clone,
     {
+        // TODO: Do not clone the last template.
         self.all_n([(); N].map(|_| template.clone()))
     }
 
@@ -148,6 +149,7 @@ impl<T: Template> Create<'_, T> {
     where
         T: Clone,
     {
+        // TODO: Do not clone the last template.
         self.all((0..count).map(|_| template.clone()))
     }
 

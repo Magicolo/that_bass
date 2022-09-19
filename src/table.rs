@@ -6,8 +6,7 @@ use parking_lot::{
 use std::{
     any::TypeId,
     cell::UnsafeCell,
-    collections::{HashSet, VecDeque},
-    iter::FusedIterator,
+    collections::{HashMap, HashSet, VecDeque},
     ptr::NonNull,
     slice::{from_raw_parts, from_raw_parts_mut, SliceIndex},
     sync::{
@@ -18,9 +17,9 @@ use std::{
 
 pub struct Table {
     index: u32,
-    types: HashSet<TypeId>,
-    pub(crate) inner: RwLock<Inner>,
+    indices: HashMap<TypeId, usize>,
     pub(crate) defer: RwLock<VecDeque<Defer>>,
+    pub(crate) inner: RwLock<Inner>,
 }
 
 pub(crate) struct Inner {
@@ -216,36 +215,6 @@ impl Tables {
     }
 
     #[inline]
-    pub fn iter(&self) -> impl FullIterator<Item = &Table> {
-        struct Iterate<'a, I: FullIterator<Item = &'a Table>>(I, RwLockReadGuard<'a, ()>);
-        impl<'a, I: FullIterator<Item = &'a Table>> Iterator for Iterate<'a, I> {
-            type Item = &'a Table;
-
-            #[inline]
-            fn next(&mut self) -> Option<Self::Item> {
-                self.0.next()
-            }
-        }
-        impl<'a, I: FullIterator<Item = &'a Table>> ExactSizeIterator for Iterate<'a, I> {
-            #[inline]
-            fn len(&self) -> usize {
-                self.0.len()
-            }
-        }
-        impl<'a, I: FullIterator<Item = &'a Table>> DoubleEndedIterator for Iterate<'a, I> {
-            #[inline]
-            fn next_back(&mut self) -> Option<Self::Item> {
-                self.0.next_back()
-            }
-        }
-        impl<'a, I: FullIterator<Item = &'a Table>> FusedIterator for Iterate<'a, I> {}
-
-        let read = self.lock.read();
-        let tables = unsafe { &**self.tables.get() };
-        Iterate(tables.iter().map(|table| &**table), read)
-    }
-
-    #[inline]
     pub fn get(&self, index: usize) -> Option<&Table> {
         let read = self.lock.read();
         let table = &**unsafe { &**self.tables.get() }.get(index)?;
@@ -256,7 +225,35 @@ impl Tables {
     #[inline]
     pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
         let read = self.lock.read();
-        let table = &**(&**self.tables.get()).get_unchecked(index);
+        let tables = &**self.tables.get();
+        debug_assert!(index < tables.len());
+        let table = &**tables.get_unchecked(index);
+        drop(read);
+        table
+    }
+
+    #[inline]
+    pub fn get_shared(&self, index: usize) -> Option<Arc<Table>> {
+        let read = self.lock.read();
+        let table = unsafe { &**self.tables.get() }.get(index)?.clone();
+        drop(read);
+        Some(table)
+    }
+
+    #[inline]
+    pub unsafe fn get_shared_unchecked(&self, index: usize) -> Arc<Table> {
+        let read = self.lock.read();
+        let tables = &**self.tables.get();
+        debug_assert!(index < tables.len());
+        let table = tables.get_unchecked(index).clone();
+        drop(read);
+        table
+    }
+
+    pub fn find(&self, types: &HashSet<TypeId>) -> Option<Arc<Table>> {
+        let read = self.lock.read();
+        // SAFETY: A read lock is held.
+        let table = unsafe { self.find_unlocked(types) };
         drop(read);
         table
     }
@@ -269,11 +266,18 @@ impl Tables {
         capacity: usize,
     ) -> Arc<Table> {
         let upgrade = self.lock.upgradable_read();
-        let tables = unsafe { &mut *self.tables.get() };
-
-        match tables.iter().find(|table| table.types == types) {
+        // SAFETY: An upgrade lock is held.
+        match unsafe { self.find_unlocked(&types) } {
             Some(table) => table.clone(),
             None => {
+                // SAFETY: `tables` can be read since an upgrade lock is held. The lock will need to be upgraded
+                // before any mutation to `tables`.
+                let tables = unsafe { &mut *self.tables.get() };
+                let indices = metas
+                    .iter()
+                    .enumerate()
+                    .map(|(index, meta)| (meta.identifier(), index))
+                    .collect();
                 let stores: Box<[Store]> = metas
                     .into_iter()
                     .map(|meta| Store::new(meta, capacity))
@@ -281,26 +285,59 @@ impl Tables {
                 let index = tables.len() as _;
                 let inner = Inner {
                     count: 0.into(),
-                    keys: vec![Key::NULL; capacity].into(),
+                    keys: Vec::with_capacity(capacity).into(),
                     stores,
                 };
                 let table = Arc::new(Table {
                     index,
-                    types,
+                    indices,
                     inner: RwLock::new(inner),
                     defer: RwLock::new(VecDeque::new()),
                 });
                 let write = RwLockUpgradableReadGuard::upgrade(upgrade);
+                // SAFETY: The lock has been upgraded before `tables` is mutated, which satisfy the requirement above.
                 tables.push(table.clone());
                 drop(write);
                 table
             }
         }
     }
+
+    /// At least a read lock must be held for the duration of this call.
+    unsafe fn find_unlocked(&self, types: &HashSet<TypeId>) -> Option<Arc<Table>> {
+        // SAFETY: This method's unsafe contract requires that a lock be held.
+        let tables = unsafe { &**self.tables.get() };
+        for table in tables {
+            if table.indices.len() == types.len()
+                && table
+                    .indices
+                    .keys()
+                    .all(|identifier| types.contains(identifier))
+            {
+                return Some(table.clone());
+            }
+        }
+        None
+    }
 }
 
 unsafe impl Send for Tables {}
 unsafe impl Sync for Tables {}
+
+impl<'a> IntoIterator for &'a Tables {
+    type Item = &'a Table;
+    type IntoIter = impl FullIterator<Item = Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let read = self.lock.read();
+        let tables = unsafe { &**self.tables.get() };
+        tables.iter().map(move |table| {
+            // Keep the read guard alive.
+            let _ = &read;
+            &**table
+        })
+    }
+}
 
 impl Table {
     #[inline]
@@ -310,7 +347,12 @@ impl Table {
 
     #[inline]
     pub fn has(&self, identifier: TypeId) -> bool {
-        self.types.contains(&identifier)
+        self.indices.contains_key(&identifier)
+    }
+
+    #[inline]
+    pub fn store(&self, identifier: TypeId) -> Option<usize> {
+        self.indices.get(&identifier).copied()
     }
 
     #[inline]
@@ -330,25 +372,32 @@ impl Inner {
 
     #[inline]
     pub fn capacity(&self) -> usize {
-        unsafe { &*self.keys.get() }.capacity()
+        unsafe { &*self.keys.get() }.len()
     }
 
     #[inline]
     pub fn keys(&self) -> &[Key] {
-        unsafe { (&*self.keys.get()).get_unchecked(0..self.count() as usize) }
+        let count = self.count() as usize;
+        unsafe {
+            let keys = &*self.keys.get();
+            debug_assert!(count <= keys.len());
+            keys.get_unchecked(..count)
+        }
     }
 
     #[inline]
-    pub const fn stores(&self) -> &[Store] {
+    pub fn stores(&self) -> &[Store] {
         &self.stores
     }
 
     pub fn grow(&mut self, capacity: usize) {
         let keys = self.keys.get_mut();
-        let old_capacity = keys.capacity();
-        if old_capacity < capacity {
-            keys.resize(capacity as _, Key::NULL);
-            let new_capacity = keys.capacity();
+        if keys.len() < capacity {
+            let old_capacity = keys.len();
+            keys.resize(capacity, Key::NULL);
+            keys.resize(keys.capacity(), Key::NULL);
+            debug_assert_eq!(keys.len(), keys.capacity());
+            let new_capacity = keys.len();
             for store in self.stores.iter_mut() {
                 unsafe { store.grow(old_capacity, new_capacity) };
             }
@@ -358,8 +407,9 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        let count = *self.count.get_mut() as u32 as usize;
-        let capacity = self.keys.get_mut().len();
+        let count = self.count() as usize;
+        let capacity = self.capacity();
+        debug_assert!(count <= capacity);
         for store in self.stores.iter_mut() {
             unsafe { store.free(count, capacity) };
         }

@@ -5,7 +5,7 @@ use crate::{
 };
 use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
-    mem::{forget, replace, ManuallyDrop},
+    mem::{replace, ManuallyDrop},
     sync::atomic::Ordering::*,
 };
 
@@ -40,8 +40,9 @@ impl Database {
         }
     }
 
+    #[inline]
     pub fn tables(&self) -> impl FullIterator<Item = &Table> {
-        self.tables.iter()
+        self.tables.into_iter()
     }
 
     pub(crate) fn add_to_table<S, D: 'static>(
@@ -277,7 +278,7 @@ impl Database {
             let count = table_upgrade.inner().count.fetch_add(add, AcqRel);
             Self::decompose_count(count)
         };
-        let row_index = count + begun as u32;
+        let row_index = count + begun as u32 + ended as u32;
         let row_count = row_index as usize + reserve as usize;
 
         // There can not be more than `u32::MAX` keys at a given time.
@@ -294,7 +295,7 @@ impl Database {
                     return Err((row_index, row_count));
                 }
             }
-        } else if begun >= (u16::MAX >> 2) || ended >= (u16::MAX >> 2) {
+        } else if begun >= (u16::MAX >> 1) || ended >= (u16::MAX >> 1) {
             // A huge stream of concurrent `create` operations has been detected; try to force the resolution of that
             // table's `count` before `begun` or `ended` overflows. This should essentially never happen.
             match table_upgrade.try_upgrade() {
@@ -421,14 +422,24 @@ impl<'a> TableRead<'a> {
     }
 
     #[inline]
+    pub fn keys(&self) -> &[Key] {
+        self.inner().keys()
+    }
+
+    #[inline]
+    pub fn stores(&self) -> &[Store] {
+        self.inner().stores()
+    }
+
+    #[inline]
     pub(crate) fn inner(&self) -> &table::Inner {
         unsafe { self.2.as_deref().unwrap_unchecked() }
     }
 
     #[inline]
-    pub(crate) fn forget(mut self) {
-        drop(unsafe { self.2.take().unwrap_unchecked() });
-        forget(self);
+    pub(crate) fn forget(self) {
+        let mut guard = ManuallyDrop::new(self);
+        drop(guard.2.take());
     }
 }
 
@@ -450,6 +461,16 @@ impl<'a> TableUpgrade<'a> {
     #[inline]
     pub const fn table(&self) -> &'a Table {
         self.1
+    }
+
+    #[inline]
+    pub fn keys(&self) -> &[Key] {
+        self.inner().keys()
+    }
+
+    #[inline]
+    pub fn stores(&self) -> &[Store] {
+        self.inner().stores()
     }
 
     #[inline]
@@ -487,9 +508,9 @@ impl<'a> TableUpgrade<'a> {
     }
 
     #[inline]
-    pub(crate) fn forget(mut self) {
-        drop(unsafe { self.2.take().unwrap_unchecked() });
-        forget(self);
+    pub(crate) fn forget(self) {
+        let mut guard = ManuallyDrop::new(self);
+        drop(guard.2.take());
     }
 }
 
@@ -513,6 +534,16 @@ impl<'a> TableWrite<'a> {
     #[inline]
     pub const fn table(&self) -> &'a Table {
         self.1
+    }
+
+    #[inline]
+    pub fn keys(&self) -> &[Key] {
+        self.inner().keys()
+    }
+
+    #[inline]
+    pub fn stores(&self) -> &[Store] {
+        self.inner().stores()
     }
 
     #[inline]
@@ -560,9 +591,9 @@ impl<'a> TableWrite<'a> {
     }
 
     #[inline]
-    pub(crate) fn forget(mut self) {
-        drop(unsafe { self.2.take().unwrap_unchecked() });
-        forget(self);
+    pub(crate) fn forget(self) {
+        let mut guard = ManuallyDrop::new(self);
+        drop(guard.2.take());
     }
 }
 
@@ -574,7 +605,7 @@ impl<'a> Drop for TableRead<'a> {
             None => true,
             _ => false,
         } {
-            drop(unsafe { self.2.take().unwrap_unchecked() });
+            drop(self.2.take());
             self.0.table_try_write(self.1);
         }
     }
@@ -588,9 +619,10 @@ impl<'a> Drop for TableUpgrade<'a> {
             None => true,
             _ => false,
         } {
-            let upgrade = unsafe { self.2.take().unwrap_unchecked() };
-            if let Ok(write) = RwLockUpgradableReadGuard::try_upgrade(upgrade) {
-                TableWrite::new(self.0, self.1, write);
+            if let Some(upgrade) = self.2.take() {
+                if let Ok(write) = RwLockUpgradableReadGuard::try_upgrade(upgrade) {
+                    TableWrite::new(self.0, self.1, write);
+                }
             }
         }
     }
