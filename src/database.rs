@@ -1,5 +1,6 @@
 use crate::{
     key::{Key, Keys},
+    resources::Resources,
     table::{self, Defer, Store, Table, Tables},
     utility::FullIterator,
 };
@@ -12,6 +13,7 @@ use std::{
 pub struct Database {
     pub(crate) keys: Keys,
     pub(crate) tables: Tables,
+    pub(crate) resources: Resources,
 }
 
 pub struct TableRead<'a>(
@@ -37,6 +39,7 @@ impl Database {
         Self {
             keys: Keys::new(),
             tables: Tables::new(),
+            resources: Resources::new(),
         }
     }
 
@@ -349,7 +352,7 @@ impl Database {
                     Some(Self::recompose_count(
                         0,
                         0,
-                        count + ended as u32 + reserve as u32,
+                        count + begun as u32 + ended as u32,
                     ))
                 } else if begun > reserve {
                     Some(Self::recompose_count(

@@ -4,7 +4,7 @@ use crate::{
     table::{Store, Table},
     Datum, Error, Meta,
 };
-use std::{collections::HashSet, marker::PhantomData, sync::Arc};
+use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
 
 pub unsafe trait Template: 'static {
     type State;
@@ -33,7 +33,7 @@ impl Database {
         let mut metas = Vec::new();
         let context = Context { metas: &mut metas };
         let state = Arc::new(T::initialize(context));
-        let mut types = HashSet::new();
+        let mut types = BTreeSet::new();
         if metas.iter().all(|meta| types.insert(meta.identifier)) {
             metas.sort_unstable_by_key(|meta| meta.identifier);
             let table = self.tables.find_or_add(metas, types, 0);

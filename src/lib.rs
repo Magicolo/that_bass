@@ -1,12 +1,20 @@
 #![feature(generators)]
 #![feature(iter_from_generator)]
 #![feature(type_alias_impl_trait)]
+#![feature(downcast_unchecked)]
+#![feature(strict_provenance)]
+#![feature(strict_provenance_atomic_ptr)]
+#![feature(maybe_uninit_uninit_array)]
+#![feature(auto_traits)]
+#![feature(negative_impls)]
+#![feature(generic_associated_types)]
 
 pub mod create;
 pub mod database;
 pub mod destroy;
 pub mod key;
 pub mod query;
+pub mod resources;
 pub mod table;
 mod utility;
 /*
@@ -25,6 +33,9 @@ COHERENCE RULES:
 
 TODO: There is no need to take a `Table` lock when querying as long as the store locks are always taken from left to right.
 TODO: Implement drop for `Inner` and `Table`.
+TODO: Allow creating with a struct with a `#[derive(Template)]`. All members will need to implement `Template`.
+TODO: Allow querying with a struct or enum with a `#[derive(Item)]`. All members will need to implement `Item`.
+TODO: Allow filtering with a struct or enum with a `#[derive(Filter)]`. All members will need to implement `Filter`.
 
 - `Defer<Create>` can do most of the work of `Create` without making the changes observable.
     - Only initializing the slots and resolving the table count need to be deferred.
@@ -132,6 +143,7 @@ mod tests {
 
     struct A;
     struct B;
+    #[derive(Debug)]
     struct C(usize);
     impl Datum for A {}
     impl Datum for B {}
@@ -327,6 +339,17 @@ mod tests {
     }
 
     #[test]
+    fn query_with_false_is_always_empty() -> Result<(), Error> {
+        let database = Database::new();
+        let mut query = database.query_with::<(), _>(false)?;
+        assert!(query.items().next().is_none());
+        let key = database.create()?.one(());
+        assert!(query.items().next().is_none());
+        assert!(query.item(key).is_none());
+        Ok(())
+    }
+
+    #[test]
     fn query_reads_same_datum_as_create_one() -> Result<(), Error> {
         let database = Database::new();
         let key = database.create()?.one(C(1));
@@ -343,6 +366,41 @@ mod tests {
         let mut query2 = database.query::<&mut C>()?;
         query2.item(key).unwrap().0 += 1;
         assert_eq!(query1.item(key).unwrap().0, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn query1_item_nested_in_query2_items_deadlocks() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(C(1));
+        let mut query1 = database.query::<&mut C>()?;
+        let mut query2 = database.query::<&mut C>()?;
+
+        // TODO: Remove iterators from `Query` and only expose `FnMut/FnOnce` apis such that they can be required
+        // to implement an auto trait `Nest`
+        for _item1 in query1.items() {
+            let _item2 = query2.item(key);
+            dbg!(_item1.0);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn query1_items_nested_in_query2_items_deadlocks() -> Result<(), Error> {
+        let database = Database::new();
+        database.create()?.one(C(1));
+        let mut query1 = database.query::<&mut C>()?;
+        let mut query2 = database.query::<&mut C>()?;
+
+        // TODO: Remove iterators from `Query` and only expose `FnMut/FnOnce` apis such that they can be required
+        // to implement an auto trait `Nest`
+        for _item1 in query1.items() {
+            for _item2 in query2.items() {
+                dbg!(_item1.0, _item2.0);
+            }
+        }
+
         Ok(())
     }
 
@@ -369,5 +427,137 @@ mod tests {
             Ok(counts)
         });
         Ok(())
+    }
+}
+
+mod push_vec {
+    use std::{
+        mem::{forget, MaybeUninit},
+        ptr::{copy_nonoverlapping, null_mut},
+        sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::*},
+    };
+
+    const SHIFT: usize = 8;
+    const CHUNK: usize = 1 << SHIFT;
+    const MASK: u32 = (CHUNK - 1) as u32;
+
+    pub struct PushVec<T> {
+        count: AtomicU64,
+        uses: AtomicUsize,
+        chunks: AtomicPtr<Box<[MaybeUninit<T>; CHUNK]>>,
+        pending: AtomicPtr<Box<[MaybeUninit<T>; CHUNK]>>,
+    }
+
+    impl<T> PushVec<T> {
+        pub fn get(&self, index: u32) -> Option<&T> {
+            let (count, _, _) = decompose_count(self.count.load(Acquire));
+            if index >= count as _ {
+                return None;
+            }
+
+            let (chunk, item) = decompose_index(index);
+            let (count, _) = decompose_index(count);
+            self.increment_use(count - 1);
+            let chunks = self.chunks.load(Acquire);
+            let chunk = unsafe { &**chunks.add(chunk as usize) };
+            self.decrement_use(count - 1);
+            Some(unsafe { chunk.get_unchecked(item as usize).assume_init_ref() })
+        }
+
+        pub fn push(&self, item: T) {
+            let (mut count, ended, begun) = decompose_count(self.count.fetch_add(1, AcqRel));
+            let index = count + ended as u32 + begun as u32;
+            let (mut old_count, _) = decompose_index(count);
+            let new_count = decompose_index(index);
+            self.increment_use(old_count);
+            let mut old_chunks = self.chunks.load(Acquire);
+
+            debug_assert_eq!(new_count.0 - old_count, 1);
+            if old_count < new_count.0 {
+                // TODO: Re-read the count here? In a loop?
+                let new_chunks = {
+                    let mut chunks = Vec::with_capacity(new_count.0 as usize);
+                    let new_chunks = chunks.as_mut_ptr();
+                    unsafe { copy_nonoverlapping(old_chunks, new_chunks, old_count as usize) };
+                    forget(chunks);
+                    new_chunks
+                };
+
+                match self
+                    .chunks
+                    .compare_exchange(old_chunks, new_chunks, AcqRel, Acquire)
+                {
+                    Ok(chunks) => {
+                        let chunk = Box::new([(); CHUNK].map(|_| MaybeUninit::<T>::uninit()));
+                        unsafe { new_chunks.add(old_count as usize).write(chunk) };
+                        // It should be extremely unlikely that this call returns `true`.
+                        self.try_free(old_count, old_chunks);
+                        old_chunks = chunks;
+                    }
+                    Err(chunks) => {
+                        // Another thread won the race; free this allocation.
+                        drop(unsafe { Vec::from_raw_parts(new_chunks, 0, new_count.0 as usize) });
+                        old_chunks = chunks;
+                    }
+                }
+                (count, _, _) = decompose_count(self.count.load(Acquire));
+                (old_count, _) = decompose_index(count);
+            }
+
+            let chunk = unsafe { &mut **old_chunks.add(new_count.0 as usize) };
+            self.decrement_use(old_count - 1);
+            let item = MaybeUninit::new(item);
+            unsafe { chunk.as_mut_ptr().add(new_count.1 as usize).write(item) };
+            let result = self.count.fetch_update(AcqRel, Acquire, |count| {
+                let (count, ended, begun) = decompose_count(count);
+                Some(if begun == 1 {
+                    recompose_count(count + ended as u32 + begun as u32, 0, 0)
+                } else {
+                    debug_assert!(begun > 1);
+                    recompose_count(count, ended + 1, begun - 1)
+                })
+            });
+            debug_assert!(result.is_ok());
+        }
+
+        #[inline]
+        fn increment_use(&self, count: u32) {
+            if self.uses.fetch_add(1, Relaxed) == 0 {
+                self.try_free(count, null_mut());
+            }
+        }
+
+        #[inline]
+        fn decrement_use(&self, count: u32) {
+            if self.uses.fetch_sub(1, Relaxed) == 1 {
+                self.try_free(count, null_mut());
+            }
+        }
+
+        #[inline]
+        fn try_free(&self, count: u32, swap: *mut Box<[MaybeUninit<T>; CHUNK]>) -> bool {
+            let pending = self.pending.swap(swap, AcqRel);
+            if pending.is_null() {
+                false
+            } else {
+                drop(unsafe { Vec::from_raw_parts(pending, 0, count as usize) });
+                true
+            }
+        }
+    }
+
+    #[inline]
+    const fn decompose_index(index: u32) -> (u32, u32) {
+        (index >> SHIFT, index & MASK)
+    }
+
+    #[inline]
+    const fn recompose_count(count: u32, ended: u16, begun: u16) -> u64 {
+        (count as u64) << 32 | (ended as u64) << 16 | (begun as u64)
+    }
+
+    #[inline]
+    const fn decompose_count(count: u64) -> (u32, u16, u16) {
+        ((count >> 32) as u32, (count >> 16) as u16, count as u16)
     }
 }

@@ -1,7 +1,7 @@
 use parking_lot::RwLock;
 
 use crate::{
-    query::{At, Context, Item},
+    query::{Context, Item, Lock},
     table::{Store, Table},
     Error,
 };
@@ -79,26 +79,26 @@ unsafe impl Item for Key {
     }
 }
 
-impl<'a> At<'a> for State {
-    type State = (*const Key, usize);
+impl<'a> Lock<'a> for State {
+    type Guard = &'a [Key];
     type Chunk = &'a [Key];
     type Item = Key;
 
     #[inline]
-    fn try_get(&self, keys: &[Key], stores: &[Store]) -> Option<Self::State> {
-        Some(self.get(keys, stores))
+    fn try_lock(&self, keys: &[Key], stores: &[Store]) -> Option<Self::Guard> {
+        Some(self.lock(keys, stores))
     }
     #[inline]
-    fn get(&self, keys: &[Key], _: &[Store]) -> Self::State {
-        (keys.as_ptr(), keys.len())
+    fn lock(&self, keys: &[Key], _: &[Store]) -> Self::Guard {
+        unsafe { from_raw_parts(keys.as_ptr(), keys.len()) }
     }
     #[inline]
-    unsafe fn chunk(state: &mut Self::State) -> Self::Chunk {
-        from_raw_parts(state.0, state.1)
+    unsafe fn chunk(guard: &mut Self::Guard) -> Self::Chunk {
+        guard
     }
     #[inline]
-    unsafe fn item(state: &mut Self::State, index: usize) -> Self::Item {
-        *Self::chunk(state).get_unchecked(index)
+    unsafe fn item(guard: &mut Self::Guard, index: usize) -> Self::Item {
+        *guard.get_unchecked(index)
     }
 }
 

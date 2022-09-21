@@ -6,7 +6,7 @@ use parking_lot::{
 use std::{
     any::TypeId,
     cell::UnsafeCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ptr::NonNull,
     slice::{from_raw_parts, from_raw_parts_mut, SliceIndex},
     sync::{
@@ -38,7 +38,7 @@ pub(crate) struct Tables {
     /// The lock is seperated from the tables because once a table is dereferenced from the `tables` vector, it no longer
     /// needs to have its lifetime tied to a `RwLockReadGuard`. This is safe because the addresses of tables are stable
     /// (guaranteed by the `Arc` indirection) and no mutable references are ever given out.
-    lock: RwLock<()>,
+    indices: RwLock<BTreeMap<BTreeSet<TypeId>, usize>>,
     tables: UnsafeCell<Vec<Arc<Table>>>,
 }
 
@@ -209,78 +209,79 @@ impl Store {
 impl Tables {
     pub fn new() -> Self {
         Self {
-            lock: RwLock::new(()),
+            indices: RwLock::new(BTreeMap::new()),
             tables: Vec::new().into(),
         }
     }
 
     #[inline]
     pub fn get(&self, index: usize) -> Option<&Table> {
-        let read = self.lock.read();
+        let indices_read = self.indices.read();
         let table = &**unsafe { &**self.tables.get() }.get(index)?;
-        drop(read);
+        drop(indices_read);
         Some(table)
     }
 
     #[inline]
     pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
-        let read = self.lock.read();
+        let indices_read = self.indices.read();
         let tables = &**self.tables.get();
         debug_assert!(index < tables.len());
         let table = &**tables.get_unchecked(index);
-        drop(read);
+        drop(indices_read);
         table
     }
 
     #[inline]
     pub fn get_shared(&self, index: usize) -> Option<Arc<Table>> {
-        let read = self.lock.read();
+        let indices_read = self.indices.read();
         let table = unsafe { &**self.tables.get() }.get(index)?.clone();
-        drop(read);
+        drop(indices_read);
         Some(table)
     }
 
     #[inline]
     pub unsafe fn get_shared_unchecked(&self, index: usize) -> Arc<Table> {
-        let read = self.lock.read();
+        let indices_read = self.indices.read();
         let tables = &**self.tables.get();
         debug_assert!(index < tables.len());
         let table = tables.get_unchecked(index).clone();
-        drop(read);
+        drop(indices_read);
         table
     }
 
-    pub fn find(&self, types: &HashSet<TypeId>) -> Option<Arc<Table>> {
-        let read = self.lock.read();
+    pub fn find(&self, types: &BTreeSet<TypeId>) -> Option<Arc<Table>> {
+        let indices_read = self.indices.read();
+        let &index = indices_read.get(types)?;
         // SAFETY: A read lock is held.
-        let table = unsafe { self.find_unlocked(types) };
-        drop(read);
-        table
+        let table = unsafe { (&*self.tables.get()).get_unchecked(index) }.clone();
+        drop(indices_read);
+        Some(table)
     }
 
     #[inline]
     pub fn find_or_add(
         &self,
-        metas: Vec<Meta>,
-        types: HashSet<TypeId>,
+        metas: impl IntoIterator<Item = Meta>,
+        types: BTreeSet<TypeId>,
         capacity: usize,
     ) -> Arc<Table> {
-        let upgrade = self.lock.upgradable_read();
+        let indices_upgrade = self.indices.upgradable_read();
         // SAFETY: An upgrade lock is held.
-        match unsafe { self.find_unlocked(&types) } {
-            Some(table) => table.clone(),
+        match indices_upgrade.get(&types) {
+            Some(&index) => unsafe { (&*self.tables.get()).get_unchecked(index) }.clone(),
             None => {
                 // SAFETY: `tables` can be read since an upgrade lock is held. The lock will need to be upgraded
                 // before any mutation to `tables`.
                 let tables = unsafe { &mut *self.tables.get() };
-                let indices = metas
-                    .iter()
-                    .enumerate()
-                    .map(|(index, meta)| (meta.identifier(), index))
-                    .collect();
                 let stores: Box<[Store]> = metas
                     .into_iter()
                     .map(|meta| Store::new(meta, capacity))
+                    .collect();
+                let indices = stores
+                    .iter()
+                    .enumerate()
+                    .map(|(index, store)| (store.meta().identifier(), index))
                     .collect();
                 let index = tables.len() as _;
                 let inner = Inner {
@@ -294,30 +295,14 @@ impl Tables {
                     inner: RwLock::new(inner),
                     defer: RwLock::new(VecDeque::new()),
                 });
-                let write = RwLockUpgradableReadGuard::upgrade(upgrade);
+                let mut indices_write = RwLockUpgradableReadGuard::upgrade(indices_upgrade);
+                indices_write.insert(types, tables.len());
                 // SAFETY: The lock has been upgraded before `tables` is mutated, which satisfy the requirement above.
                 tables.push(table.clone());
-                drop(write);
+                drop(indices_write);
                 table
             }
         }
-    }
-
-    /// At least a read lock must be held for the duration of this call.
-    unsafe fn find_unlocked(&self, types: &HashSet<TypeId>) -> Option<Arc<Table>> {
-        // SAFETY: This method's unsafe contract requires that a lock be held.
-        let tables = unsafe { &**self.tables.get() };
-        for table in tables {
-            if table.indices.len() == types.len()
-                && table
-                    .indices
-                    .keys()
-                    .all(|identifier| types.contains(identifier))
-            {
-                return Some(table.clone());
-            }
-        }
-        None
     }
 }
 
@@ -329,7 +314,7 @@ impl<'a> IntoIterator for &'a Tables {
     type IntoIter = impl FullIterator<Item = Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
-        let read = self.lock.read();
+        let read = self.indices.read();
         let tables = unsafe { &**self.tables.get() };
         tables.iter().map(move |table| {
             // Keep the read guard alive.
