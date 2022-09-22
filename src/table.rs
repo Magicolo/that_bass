@@ -341,6 +341,11 @@ impl Table {
     }
 
     #[inline]
+    pub fn stores(&self) -> usize {
+        self.indices.len()
+    }
+
+    #[inline]
     pub(crate) fn defer(&self, defer: Defer) {
         self.defer.write().push_back(defer);
     }

@@ -1,18 +1,13 @@
 #![feature(generators)]
 #![feature(iter_from_generator)]
 #![feature(type_alias_impl_trait)]
-#![feature(downcast_unchecked)]
-#![feature(strict_provenance)]
-#![feature(strict_provenance_atomic_ptr)]
-#![feature(maybe_uninit_uninit_array)]
-#![feature(auto_traits)]
-#![feature(negative_impls)]
-#![feature(generic_associated_types)]
 
+pub mod bits;
 pub mod create;
 pub mod database;
 pub mod destroy;
 pub mod key;
+pub mod or;
 pub mod query;
 pub mod resources;
 pub mod table;
@@ -32,6 +27,14 @@ COHERENCE RULES:
 - `Create` -> `Destroy`:
 
 TODO: There is no need to take a `Table` lock when querying as long as the store locks are always taken from left to right.
+    - By declaring used metas in `Item` it should be possible to pass the `Store`.
+    - The `Lock` might need specialized methods
+        `fn read_lock() -> Self::ReadGuard`
+        `fn read_chunk() -> Self::ReadChunk`
+        `fn read_item() -> Self::ReadItem`
+        `fn write_lock() -> Self::WriteGuard`
+        `fn write_chunk() -> Self::WriteChunk`
+        `fn write_item() -> Self::WriteItem`
 TODO: Implement drop for `Inner` and `Table`.
 TODO: Allow creating with a struct with a `#[derive(Template)]`. All members will need to implement `Template`.
 TODO: Allow querying with a struct or enum with a `#[derive(Item)]`. All members will need to implement `Item`.
@@ -65,6 +68,10 @@ pub enum Error {
     DuplicateMeta,
     ReadWriteConflict,
     WriteWriteConflict,
+    WouldDeadlock,
+    InvalidKey,
+    WrongGeneration,
+    KeyNotInQuery,
 }
 
 pub struct Meta {
@@ -143,7 +150,7 @@ mod tests {
 
     struct A;
     struct B;
-    #[derive(Debug)]
+    #[derive(Debug, Clone, Copy)]
     struct C(usize);
     impl Datum for A {}
     impl Datum for B {}
@@ -261,17 +268,17 @@ mod tests {
         let mut query1 = database.query::<()>()?;
         let mut query2 = database.query::<()>()?;
         {
-            let guard = query1.item(key).unwrap();
+            let guard = query1.item(key)?;
             assert!(database.destroy().one(key));
             // `items` will have the destroyed key.
             assert!(query2.items().next().is_some());
             // `item(key)` will not.
-            assert!(query2.item(key).is_none());
+            assert!(query2.item(key).is_err());
             drop(guard);
         }
-        assert!(query1.item(key).is_none());
+        assert_eq!(query1.item(key).err(), Some(Error::InvalidKey));
         assert!(query2.items().next().is_none());
-        assert!(query2.item(key).is_none());
+        assert_eq!(query2.item(key).err(), Some(Error::InvalidKey));
         Ok(())
     }
 
@@ -280,7 +287,7 @@ mod tests {
         let database = Database::new();
         let key = database.create()?.one(());
         let mut query = database.query::<()>()?;
-        assert!(query.item(key).is_some());
+        assert!(query.item(key).is_ok());
         Ok(())
     }
 
@@ -290,7 +297,7 @@ mod tests {
         let key = database.create()?.one(());
         let mut query = database.query::<()>()?;
         database.destroy().one(key);
-        assert!(query.item(key).is_none());
+        assert_eq!(query.item(key).err(), Some(Error::InvalidKey));
         Ok(())
     }
 
@@ -299,7 +306,7 @@ mod tests {
         let database = Database::new();
         let key = database.create()?.all_n([(); 1000]);
         let mut query = database.query::<()>()?;
-        assert!(key.into_iter().all(|key| query.item(key).is_some()));
+        assert!(key.into_iter().all(|key| query.item(key).is_ok()));
         Ok(())
     }
 
@@ -309,12 +316,8 @@ mod tests {
         let keys = database.create()?.all_n([(); 1000]);
         let mut query = database.query::<()>()?;
         database.destroy().all(keys[..500].into_iter().copied());
-        assert!(keys[500..]
-            .into_iter()
-            .all(|&key| query.item(key).is_some()));
-        assert!(keys[..500]
-            .into_iter()
-            .all(|&key| query.item(key).is_none()));
+        assert!(keys[..500].into_iter().all(|&key| query.item(key).is_err()));
+        assert!(keys[500..].into_iter().all(|&key| query.item(key).is_ok()));
         Ok(())
     }
 
@@ -345,7 +348,7 @@ mod tests {
         assert!(query.items().next().is_none());
         let key = database.create()?.one(());
         assert!(query.items().next().is_none());
-        assert!(query.item(key).is_none());
+        assert_eq!(query.item(key).err(), Some(Error::KeyNotInQuery));
         Ok(())
     }
 
@@ -370,41 +373,35 @@ mod tests {
     }
 
     #[test]
-    fn query1_item_nested_in_query2_items_deadlocks() -> Result<(), Error> {
+    fn query1_item_nested_in_query2_items_does_not_deadlock() -> Result<(), Error> {
         let database = Database::new();
         let key = database.create()?.one(C(1));
         let mut query1 = database.query::<&mut C>()?;
         let mut query2 = database.query::<&mut C>()?;
-
-        // TODO: Remove iterators from `Query` and only expose `FnMut/FnOnce` apis such that they can be required
-        // to implement an auto trait `Nest`
         for _item1 in query1.items() {
-            let _item2 = query2.item(key);
-            dbg!(_item1.0);
+            assert_eq!(query2.item(key).err(), Some(Error::WouldDeadlock));
         }
-
         Ok(())
     }
 
     #[test]
-    fn query1_items_nested_in_query2_items_deadlocks() -> Result<(), Error> {
+    fn query1_items_nested_in_query2_items_does_not_deadlock() -> Result<(), Error> {
         let database = Database::new();
         database.create()?.one(C(1));
         let mut query1 = database.query::<&mut C>()?;
         let mut query2 = database.query::<&mut C>()?;
 
-        // TODO: Remove iterators from `Query` and only expose `FnMut/FnOnce` apis such that they can be required
-        // to implement an auto trait `Nest`
+        // TOOD: Give a way to iterate over skipped items (see `query.skip` which is already populated).
         for _item1 in query1.items() {
             for _item2 in query2.items() {
-                dbg!(_item1.0, _item2.0);
+                // Getting here means that a mutable reference would be aliased; it must never happen.
+                assert!(false);
             }
         }
 
         Ok(())
     }
 
-    // #[test]
     fn boba() -> Result<(), Error> {
         let database = Database::new();
         let create = database.create()?;
@@ -427,6 +424,54 @@ mod tests {
             Ok(counts)
         });
         Ok(())
+    }
+
+    fn fett() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(C(1));
+        let mut query1 = database.query::<&mut C>()?;
+        let mut query2 = database.query::<&mut C>()?;
+        let mut a = None;
+        let mut b = None;
+        for _item1 in query1.items() {
+            // This is fine.
+            a = Some(_item1.clone());
+            // TODO: Items must not be allowed to escape like this...
+            // - Link the lifetime of items to the iterator somehow.
+            b = Some(_item1);
+            let _item2 = query2.item(key);
+            // dbg!(_item1.0);
+        }
+        query1.items_with(|item| {
+            a = Some(item.clone());
+            // b = Some(item); // The closure properly prevents this!
+            let _item2 = query2.item(key);
+        });
+        if let Some(mut a) = a {
+            a.0 += 1;
+        }
+        // Oh no! Item is being accessed outside its lock.
+        if let Some(mut b) = b {
+            b.0 += 1;
+        }
+
+        Ok(())
+    }
+}
+
+mod locks {
+    use parking_lot::RwLock;
+    use std::rc::Weak;
+
+    pub enum Kind {
+        Read,
+        Upgrade,
+        Write,
+    }
+    pub struct Locks(Vec<Weak<RwLock<()>>>);
+
+    impl Locks {
+        fn boba(&self) {}
     }
 }
 

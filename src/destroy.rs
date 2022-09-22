@@ -13,7 +13,7 @@ impl Database {
 impl Destroy<'_> {
     #[inline]
     pub fn one(&mut self, key: Key) -> bool {
-        self.database.remove_from_table(key).is_some()
+        self.database.remove_from_table(key).is_ok()
     }
 
     /// Destroys all provided `keys` and returns the count of the keys that were successfully destroyed.

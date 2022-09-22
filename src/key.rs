@@ -119,23 +119,23 @@ impl Keys {
         (index >> Self::SHIFT, index as u8)
     }
 
-    pub fn get(&self, key: Key) -> Option<&Slot> {
+    pub fn get(&self, key: Key) -> Result<&Slot, Error> {
         let count_read = self.count.read();
         let (chunk_index, slot_index) = Self::decompose(key.index());
         // SAFETY: `chunks` can be read since the `count_read` lock is held.
         let chunks = unsafe { &**self.chunks.get() };
-        let chunk = &**chunks.get(chunk_index as usize)?;
+        let chunk = &**chunks.get(chunk_index as usize).ok_or(Error::InvalidKey)?;
         // SAFETY: As soon as the `chunk` is dereferenced, the `count_read` lock is no longer needed.
         drop(count_read);
-        let slot = chunk.get(slot_index as usize)?;
+        let slot = unsafe { chunk.get_unchecked(slot_index as usize) };
         if slot.generation() == key.generation() {
             // SAFETY: A shared reference to a slot can be returned safely without being tied to the lifetime of the read guard
             // because its address is stable and no mutable reference to it is ever given out.
             // The stability of the address is guaranteed by the fact that the `chunks` vector never drops its items other than
             // when `self` is dropped.
-            Some(slot)
+            Ok(slot)
         } else {
-            None
+            Err(Error::InvalidKey)
         }
     }
 
@@ -187,7 +187,7 @@ impl Keys {
         }
     }
 
-    pub fn release(&self, mut key: Key) -> Option<(u32, u32)> {
+    pub fn release(&self, mut key: Key) -> Result<(u32, u32), Error> {
         let slot = self.get(key)?;
         let (table_index, row_index) = slot.release(key.generation())?;
 
@@ -201,7 +201,7 @@ impl Keys {
             drop(free_write);
         }
 
-        Some((table_index, row_index))
+        Ok((table_index, row_index))
     }
 }
 
@@ -237,13 +237,13 @@ impl Slot {
     }
 
     #[inline]
-    pub fn release(&self, generation: u32) -> Option<(u32, u32)> {
+    pub fn release(&self, generation: u32) -> Result<(u32, u32), Error> {
         self.generation
             .compare_exchange(generation, u32::MAX, AcqRel, Acquire)
-            .ok()?;
+            .map_err(|_| Error::WrongGeneration)?;
         let indices = self.indices.swap(u64::MAX, Release);
         debug_assert!(indices < u64::MAX);
-        Some(Self::decompose_indices(indices))
+        Ok(Self::decompose_indices(indices))
     }
 
     #[inline]

@@ -3,6 +3,7 @@ use crate::{
     resources::Resources,
     table::{self, Defer, Store, Table, Tables},
     utility::FullIterator,
+    Error,
 };
 use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
@@ -95,18 +96,18 @@ impl Database {
         }
     }
 
-    pub(crate) fn remove_from_table(&self, key: Key) -> Option<bool> {
+    pub(crate) fn remove_from_table(&self, key: Key) -> Result<bool, Error> {
         let (table_index, row_index) = self.keys.release(key)?;
         let table = unsafe { self.tables.get_unchecked(table_index as usize) };
         match self.table_try_write(table) {
             Some(mut table_write) => {
                 self.remove_from_resolve(&mut table_write, row_index);
                 drop(table_write);
-                Some(true)
+                Ok(true)
             }
             None => {
                 table.defer(Defer::Remove { row_index });
-                Some(false)
+                Ok(false)
             }
         }
     }
@@ -120,7 +121,7 @@ impl Database {
     ) -> Option<()> {
         let target_table = self.tables.get(target_index as usize)?;
         loop {
-            let slot = self.keys.get(key)?;
+            let slot = self.keys.get(key).ok()?;
             let source_indices = slot.indices();
             if source_indices.0 == target_index {
                 // No move is needed.

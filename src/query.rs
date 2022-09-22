@@ -1,8 +1,10 @@
 use parking_lot::{MappedRwLockReadGuard, MappedRwLockWriteGuard};
 
 use crate::{
+    bits::Bits,
     database::{Database, TableRead},
     key::Key,
+    resources::Local,
     table::{Store, Table},
     Datum, Error,
 };
@@ -19,10 +21,13 @@ pub struct Query<'a, I: Item, F: Filter = ()> {
     database: &'a Database,
     index: usize,
     indices: HashMap<usize, usize>,
-    states: Vec<(Arc<Table>, I::State)>,
-    queue: VecDeque<usize>,
+    states: Vec<(I::State, TableState)>,
+    defer: VecDeque<usize>,
+    skip: VecDeque<usize>,
+    reads: HashSet<TypeId>,
+    writes: HashSet<TypeId>,
     filter: F,
-    _marker: PhantomData<fn(I)>,
+    _marker: PhantomData<I>,
 }
 
 pub struct Context<'a> {
@@ -57,11 +62,26 @@ pub trait Lock<'a> {
 
 pub struct Read<T>(usize, PhantomData<T>);
 pub struct Write<T>(usize, PhantomData<T>);
+pub struct Guard<'a, 'b, T>(T, TableGuard<'a, 'b>);
+
+struct TableGuard<'a, 'b>(&'b TableState, TableRead<'a>);
+#[derive(Hash, PartialEq, Eq)]
+struct TableKey(u32);
+struct TableLocks {
+    readers: usize,
+    locks: Bits,
+    conflicts: Vec<(HashSet<TypeId>, HashSet<TypeId>, Bits)>,
+}
+struct TableState {
+    table: Arc<Table>,
+    locks: Local<TableLocks>,
+    index: usize,
+}
 
 /// This trait exists solely for the purpose of helping the compiler reason about lifetimes.
-trait With<'a, I: Item> {
+trait With<'a, 'b, I: Item> {
     type Value;
-    fn with(self, item: <I::State as Lock<'a>>::Item, table: TableRead<'a>) -> Self::Value;
+    fn with(self, guard: Guard<'a, 'b, <I::State as Lock<'a>>::Item>) -> Self::Value;
 }
 
 impl Context<'_> {
@@ -94,9 +114,7 @@ impl Context<'_> {
     }
 }
 
-pub struct Guard<'a, T>(T, TableRead<'a>);
-
-impl<T> Deref for Guard<'_, T> {
+impl<T> Deref for Guard<'_, '_, T> {
     type Target = T;
 
     #[inline]
@@ -105,7 +123,7 @@ impl<T> Deref for Guard<'_, T> {
     }
 }
 
-impl<T> DerefMut for Guard<'_, T> {
+impl<T> DerefMut for Guard<'_, '_, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -114,17 +132,13 @@ impl<T> DerefMut for Guard<'_, T> {
 
 impl<'a, I: Item, F: Filter> Query<'a, I, F> {
     #[inline]
-    pub fn item(&mut self, key: Key) -> Option<Guard<<I::State as Lock<'a>>::Item>> {
+    pub fn item(&mut self, key: Key) -> Result<Guard<<I::State as Lock<'a>>::Item>, Error> {
         struct WithItem;
-        impl<'a, I: Item> With<'a, I> for WithItem {
-            type Value = Guard<'a, <I::State as Lock<'a>>::Item>;
+        impl<'a, 'b, I: Item> With<'a, 'b, I> for WithItem {
+            type Value = Guard<'a, 'b, <I::State as Lock<'a>>::Item>;
             #[inline]
-            fn with(
-                self,
-                item: <<I as Item>::State as Lock<'a>>::Item,
-                table: TableRead<'a>,
-            ) -> Self::Value {
-                Guard(item, table)
+            fn with(self, guard: Self::Value) -> Self::Value {
+                guard
             }
         }
         self.with(key, WithItem)
@@ -135,19 +149,15 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
         &mut self,
         key: Key,
         with: impl FnOnce(<I::State as Lock>::Item) -> T,
-    ) -> Option<T> {
+    ) -> Result<T, Error> {
         struct WithItem<'a, F, T>(&'a Database, F, PhantomData<T>);
-        impl<'a, I: Item, T, F: FnOnce(<I::State as Lock<'a>>::Item) -> T> With<'a, I>
+        impl<'a, 'b, I: Item, T, F: FnOnce(<I::State as Lock<'a>>::Item) -> T> With<'a, 'b, I>
             for WithItem<'a, F, T>
         {
             type Value = T;
             #[inline]
-            fn with(
-                self,
-                item: <<I as Item>::State as Lock<'a>>::Item,
-                _: TableRead<'a>,
-            ) -> Self::Value {
-                self.1(item)
+            fn with(self, guard: Guard<'a, 'b, <I::State as Lock<'a>>::Item>) -> Self::Value {
+                self.1(guard.0)
             }
         }
         self.with(key, WithItem(self.database, with, PhantomData))
@@ -156,40 +166,40 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
     #[inline]
     pub fn items(&mut self) -> impl Iterator<Item = <I::State as Lock<'a>>::Item> + '_ {
         from_generator(|| {
-            for (mut guard, table_read) in self.iterate() {
-                for i in 0..table_read.inner().count() {
+            for mut guard in self.iterate() {
+                for i in 0..guard.1 .1.inner().count() {
                     yield unsafe { I::State::item(&mut guard, i as usize) };
                 }
-                drop(table_read);
+                drop(guard);
             }
         })
     }
 
     #[inline]
     pub fn items_with(&mut self, mut each: impl FnMut(<I::State as Lock>::Item)) {
-        for (mut guard, table_read) in self.iterate() {
-            for i in 0..table_read.inner().count() {
+        for mut guard in self.iterate() {
+            for i in 0..guard.1 .1.inner().count() {
                 each(unsafe { I::State::item(&mut guard, i as usize) });
             }
-            drop(table_read);
+            drop(guard);
         }
     }
 
     #[inline]
     pub fn chunks(&mut self) -> impl Iterator<Item = <I::State as Lock<'a>>::Chunk> + '_ {
         from_generator(|| {
-            for (mut guard, table_read) in self.iterate() {
+            for mut guard in self.iterate() {
                 yield unsafe { I::State::chunk(&mut guard) };
-                drop(table_read);
+                drop(guard);
             }
         })
     }
 
     #[inline]
     pub fn chunks_with(&mut self, mut each: impl FnMut(<I::State as Lock>::Chunk)) {
-        for (mut guard, table_read) in self.iterate() {
+        for mut guard in self.iterate() {
             each(unsafe { I::State::chunk(&mut guard) });
-            drop(table_read);
+            drop(guard);
         }
     }
 
@@ -198,17 +208,64 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
         while let Some(table) = self.database.tables.get_shared(self.index) {
             if self.filter.filter(&table) {
                 if let Some(state) = I::initialize(&table) {
+                    let locks = self
+                        .database
+                        .resources
+                        .local_with(TableKey(table.index()), || TableLocks {
+                            readers: 0,
+                            conflicts: Vec::new(),
+                            locks: Bits::new(),
+                        });
+                    let index = locks.write(|locks| {
+                        let new_index = locks.conflicts.len();
+                        let new_conflicts =
+                            match locks.conflicts.iter().find(|(reads, writes, _)| {
+                                reads == &self.reads && writes == &self.writes
+                            }) {
+                                Some((_, _, conflicts)) => conflicts.clone(),
+                                None => {
+                                    let mut new_conflicts = Bits::new();
+                                    for (index, (reads, writes, conflicts)) in
+                                        locks.conflicts.iter_mut().enumerate()
+                                    {
+                                        if self.reads.is_disjoint(writes)
+                                            && self.writes.is_disjoint(reads)
+                                            && self.writes.is_disjoint(writes)
+                                        {
+                                            continue;
+                                        }
+                                        conflicts.set(new_index, true);
+                                        new_conflicts.set(index, true);
+                                    }
+                                    new_conflicts
+                                }
+                            };
+
+                        locks.conflicts.push((
+                            self.reads.clone(),
+                            self.writes.clone(),
+                            new_conflicts,
+                        ));
+                        new_index
+                    });
                     self.indices.insert(self.index, self.states.len());
-                    self.states.push((table, state));
+                    self.states.push((
+                        state,
+                        TableState {
+                            table,
+                            index,
+                            locks,
+                        },
+                    ));
                 }
             }
             self.index += 1;
         }
     }
 
-    fn with<W: With<'a, I>>(&mut self, key: Key, with: W) -> Option<W::Value> {
-        Some(loop {
-            self.update();
+    fn with<'b, W: With<'a, 'b, I>>(&'b mut self, key: Key, with: W) -> Result<W::Value, Error> {
+        self.update();
+        Ok(loop {
             let Self {
                 database,
                 indices,
@@ -217,85 +274,94 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
             } = &*self;
             let slot = self.database.keys.get(key)?;
             let (table_index, store_index) = slot.indices();
-            let &state_index = match indices.get(&(table_index as usize)) {
-                Some(index) => index,
-                None => return None,
-            };
-            let (_, item_state) = unsafe { states.get_unchecked(state_index) };
+            let &state_index = indices
+                .get(&(table_index as usize))
+                .ok_or(Error::KeyNotInQuery)?;
+            let state = unsafe { states.get_unchecked(state_index) };
             let table = unsafe { database.tables.get_unchecked(table_index as usize) };
             let table_read = database.table_read(table);
             if slot.indices() != (table_index, store_index) {
+                drop(table_read);
                 continue;
             }
 
-            if let Some(mut guard) =
-                I::State::try_lock(item_state, table_read.keys(), table_read.stores())
-            {
-                let item = unsafe { I::State::item(&mut guard, store_index as _) };
-                break with.with(item, table_read);
-            }
+            match state.0.try_lock(table_read.keys(), table_read.stores()) {
+                Some(mut guard) => {
+                    let item = unsafe { I::State::item(&mut guard, store_index as _) };
+                    break with.with(Guard(item, TableGuard::new(&state.1, table_read)));
+                }
+                None if state.1.locks.read(|locks| locks.readers == 0) => {
+                    drop(table_read);
 
-            drop(table_read);
-            // It is allowed that there be interleaving of other thread operations here as long as the
-            // `slot.indices` are checked each time a table lock is acquired.
-            let table_write = database.table_write(table);
-            if slot.indices() != (table_index, store_index) {
-                continue;
-            }
+                    // It is allowed that there be interleaving of other thread operations here as long as the
+                    // `slot.indices` are checked each time a table lock is acquired.
+                    let table_write = database.table_write(table);
+                    if slot.indices() != (table_index, store_index) {
+                        drop(table_write);
+                        continue;
+                    }
 
-            let mut guard = I::State::lock(item_state, table_write.keys(), table_write.stores());
-            let table_read = table_write.downgrade();
-            let item = unsafe { I::State::item(&mut guard, store_index as _) };
-            break with.with(item, table_read);
+                    let mut guard = state.0.lock(table_write.keys(), table_write.stores());
+                    let table_read = table_write.downgrade();
+                    let item = unsafe { I::State::item(&mut guard, store_index as _) };
+                    break with.with(Guard(item, TableGuard::new(&state.1, table_read)));
+                }
+                None if state.1.locks.read(|locks| locks.allows(state.1.index)) => {
+                    let mut guard = state.0.lock(table_read.keys(), table_read.stores());
+                    let item = unsafe { I::State::item(&mut guard, store_index as _) };
+                    break with.with(Guard(item, TableGuard::new(&state.1, table_read)));
+                }
+                None => {
+                    drop(table_read);
+                    return Err(Error::WouldDeadlock);
+                }
+            }
         })
     }
 
     #[inline]
-    fn iterate(&mut self) -> impl Iterator<Item = (<I::State as Lock<'a>>::Guard, TableRead)> {
+    fn iterate(&mut self) -> impl Iterator<Item = Guard<<I::State as Lock<'a>>::Guard>> {
+        self.update();
         from_generator(|| {
-            self.update();
-
             // Try to execute the query using only read locks on tables. This should succeed unless there is contention over
             // the store locks which would cause the `I::State::get` call to fail.
-            for (state_index, (table, item_state)) in self.states.iter().enumerate() {
-                if let Some(table_read) = self.database.table_try_read(table) {
-                    match I::State::try_lock(item_state, table_read.keys(), table_read.stores()) {
+            for (index, (item_state, table_state)) in self.states.iter().enumerate() {
+                if let Some(table_read) = self.database.table_try_read(&table_state.table) {
+                    match item_state.try_lock(table_read.keys(), table_read.stores()) {
                         Some(guard) => {
-                            yield (guard, table_read);
+                            yield Guard(guard, TableGuard::new(table_state, table_read));
                             continue;
                         }
                         None => drop(table_read),
                     }
                 }
-                self.queue.push_back(state_index);
+                self.defer.push_back(index);
             }
 
             // Try again to execute the tables that previously failed to take their store locks by still using only read
             // locks on tables hoping that there is no more contention.
-            let mut count = self.queue.len();
-            while let Some(state_index) = self.queue.pop_front() {
+            while let Some(state_index) = self.defer.pop_front() {
                 debug_assert!(state_index < self.states.len());
-                let (table, item_state) = unsafe { self.states.get_unchecked(state_index) };
-                let table_read = self.database.table_read(table);
-                match I::State::try_lock(item_state, table_read.keys() as _, table_read.stores()) {
-                    Some(guard) => {
-                        count = self.queue.len();
-                        yield (guard, table_read);
-                    }
-                    None if count == 0 => {
+                let state = unsafe { self.states.get_unchecked(state_index) };
+                let table_read = self.database.table_read(&state.1.table);
+                match state.0.try_lock(table_read.keys(), table_read.stores()) {
+                    Some(guard) => yield Guard(guard, TableGuard::new(&state.1, table_read)),
+                    None if state.1.locks.read(|locks| locks.readers == 0) => {
                         drop(table_read);
-                        count = self.queue.len();
-                        // Since no table can make progress, escalate to a write lock.
-                        let table_write = self.database.table_write(table);
-                        let guard =
-                            I::State::lock(item_state, table_write.keys(), table_write.stores());
+
+                        // Since the read lock failed to make progress, escalate to a write lock.
+                        let table_write = self.database.table_write(&state.1.table);
+                        let guard = state.0.lock(table_write.keys(), table_write.stores());
                         let table_read = table_write.downgrade();
-                        yield (guard, table_read);
+                        yield Guard(guard, TableGuard::new(&state.1, table_read));
+                    }
+                    None if state.1.locks.read(|locks| locks.allows(state.1.index)) => {
+                        let guard = state.0.lock(table_read.keys(), table_read.stores());
+                        yield Guard(guard, TableGuard::new(&state.1, table_read));
                     }
                     None => {
                         drop(table_read);
-                        self.queue.push_back(state_index);
-                        count -= 1;
+                        self.skip.push_back(state_index);
                     }
                 }
             }
@@ -473,17 +539,52 @@ impl<'a, A1: Lock<'a>, A2: Lock<'a>> Lock<'a> for (A1, A2) {
             self.1.try_lock(keys, stores)?,
         ))
     }
+
     #[inline]
     fn lock(&self, keys: &[Key], stores: &[Store]) -> Self::Guard {
         (self.0.lock(keys, stores), self.1.lock(keys, stores))
     }
+
     #[inline]
     unsafe fn chunk(guard: &mut Self::Guard) -> Self::Chunk {
         (A1::chunk(&mut guard.0), A2::chunk(&mut guard.1))
     }
+
     #[inline]
     unsafe fn item(guard: &mut Self::Guard, index: usize) -> Self::Item {
         (A1::item(&mut guard.0, index), A2::item(&mut guard.1, index))
+    }
+}
+
+impl<'a, 'b> TableGuard<'a, 'b> {
+    #[inline]
+    pub fn new(table_state: &'b TableState, table_read: TableRead<'a>) -> Self {
+        table_state.locks.write(|locks| {
+            locks.readers += 1;
+            locks.locks.set(table_state.index, true);
+        });
+        Self(table_state, table_read)
+    }
+}
+
+impl Drop for TableGuard<'_, '_> {
+    #[inline]
+    fn drop(&mut self) {
+        self.0.locks.write(|locks| {
+            debug_assert!(locks.readers > 0);
+            debug_assert!(locks.locks.has(self.0.index));
+            locks.readers -= 1;
+            locks.locks.set(self.0.index, false);
+        });
+    }
+}
+
+impl TableLocks {
+    pub fn allows(&self, index: usize) -> bool {
+        match self.conflicts.get(index) {
+            Some((_, _, conflicts)) => self.locks.has_none(conflicts),
+            None => false,
+        }
     }
 }
 
@@ -493,16 +594,22 @@ impl Database {
     }
 
     pub fn query_with<I: Item, F: Filter>(&self, filter: F) -> Result<Query<I, F>, Error> {
+        let mut read = HashSet::new();
+        let mut write = HashSet::new();
         I::validate(Context {
-            read: &mut HashSet::new(),
-            write: &mut HashSet::new(),
+            read: &mut read,
+            write: &mut write,
         })?;
+
         Ok(Query {
             database: self,
             index: 0,
             indices: HashMap::new(),
             states: Vec::new(),
-            queue: VecDeque::new(),
+            defer: VecDeque::new(),
+            skip: VecDeque::new(),
+            reads: read,
+            writes: write,
             filter,
             _marker: PhantomData,
         })
