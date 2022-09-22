@@ -218,34 +218,23 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
                         });
                     let index = locks.write(|locks| {
                         let new_index = locks.conflicts.len();
-                        let new_conflicts =
-                            match locks.conflicts.iter().find(|(reads, writes, _)| {
-                                reads == &self.reads && writes == &self.writes
-                            }) {
-                                Some((_, _, conflicts)) => conflicts.clone(),
-                                None => {
-                                    let mut new_conflicts = Bits::new();
-                                    for (index, (reads, writes, conflicts)) in
-                                        locks.conflicts.iter_mut().enumerate()
-                                    {
-                                        if self.reads.is_disjoint(writes)
-                                            && self.writes.is_disjoint(reads)
-                                            && self.writes.is_disjoint(writes)
-                                        {
-                                            continue;
-                                        }
-                                        conflicts.set(new_index, true);
-                                        new_conflicts.set(index, true);
-                                    }
-                                    new_conflicts
-                                }
-                            };
+                        let new_reads = self.reads.clone();
+                        let new_writes = self.writes.clone();
+                        let mut new_conflicts = Bits::new();
+                        for (old_index, (old_reads, old_writes, old_conflicts)) in
+                            locks.conflicts.iter_mut().enumerate()
+                        {
+                            if new_reads.is_disjoint(old_writes)
+                                && new_writes.is_disjoint(old_reads)
+                                && new_writes.is_disjoint(old_writes)
+                            {
+                                continue;
+                            }
+                            old_conflicts.set(new_index, true);
+                            new_conflicts.set(old_index, true);
+                        }
 
-                        locks.conflicts.push((
-                            self.reads.clone(),
-                            self.writes.clone(),
-                            new_conflicts,
-                        ));
+                        locks.conflicts.push((new_reads, new_writes, new_conflicts));
                         new_index
                     });
                     self.indices.insert(self.index, self.states.len());
