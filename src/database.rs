@@ -65,33 +65,30 @@ impl Database {
         // All keys can be reserved at once.
         self.keys.reserve(keys);
 
-        // Create in batches to give a chance to other threads to make progress.
-        for keys in keys.chunks_mut(Keys::CHUNK) {
-            // Hold this lock until the operation is fully complete such that no move operation are interleaved.
-            let table_upgrade = self.table_upgrade(table);
-            match Self::add_to_reserve(keys.len() as _, table_upgrade) {
-                Ok((row_index, row_count, table_read)) => {
-                    self.add_to_resolve(
-                        keys,
-                        row_index,
-                        row_count,
-                        table_read.table(),
-                        table_read.inner(),
-                        |row, stores| initialize(&mut state, row, stores),
-                    );
-                    drop(table_read);
-                }
-                Err((row_index, row_count)) => {
-                    let mut state = state_defer(&mut state, keys.len());
-                    table.defer(Defer::Add {
-                        keys: keys.iter().copied().collect(),
-                        row_index,
-                        row_count,
-                        initialize: Box::new(move |row_index, stores| {
-                            initialize_defer(&mut state, row_index, stores)
-                        }),
-                    });
-                }
+        // Hold this lock until the operation is fully complete such that no move operation are interleaved.
+        let table_upgrade = self.table_upgrade(table);
+        match Self::add_to_reserve(keys.len() as _, table_upgrade) {
+            Ok((row_index, row_count, table_read)) => {
+                self.add_to_resolve(
+                    keys,
+                    row_index,
+                    row_count,
+                    table_read.table(),
+                    table_read.inner(),
+                    |row, stores| initialize(&mut state, row, stores),
+                );
+                drop(table_read);
+            }
+            Err((row_index, row_count)) => {
+                let mut state = state_defer(&mut state, keys.len());
+                table.defer(Defer::Add {
+                    keys: keys.iter().copied().collect(),
+                    row_index,
+                    row_count,
+                    initialize: Box::new(move |row_index, stores| {
+                        initialize_defer(&mut state, row_index, stores)
+                    }),
+                });
             }
         }
     }
@@ -264,25 +261,24 @@ impl Database {
     }
 
     #[inline]
-    const fn decompose_count(count: u64) -> (u16, u16, u32) {
-        ((count >> 48) as u16, (count >> 32) as u16, count as u32)
+    const fn decompose_pending(pending: u64) -> (u32, u32) {
+        ((pending >> 32) as u32, pending as u32)
     }
 
     #[inline]
-    const fn recompose_count(begun: u16, ended: u16, count: u32) -> u64 {
-        ((begun as u64) << 48) | ((ended as u64) << 32) | (count as u64)
+    const fn recompose_pending(begun: u32, ended: u32) -> u64 {
+        ((begun as u64) << 32) | (ended as u64)
     }
 
     fn add_to_reserve(
-        reserve: u16,
+        reserve: u32,
         table_upgrade: TableUpgrade,
     ) -> Result<(u32, usize, TableRead), (u32, usize)> {
-        let (begun, ended, count) = {
-            let add = Self::recompose_count(reserve, 0, 0);
-            let count = table_upgrade.inner().count.fetch_add(add, AcqRel);
-            Self::decompose_count(count)
+        let (row_index, _) = {
+            let add = Self::recompose_pending(reserve, 0);
+            let pending = table_upgrade.inner().pending.fetch_add(add, AcqRel);
+            Self::decompose_pending(pending)
         };
-        let row_index = count + begun as u32 + ended as u32;
         let row_count = row_index as usize + reserve as usize;
 
         // There can not be more than `u32::MAX` keys at a given time.
@@ -298,19 +294,6 @@ impl Database {
                     table_upgrade.forget();
                     return Err((row_index, row_count));
                 }
-            }
-        } else if begun >= (u16::MAX >> 1) || ended >= (u16::MAX >> 1) {
-            // A huge stream of concurrent `create` operations has been detected; try to force the resolution of that
-            // table's `count` before `begun` or `ended` overflows. This should essentially never happen.
-            match table_upgrade.try_upgrade() {
-                Ok(mut table_write) => {
-                    let table_count = table_write.inner_mut().count.get_mut();
-                    let (begun, ended, count) = Self::decompose_count(*table_count);
-                    debug_assert_eq!(begun, reserve);
-                    *table_count = Self::recompose_count(reserve, 0, count + ended as u32);
-                    table_write.downgrade()
-                }
-                Err(table_upgrade) => table_upgrade.downgrade(),
             }
         } else {
             table_upgrade.downgrade()
@@ -344,40 +327,28 @@ impl Database {
         Self::add_to_commit(keys.len() as _, inner);
     }
 
-    fn add_to_commit(reserve: u16, inner: &table::Inner) {
-        inner
-            .count
-            .fetch_update(AcqRel, Acquire, |count| {
-                let (begun, ended, count) = Self::decompose_count(count);
-                if begun == reserve {
-                    Some(Self::recompose_count(
-                        0,
-                        0,
-                        count + begun as u32 + ended as u32,
-                    ))
-                } else if begun > reserve {
-                    Some(Self::recompose_count(
-                        begun - reserve,
-                        ended + reserve,
-                        count,
-                    ))
-                } else {
-                    // If this happens, this is a bug. The `expect` below will panic.
-                    None
-                }
-            })
-            .expect("Expected the updating the count to succeed.");
+    fn add_to_commit(reserve: u32, inner: &table::Inner) {
+        let pending = inner.pending.fetch_add(reserve as u64, AcqRel);
+        let (begun, ended) = Self::decompose_pending(pending);
+        debug_assert!(begun >= ended);
+        if begun == ended + reserve {
+            inner.count.fetch_max(begun, Relaxed);
+        }
     }
 
     fn remove_from_reserve(table_write: &mut TableWrite) -> u32 {
-        let table_count = table_write.inner_mut().count.get_mut();
-        let (begun, ended, mut count) = Self::decompose_count(*table_count);
+        let inner = table_write.inner_mut();
+        let table_count = inner.count.get_mut();
+        let table_pending = inner.pending.get_mut();
+        let (begun, ended) = Self::decompose_pending(*table_pending);
+
         // Sanity checks. If this is not the case, there is a bug in the locking logic.
-        debug_assert_eq!(begun, 0u16);
-        debug_assert_eq!(ended, 0u16);
-        count -= 1;
-        *table_count = Self::recompose_count(0, 0, count);
-        count
+        debug_assert_eq!(begun, ended);
+        debug_assert!(begun > 0);
+        debug_assert_eq!(begun, *table_count);
+        *table_count -= 1;
+        *table_pending = Self::recompose_pending(begun - 1, ended - 1);
+        *table_count
     }
 
     fn remove_from_resolve(&self, table_write: &mut TableWrite, row_index: u32) {

@@ -402,6 +402,7 @@ mod tests {
         Ok(())
     }
 
+    #[test]
     fn boba() -> Result<(), Error> {
         let database = Database::new();
         let create = database.create()?;
@@ -411,8 +412,8 @@ mod tests {
             let query = &mut query;
             let mut handles = Vec::new();
             let mut counts = Vec::new();
-            for _ in 0..100 {
-                handles.push(scope.spawn(move || create.all_n([(); 10000])));
+            for _ in 0..10 {
+                handles.push(scope.spawn(move || create.all_n([C(123); 10_000])));
                 counts.push(query.items().count());
             }
             for handle in handles {

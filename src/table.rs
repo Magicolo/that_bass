@@ -10,7 +10,7 @@ use std::{
     ptr::NonNull,
     slice::{from_raw_parts, from_raw_parts_mut, SliceIndex},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -23,7 +23,8 @@ pub struct Table {
 }
 
 pub(crate) struct Inner {
-    pub(crate) count: AtomicU64,
+    pub(crate) count: AtomicU32,
+    pub(crate) pending: AtomicU64,
     pub(crate) keys: UnsafeCell<Vec<Key>>,
     /// Stores are ordered consistently between tables.
     pub(crate) stores: Box<[Store]>,
@@ -286,6 +287,7 @@ impl Tables {
                 let index = tables.len() as _;
                 let inner = Inner {
                     count: 0.into(),
+                    pending: 0.into(),
                     keys: Vec::with_capacity(capacity).into(),
                     stores,
                 };
