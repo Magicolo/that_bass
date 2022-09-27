@@ -1,101 +1,122 @@
 use parking_lot::{Mutex, RwLock};
 use std::{
     any::{Any, TypeId},
-    cell::{RefCell, UnsafeCell},
+    cell::RefCell,
     collections::HashMap,
     hash::Hash,
+    ops::Deref,
     rc::Rc,
     sync::Arc,
     thread::{self, ThreadId},
 };
 
-pub(crate) struct Resources {
-    lock: Mutex<()>,
-    locals: Locals,
-    globals: Globals,
+use crate::Error;
+
+pub struct Resources {
+    // TODO: These mutexes could be replaced with a `RwLock` since most accesses to resources are expected to only require a read.
+    locals: Mutex<Locals>,
+    globals: Mutex<Globals>,
 }
 
 pub struct Local<T>(Rc<RefCell<T>>);
 pub struct Global<T>(Arc<RwLock<T>>);
 
-struct Locals<K = (ThreadId, TypeId)>(UnsafeCell<HashMap<K, Rc<dyn Any>>>);
-struct Globals<K = TypeId>(UnsafeCell<HashMap<K, Arc<dyn Any + Sync + Send>>>);
+struct Locals<K = (ThreadId, TypeId)>(HashMap<K, Result<Rc<dyn Any>, Error>>);
+struct Globals<K = TypeId>(HashMap<K, Result<Arc<dyn Any + Sync + Send>, Error>>);
+
+impl<K: Eq + Hash> Globals<K> {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    pub fn get<T: Send + Sync + 'static>(
+        &mut self,
+        key: K,
+        default: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<Global<T>, Error> {
+        Ok(Global(
+            self.0
+                .entry(key)
+                .or_insert_with(|| Ok(Arc::new(RwLock::new(default()?))))
+                .clone()?
+                .downcast()
+                .map_err(|_| Error::InvalidType)?,
+        ))
+    }
+}
+
+impl<K: Eq + Hash> Locals<K> {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    pub fn get<T: 'static>(
+        &mut self,
+        key: K,
+        default: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<Local<T>, Error> {
+        Ok(Local(
+            self.0
+                .entry(key)
+                .or_insert_with(|| Ok(Rc::new(RefCell::new(default()?))))
+                .clone()?
+                .downcast()
+                .map_err(|_| Error::InvalidType)?,
+        ))
+    }
+}
 
 impl Resources {
     pub fn new() -> Self {
         Self {
-            lock: Mutex::new(()),
-            locals: Locals(HashMap::new().into()),
-            globals: Globals(HashMap::new().into()),
+            locals: Mutex::new(Locals::new()),
+            globals: Mutex::new(Globals::new()),
         }
     }
 
-    pub fn global<T: Send + Sync + 'static>(&self, default: impl FnOnce() -> T) -> Global<T> {
-        let key = TypeId::of::<T>();
-        let lock = self.lock.lock();
-        let resources = unsafe { &mut *self.globals.0.get() };
-        let resource = resources
-            .entry(key)
-            .or_insert_with(|| Arc::new(RwLock::new(default())))
-            .clone();
-        drop(lock);
-        Global(resource.downcast().expect("Expected proper type."))
+    pub fn global<T: Send + Sync + 'static>(
+        &self,
+        default: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<Global<T>, Error> {
+        self.globals.lock().get(TypeId::of::<T>(), default)
     }
 
     pub fn global_with<K: Eq + Hash + Send + Sync + 'static, T: Send + Sync + 'static>(
         &self,
         key: K,
-        default: impl FnOnce() -> T,
-    ) -> Global<T> {
-        self.global(|| Globals::<K>(HashMap::new().into()))
-            .write(|resources| {
-                let resources = resources.0.get_mut();
-                let resource = resources
-                    .entry(key)
-                    .or_insert_with(|| Arc::new(RwLock::new(default())))
-                    .clone();
-                Global(resource.downcast().expect("Expected valid type."))
-            })
+        default: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<Global<T>, Error> {
+        self.global(|| Ok(Globals::<K>::new()))?
+            .write()
+            .get(key, default)
     }
 
-    pub fn local<T: 'static>(&self, default: impl FnOnce() -> T) -> Local<T> {
-        let key = (thread::current().id(), TypeId::of::<T>());
-        let lock = self.lock.lock();
-        let resources = unsafe { &mut *self.locals.0.get() };
-        let resource = resources
-            .entry(key)
-            .or_insert_with(|| Rc::new(RefCell::new(default())))
-            .clone();
-        drop(lock);
-        Local(resource.downcast().expect("Expected proper type."))
+    pub fn local<T: 'static>(
+        &self,
+        default: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<Local<T>, Error> {
+        self.locals
+            .lock()
+            .get((thread::current().id(), TypeId::of::<T>()), default)
     }
 
     pub fn local_with<K: Eq + Hash + 'static, T: 'static>(
         &self,
         key: K,
-        default: impl FnOnce() -> T,
-    ) -> Local<T> {
-        self.local(|| Locals::<K>(HashMap::new().into()))
-            .write(|resources| {
-                let resources = resources.0.get_mut();
-                let resource = resources
-                    .entry(key)
-                    .or_insert_with(|| Rc::new(RefCell::new(default())))
-                    .clone();
-                Local(resource.downcast().expect("Expected valid type."))
-            })
+        default: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<Local<T>, Error> {
+        self.local(|| Ok(Locals::<K>::new()))?
+            .borrow_mut()
+            .get(key, default)
     }
 }
 
-impl<T> Local<T> {
-    #[inline]
-    pub fn read<U>(&self, read: impl FnOnce(&T) -> U) -> U {
-        read(&mut self.0.borrow())
-    }
+impl<T> Deref for Local<T> {
+    type Target = RefCell<T>;
 
     #[inline]
-    pub fn write<U>(&self, write: impl FnOnce(&mut T) -> U) -> U {
-        write(&mut self.0.borrow_mut())
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -106,15 +127,12 @@ impl<T> Clone for Local<T> {
     }
 }
 
-impl<T> Global<T> {
-    #[inline]
-    pub fn read<U>(&self, read: impl FnOnce(&T) -> U) -> U {
-        read(&mut self.0.read())
-    }
+impl<T> Deref for Global<T> {
+    type Target = RwLock<T>;
 
     #[inline]
-    pub fn write<U>(&self, write: impl FnOnce(&mut T) -> U) -> U {
-        write(&mut self.0.write())
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -126,6 +144,3 @@ impl<T> Clone for Global<T> {
 }
 
 unsafe impl<K: Send> Send for Locals<K> {}
-unsafe impl<K: Sync> Sync for Locals<K> {}
-unsafe impl<K: Send> Send for Globals<K> {}
-unsafe impl<K: Sync> Sync for Globals<K> {}

@@ -7,13 +7,10 @@ use crate::{
 use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
 
 pub unsafe trait Template: 'static {
-    type State;
+    type State: Send + Sync;
     fn initialize(context: Context) -> Self::State;
     unsafe fn apply(self, state: &Self::State, row: usize, stores: &[Store]);
 }
-
-pub struct Spawn<T: Template>(PhantomData<T>);
-pub struct With<T: Template, F: FnMut(Key) -> T>(F, PhantomData<T>);
 
 pub struct Create<'a, T: Template> {
     database: &'a Database,
@@ -21,38 +18,42 @@ pub struct Create<'a, T: Template> {
     table: Arc<Table>,
     keys: Vec<Key>,
     templates: Vec<T>,
-    _marker: PhantomData<T>,
 }
 
 pub struct Context<'a> {
-    metas: &'a mut Vec<Meta>,
+    metas: &'a mut Vec<&'static Meta>,
 }
 
 impl Database {
     pub fn create<T: Template>(&self) -> Result<Create<T>, Error> {
-        let mut metas = Vec::new();
-        let context = Context { metas: &mut metas };
-        let state = Arc::new(T::initialize(context));
-        let mut types = BTreeSet::new();
-        if metas.iter().all(|meta| types.insert(meta.identifier)) {
-            metas.sort_unstable_by_key(|meta| meta.identifier);
-            let table = self.tables.find_or_add(metas, types, 0);
-            Ok(Create {
-                database: self,
-                state,
-                table,
-                keys: Vec::new(),
-                templates: Vec::new(),
-                _marker: PhantomData,
-            })
-        } else {
-            Err(Error::DuplicateMeta)
-        }
+        struct Shared<T: Template>(Arc<T::State>, Arc<Table>, PhantomData<fn(T)>);
+
+        let shared = self.resources().global(|| {
+            let mut metas = Vec::new();
+            let context = Context { metas: &mut metas };
+            let state = Arc::new(T::initialize(context));
+            let mut types = BTreeSet::new();
+            if metas.iter().all(|meta| types.insert(meta.identifier)) {
+                metas.sort_unstable_by_key(|meta| meta.identifier);
+                let table = self.tables().find_or_add(metas, 0);
+                Ok(Shared::<T>(state, table, PhantomData))
+            } else {
+                Err(Error::DuplicateMeta)
+            }
+        })?;
+        let shared = shared.read();
+        Ok(Create {
+            database: self,
+            state: shared.0.clone(),
+            table: shared.1.clone(),
+            keys: Vec::new(),
+            templates: Vec::new(),
+        })
     }
 }
 
 impl Context<'_> {
-    pub fn declare(&mut self, meta: Meta) {
+    pub fn declare(&mut self, meta: &'static Meta) {
         self.metas.push(meta);
     }
 
@@ -70,7 +71,7 @@ unsafe impl<D: Datum> Template for D {
 
     #[inline]
     unsafe fn apply(self, _: &Self::State, row: usize, stores: &[Store]) {
-        unsafe { stores.get_unchecked(0).write_unlocked_at(row, self) };
+        unsafe { stores.get_unchecked(0).set_unlocked_at(row, self) };
     }
 }
 
@@ -97,12 +98,13 @@ unsafe impl<T1: Template, T2: Template> Template for (T1, T2) {
 }
 
 impl<T: Template> Create<'_, T> {
+    #[inline]
     pub fn all_n<const N: usize>(&self, templates: [T; N]) -> [Key; N] {
         let mut keys = [Key::NULL; N];
-        Self::apply(
-            &self.database,
-            self.state.clone(),
+        apply(
+            self.database,
             &self.table,
+            &self.state,
             templates.into_iter(),
             &mut keys,
         );
@@ -131,17 +133,23 @@ impl<T: Template> Create<'_, T> {
         self.all_n([(); N].map(|_| T::default()))
     }
 
+    #[inline]
     pub fn all<I: IntoIterator<Item = T>>(&mut self, templates: I) -> &[Key] {
         self.templates.extend(templates);
         self.keys.resize(self.templates.len(), Key::NULL);
-        Self::apply(
-            &self.database,
-            self.state.clone(),
+        apply(
+            self.database,
             &self.table,
+            &self.state,
             self.templates.drain(..),
             &mut self.keys,
         );
         &self.keys
+    }
+
+    #[inline]
+    pub fn with(&mut self, count: usize, with: impl FnMut(usize) -> T) -> &[Key] {
+        self.all((0..count).map(with))
     }
 
     #[inline]
@@ -150,7 +158,7 @@ impl<T: Template> Create<'_, T> {
         T: Clone,
     {
         // TODO: Do not clone the last template.
-        self.all((0..count).map(|_| template.clone()))
+        self.with(count, |_| template.clone())
     }
 
     #[inline]
@@ -158,35 +166,36 @@ impl<T: Template> Create<'_, T> {
     where
         T: Default,
     {
-        self.all((0..count).map(|_| T::default()))
+        self.with(count, |_| T::default())
     }
+}
 
-    fn apply<I: ExactSizeIterator<Item = T>>(
-        database: &Database,
-        state: Arc<T::State>,
-        table: &Table,
-        templates: I,
-        keys: &mut [Key],
-    ) {
-        debug_assert_eq!(templates.len(), keys.len());
-        database.add_to_table(
-            keys,
-            table,
-            (state, templates),
-            |(state, templates), row, stores| unsafe {
-                for i in 0..row.1 {
-                    templates
-                        .next()
-                        .expect("Expected initialize to be called once per template.")
-                        .apply(&state, row.0 + i, stores)
-                }
-            },
-            |(state, templates), count| (state.clone(), templates.take(count).collect::<Vec<_>>()),
-            |(state, templates), row, stores| {
-                for template in templates.drain(..) {
-                    unsafe { template.apply(state, row, stores) }
-                }
-            },
-        );
-    }
+#[inline]
+fn apply<T: Template, I: ExactSizeIterator<Item = T>>(
+    database: &Database,
+    table: &Table,
+    state: &Arc<T::State>,
+    templates: I,
+    keys: &mut [Key],
+) {
+    debug_assert_eq!(templates.len(), keys.len());
+    database.add_to_table(
+        keys,
+        table,
+        (state, templates),
+        |(state, templates), row, stores| unsafe {
+            for i in 0..row.1 {
+                templates
+                    .next()
+                    .expect("Expected initialize to be called once per template.")
+                    .apply(&state, row.0 + i, stores)
+            }
+        },
+        |(state, templates), count| (state.clone(), templates.take(count).collect::<Vec<_>>()),
+        |(state, templates), row, stores| {
+            for template in templates.drain(..) {
+                unsafe { template.apply(state, row, stores) }
+            }
+        },
+    );
 }

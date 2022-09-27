@@ -22,7 +22,7 @@ pub struct Slot {
     indices: AtomicU64,
 }
 
-pub(crate) struct Keys {
+pub struct Keys {
     free: RwLock<(Vec<Key>, AtomicI64)>,
     /// The lock is seperated from the chunks because once a chunk is dereferenced from the `chunks` vector, it no longer
     /// needs to have its lifetime tied to a `RwLockReadGuard`. This is safe because the addresses of chunks are stable
@@ -70,12 +70,12 @@ impl Key {
 unsafe impl Item for Key {
     type State = State;
 
-    fn initialize(_: &Table) -> Option<Self::State> {
-        Some(State)
+    fn declare(_: Context) -> Result<(), Error> {
+        Ok(())
     }
 
-    fn validate(mut context: Context) -> Result<(), Error> {
-        context.read::<Key>()
+    fn initialize(_: &Table) -> Option<Self::State> {
+        Some(State)
     }
 }
 
@@ -88,17 +88,30 @@ impl<'a> Lock<'a> for State {
     fn try_lock(&self, keys: &[Key], stores: &[Store]) -> Option<Self::Guard> {
         Some(self.lock(keys, stores))
     }
+
     #[inline]
-    fn lock(&self, keys: &[Key], _: &[Store]) -> Self::Guard {
-        unsafe { from_raw_parts(keys.as_ptr(), keys.len()) }
+    fn lock(&self, keys: &[Key], stores: &[Store]) -> Self::Guard {
+        unsafe { self.chunk_unlocked(keys, stores) }
     }
+
     #[inline]
     unsafe fn chunk(guard: &mut Self::Guard) -> Self::Chunk {
         guard
     }
+
+    #[inline]
+    unsafe fn chunk_unlocked(&self, keys: &[Key], _: &[Store]) -> Self::Chunk {
+        from_raw_parts(keys.as_ptr(), keys.len())
+    }
+
     #[inline]
     unsafe fn item(guard: &mut Self::Guard, index: usize) -> Self::Item {
         *guard.get_unchecked(index)
+    }
+
+    #[inline]
+    unsafe fn item_unlocked(&self, keys: &[Key], _: &[Store], index: usize) -> Self::Item {
+        *keys.as_ptr().add(index)
     }
 }
 
@@ -106,6 +119,7 @@ impl Keys {
     const SHIFT: usize = 8;
     pub const CHUNK: usize = 1 << Self::SHIFT;
 
+    #[inline]
     pub fn new() -> Self {
         Self {
             free: RwLock::new((Vec::new(), 0.into())),
@@ -115,7 +129,7 @@ impl Keys {
     }
 
     #[inline]
-    pub const fn decompose(index: u32) -> (u32, u8) {
+    const fn decompose(index: u32) -> (u32, u8) {
         (index >> Self::SHIFT, index as u8)
     }
 

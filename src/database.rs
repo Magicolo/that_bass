@@ -1,39 +1,16 @@
 use crate::{
     key::{Key, Keys},
     resources::Resources,
-    table::{self, Defer, Store, Table, Tables},
-    utility::FullIterator,
+    table::{self, Defer, Store, Table, TableRead, TableUpgrade, TableWrite, Tables},
     Error,
 };
-use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
-use std::{
-    mem::{replace, ManuallyDrop},
-    sync::atomic::Ordering::*,
-};
+use std::{mem::replace, sync::atomic::Ordering::*};
 
 pub struct Database {
-    pub(crate) keys: Keys,
-    pub(crate) tables: Tables,
-    pub(crate) resources: Resources,
+    keys: Keys,
+    tables: Tables,
+    resources: Resources,
 }
-
-pub struct TableRead<'a>(
-    &'a Database,
-    &'a Table,
-    Option<RwLockReadGuard<'a, table::Inner>>,
-);
-
-pub struct TableUpgrade<'a>(
-    &'a Database,
-    &'a Table,
-    Option<RwLockUpgradableReadGuard<'a, table::Inner>>,
-);
-
-pub struct TableWrite<'a>(
-    &'a Database,
-    &'a Table,
-    Option<RwLockWriteGuard<'a, table::Inner>>,
-);
 
 impl Database {
     pub fn new() -> Self {
@@ -45,8 +22,18 @@ impl Database {
     }
 
     #[inline]
-    pub fn tables(&self) -> impl FullIterator<Item = &Table> {
-        self.tables.into_iter()
+    pub const fn keys(&self) -> &Keys {
+        &self.keys
+    }
+
+    #[inline]
+    pub const fn tables(&self) -> &Tables {
+        &self.tables
+    }
+
+    #[inline]
+    pub const fn resources(&self) -> &Resources {
+        &self.resources
     }
 
     pub(crate) fn add_to_table<S, D: 'static>(
@@ -260,6 +247,30 @@ impl Database {
         Some(TableWrite::new(self, table, table.inner.try_write()?))
     }
 
+    pub(crate) fn resolve_table_defers(&self, table_write: &mut TableWrite) {
+        while let Some(defer) = table_write.table().defer.write().pop_front() {
+            match defer {
+                Defer::Add {
+                    keys,
+                    row_index,
+                    row_count,
+                    mut initialize,
+                } => {
+                    table_write.inner_mut().grow(row_count);
+                    self.add_to_resolve(
+                        &keys,
+                        row_index,
+                        row_count,
+                        table_write.table(),
+                        table_write.inner(),
+                        |row, stores| initialize(row.0, stores),
+                    )
+                }
+                Defer::Remove { row_index } => self.remove_from_resolve(table_write, row_index),
+            }
+        }
+    }
+
     #[inline]
     const fn decompose_pending(pending: u64) -> (u32, u32) {
         ((pending >> 32) as u32, pending as u32)
@@ -352,8 +363,6 @@ impl Database {
     }
 
     fn remove_from_resolve(&self, table_write: &mut TableWrite, row_index: u32) {
-        // TODO: If `try_write` fails, defer the destroy.
-        // - Somehow, queries must be prevented from observing this key in the table...
         let last_index = Self::remove_from_reserve(table_write);
         if row_index == last_index {
             for store in table_write.inner_mut().stores.iter_mut() {
@@ -373,239 +382,5 @@ impl Database {
                     .update(table_write.table().index(), row_index);
             }
         }
-    }
-}
-
-impl<'a> TableRead<'a> {
-    #[inline]
-    pub(crate) fn new(
-        database: &'a Database,
-        table: &'a Table,
-        guard: RwLockReadGuard<'a, table::Inner>,
-    ) -> Self {
-        Self(database, table, Some(guard))
-    }
-
-    #[inline]
-    pub const fn database(&self) -> &'a Database {
-        self.0
-    }
-
-    #[inline]
-    pub const fn table(&self) -> &'a Table {
-        self.1
-    }
-
-    #[inline]
-    pub fn keys(&self) -> &[Key] {
-        self.inner().keys()
-    }
-
-    #[inline]
-    pub fn stores(&self) -> &[Store] {
-        self.inner().stores()
-    }
-
-    #[inline]
-    pub(crate) fn inner(&self) -> &table::Inner {
-        unsafe { self.2.as_deref().unwrap_unchecked() }
-    }
-
-    #[inline]
-    pub(crate) fn forget(self) {
-        let mut guard = ManuallyDrop::new(self);
-        drop(guard.2.take());
-    }
-}
-
-impl<'a> TableUpgrade<'a> {
-    #[inline]
-    pub(crate) fn new(
-        database: &'a Database,
-        table: &'a Table,
-        guard: RwLockUpgradableReadGuard<'a, table::Inner>,
-    ) -> Self {
-        Self(database, table, Some(guard))
-    }
-
-    #[inline]
-    pub const fn database(&self) -> &'a Database {
-        self.0
-    }
-
-    #[inline]
-    pub const fn table(&self) -> &'a Table {
-        self.1
-    }
-
-    #[inline]
-    pub fn keys(&self) -> &[Key] {
-        self.inner().keys()
-    }
-
-    #[inline]
-    pub fn stores(&self) -> &[Store] {
-        self.inner().stores()
-    }
-
-    #[inline]
-    pub(crate) fn inner(&self) -> &table::Inner {
-        unsafe { self.2.as_deref().unwrap_unchecked() }
-    }
-
-    #[inline]
-    pub fn upgrade(self) -> TableWrite<'a> {
-        let mut guard = ManuallyDrop::new(self);
-        TableWrite::new(
-            guard.0,
-            guard.1,
-            RwLockUpgradableReadGuard::upgrade(unsafe { guard.2.take().unwrap_unchecked() }),
-        )
-    }
-
-    #[inline]
-    pub fn try_upgrade(self) -> Result<TableWrite<'a>, Self> {
-        let mut guard = ManuallyDrop::new(self);
-        match RwLockUpgradableReadGuard::try_upgrade(unsafe { guard.2.take().unwrap_unchecked() }) {
-            Ok(write) => Ok(TableWrite::new(guard.0, guard.1, write)),
-            Err(upgrade) => Err(Self::new(guard.0, guard.1, upgrade)),
-        }
-    }
-
-    #[inline]
-    pub fn downgrade(self) -> TableRead<'a> {
-        let mut guard = ManuallyDrop::new(self);
-        TableRead::new(
-            guard.0,
-            guard.1,
-            RwLockUpgradableReadGuard::downgrade(unsafe { guard.2.take().unwrap_unchecked() }),
-        )
-    }
-
-    #[inline]
-    pub(crate) fn forget(self) {
-        let mut guard = ManuallyDrop::new(self);
-        drop(guard.2.take());
-    }
-}
-
-impl<'a> TableWrite<'a> {
-    #[inline]
-    pub(crate) fn new(
-        database: &'a Database,
-        table: &'a Table,
-        guard: RwLockWriteGuard<'a, table::Inner>,
-    ) -> Self {
-        let mut guard = Self(database, table, Some(guard));
-        guard.resolve();
-        guard
-    }
-
-    #[inline]
-    pub const fn database(&self) -> &'a Database {
-        self.0
-    }
-
-    #[inline]
-    pub const fn table(&self) -> &'a Table {
-        self.1
-    }
-
-    #[inline]
-    pub fn keys(&self) -> &[Key] {
-        self.inner().keys()
-    }
-
-    #[inline]
-    pub fn stores(&self) -> &[Store] {
-        self.inner().stores()
-    }
-
-    #[inline]
-    pub(crate) fn inner(&self) -> &table::Inner {
-        unsafe { self.2.as_deref().unwrap_unchecked() }
-    }
-
-    #[inline]
-    pub(crate) fn inner_mut(&mut self) -> &mut table::Inner {
-        unsafe { self.2.as_deref_mut().unwrap_unchecked() }
-    }
-
-    #[inline]
-    pub fn downgrade(self) -> TableRead<'a> {
-        let mut guard = ManuallyDrop::new(self);
-        TableRead::new(
-            guard.0,
-            guard.1,
-            RwLockWriteGuard::downgrade(unsafe { guard.2.take().unwrap_unchecked() }),
-        )
-    }
-
-    pub(crate) fn resolve(&mut self) {
-        while let Some(defer) = self.1.defer.write().pop_front() {
-            match defer {
-                Defer::Add {
-                    keys,
-                    row_index,
-                    row_count,
-                    mut initialize,
-                } => {
-                    self.inner_mut().grow(row_count);
-                    self.database().add_to_resolve(
-                        &keys,
-                        row_index,
-                        row_count,
-                        self.table(),
-                        self.inner(),
-                        |row, stores| initialize(row.0, stores),
-                    )
-                }
-                Defer::Remove { row_index } => self.0.remove_from_resolve(self, row_index),
-            }
-        }
-    }
-
-    #[inline]
-    pub(crate) fn forget(self) {
-        let mut guard = ManuallyDrop::new(self);
-        drop(guard.2.take());
-    }
-}
-
-impl<'a> Drop for TableRead<'a> {
-    #[inline]
-    fn drop(&mut self) {
-        if match self.table().defer.try_read() {
-            Some(defer) if defer.len() > 0 => true,
-            None => true,
-            _ => false,
-        } {
-            drop(self.2.take());
-            self.0.table_try_write(self.1);
-        }
-    }
-}
-
-impl<'a> Drop for TableUpgrade<'a> {
-    #[inline]
-    fn drop(&mut self) {
-        if match self.table().defer.try_read() {
-            Some(defer) if defer.len() > 0 => true,
-            None => true,
-            _ => false,
-        } {
-            if let Some(upgrade) = self.2.take() {
-                if let Ok(write) = RwLockUpgradableReadGuard::try_upgrade(upgrade) {
-                    TableWrite::new(self.0, self.1, write);
-                }
-            }
-        }
-    }
-}
-
-impl<'a> Drop for TableWrite<'a> {
-    #[inline]
-    fn drop(&mut self) {
-        self.resolve();
     }
 }

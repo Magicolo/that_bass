@@ -1,6 +1,7 @@
-#![feature(generators)]
-#![feature(iter_from_generator)]
 #![feature(type_alias_impl_trait)]
+#![feature(auto_traits)]
+#![feature(negative_impls)]
+#![feature(generic_associated_types)]
 
 pub mod bits;
 pub mod create;
@@ -35,7 +36,6 @@ TODO: There is no need to take a `Table` lock when querying as long as the store
         `fn write_lock() -> Self::WriteGuard`
         `fn write_chunk() -> Self::WriteChunk`
         `fn write_item() -> Self::WriteItem`
-TODO: Implement drop for `Inner` and `Table`.
 TODO: Allow creating with a struct with a `#[derive(Template)]`. All members will need to implement `Template`.
 TODO: Allow querying with a struct or enum with a `#[derive(Item)]`. All members will need to implement `Item`.
 TODO: Allow filtering with a struct or enum with a `#[derive(Filter)]`. All members will need to implement `Filter`.
@@ -63,20 +63,26 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use key::Key;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Error {
     DuplicateMeta,
     ReadWriteConflict,
     WriteWriteConflict,
+    WouldBlock,
     WouldDeadlock,
     InvalidKey,
+    InvalidType,
     WrongGeneration,
-    KeyNotInQuery,
+    KeyNotInQuery(Key),
+    KeysMustDiffer(Key),
+    QueryConflict,
 }
 
 pub struct Meta {
-    identifier: TypeId,
-    name: &'static str,
+    identifier: fn() -> TypeId,
+    name: fn() -> &'static str,
     allocate: fn(usize) -> NonNull<()>,
     free: unsafe fn(NonNull<()>, usize, usize),
     copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), usize),
@@ -84,57 +90,46 @@ pub struct Meta {
 }
 
 pub trait Datum: Sized + 'static {
-    fn meta() -> Meta {
-        Meta::new::<Self>()
-    }
-}
-
-impl Meta {
-    pub fn new<T: 'static>() -> Self {
-        Self {
-            identifier: TypeId::of::<T>(),
-            name: type_name::<T>(),
+    #[inline]
+    fn meta() -> &'static Meta {
+        &Meta {
+            identifier: TypeId::of::<Self>,
+            name: type_name::<Self>,
             allocate: |capacity| {
-                let mut items = Vec::<T>::with_capacity(capacity);
+                let mut items = Vec::<Self>::with_capacity(capacity);
                 let data = unsafe { NonNull::new_unchecked(items.as_mut_ptr().cast()) };
                 forget(items);
                 data
             },
             free: |data, count, capacity| unsafe {
-                Vec::from_raw_parts(data.as_ptr().cast::<T>(), count, capacity);
+                Vec::from_raw_parts(data.as_ptr().cast::<Self>(), count, capacity);
             },
-            copy: if size_of::<T>() > 0 {
-                |source, target, count| unsafe {
-                    if count > 0 {
-                        let source = source.0.as_ptr().cast::<T>().add(source.1);
-                        let target = target.0.as_ptr().cast::<T>().add(target.1);
-                        copy(source, target, count);
-                    }
+            copy: |source, target, count| unsafe {
+                if size_of::<Self>() > 0 && count > 0 {
+                    let source = source.0.as_ptr().cast::<Self>().add(source.1);
+                    let target = target.0.as_ptr().cast::<Self>().add(target.1);
+                    copy(source, target, count);
                 }
-            } else {
-                |_, _, _| {}
             },
-            drop: if needs_drop::<T>() {
-                |data, index, count| unsafe {
-                    if count > 0 {
-                        let data = data.as_ptr().cast::<T>().add(index);
-                        drop_in_place(slice_from_raw_parts_mut(data, count));
-                    }
+            drop: |data, index, count| unsafe {
+                if needs_drop::<Self>() && count > 0 {
+                    let data = data.as_ptr().cast::<Self>().add(index);
+                    drop_in_place(slice_from_raw_parts_mut(data, count));
                 }
-            } else {
-                |_, _, _| {}
             },
         }
     }
+}
 
+impl Meta {
     #[inline]
-    pub const fn identifier(&self) -> TypeId {
-        self.identifier
+    pub fn identifier(&self) -> TypeId {
+        (self.identifier)()
     }
 
     #[inline]
-    pub const fn name(&self) -> &'static str {
-        self.name
+    pub fn name(&self) -> &'static str {
+        (self.name)()
     }
 }
 
@@ -170,7 +165,7 @@ mod tests {
         let database = Database::new();
         assert_eq!(database.tables().len(), 0);
         database.create::<A>()?;
-        let table = database.tables().next().unwrap();
+        let table = database.tables().get(0).unwrap();
         assert!(table.has(TypeId::of::<A>()));
         Ok(())
     }
@@ -180,7 +175,7 @@ mod tests {
         let database = Database::new();
         assert_eq!(database.tables().len(), 0);
         database.create::<(A, B)>()?;
-        let table = database.tables().next().unwrap();
+        let table = database.tables().get(0).unwrap();
         assert!(table.has(TypeId::of::<A>()));
         assert!(table.has(TypeId::of::<B>()));
         Ok(())
@@ -348,7 +343,7 @@ mod tests {
         assert!(query.items().next().is_none());
         let key = database.create()?.one(());
         assert!(query.items().next().is_none());
-        assert_eq!(query.item(key).err(), Some(Error::KeyNotInQuery));
+        assert_eq!(query.item(key).err(), Some(Error::KeyNotInQuery(key)));
         Ok(())
     }
 
@@ -376,11 +371,52 @@ mod tests {
     fn query1_item_nested_in_query2_items_does_not_deadlock() -> Result<(), Error> {
         let database = Database::new();
         let key = database.create()?.one(C(1));
+
         let mut query1 = database.query::<&mut C>()?;
         let mut query2 = database.query::<&mut C>()?;
         for _item1 in query1.items() {
             assert_eq!(query2.item(key).err(), Some(Error::WouldDeadlock));
+            assert_eq!(
+                query2.item_with(key, |_item2| assert!(false)).err(),
+                Some(Error::WouldDeadlock)
+            );
         }
+        query1.item_with(key, |_item1| {
+            for _item2 in query2.items() {
+                assert!(false);
+            }
+        })?;
+
+        drop(query2);
+        let mut query3 = database.query::<&mut C>()?;
+        for _item1 in query1.items() {
+            assert_eq!(query3.item(key).err(), Some(Error::WouldDeadlock));
+            assert_eq!(
+                query3.item_with(key, |_item3| assert!(false)).err(),
+                Some(Error::WouldDeadlock)
+            );
+        }
+        query1.item_with(key, |_item1| {
+            for _item3 in query3.items() {
+                assert!(false);
+            }
+        })?;
+
+        drop(query1);
+        let mut query4 = database.query::<&mut C>()?;
+        for _item1 in query3.items() {
+            assert_eq!(query4.item(key).err(), Some(Error::WouldDeadlock));
+            assert_eq!(
+                query4.item_with(key, |_item2| assert!(false)).err(),
+                Some(Error::WouldDeadlock)
+            );
+        }
+        query3.item_with(key, |_item3| {
+            for _item4 in query4.items() {
+                assert!(false);
+            }
+        })?;
+
         Ok(())
     }
 
@@ -388,21 +424,81 @@ mod tests {
     fn query1_items_nested_in_query2_items_does_not_deadlock() -> Result<(), Error> {
         let database = Database::new();
         database.create()?.one(C(1));
-        let mut query1 = database.query::<&mut C>()?;
-        let mut query2 = database.query::<&mut C>()?;
 
         // TOOD: Give a way to iterate over skipped items (see `query.skip` which is already populated).
+        let mut query1 = database.query::<&mut C>()?;
+        let mut query2 = database.query::<&mut C>()?;
         for _item1 in query1.items() {
             for _item2 in query2.items() {
                 // Getting here means that a mutable reference would be aliased; it must never happen.
                 assert!(false);
             }
         }
+        query1.items_with(|_item1| {
+            for _item2 in query2.items() {
+                assert!(false);
+            }
+        });
+
+        drop(query2);
+        let mut query3 = database.query::<&mut C>()?;
+        for _item1 in query1.items() {
+            for _item2 in query3.items() {
+                assert!(false);
+            }
+        }
+        query1.items_with(|_item1| {
+            for _item3 in query3.items() {
+                assert!(false);
+            }
+        });
+
+        drop(query1);
+        let mut query4 = database.query::<&mut C>()?;
+        for _item1 in query3.items() {
+            for _item2 in query4.items() {
+                assert!(false);
+            }
+        }
+        query3.items_with(|_item3| {
+            for _item4 in query4.items() {
+                assert!(false);
+            }
+        });
 
         Ok(())
     }
 
     #[test]
+    fn copy_from() -> Result<(), Error> {
+        struct Position([f64; 3]);
+        struct CopyPosition(Key);
+        impl Datum for Position {}
+        impl Datum for CopyPosition {}
+
+        let database = Database::new();
+        let mut key = database.create()?.one(Position([1., 2., 3.]));
+        let create = database.create()?;
+        for i in 0..100 {
+            key = create.one((Position([i as _; 3]), CopyPosition(key)));
+        }
+        let mut query1 = database.query::<(Key, &mut Position, &CopyPosition)>()?;
+        let mut query2 = database.query::<&Position>()?;
+
+        for (key, position, copy) in query1.items() {
+            if key == copy.0 {
+                continue;
+            } else {
+                position.0 = unsafe { query2.item_unchecked(copy.0)? }.0;
+            }
+        }
+        assert_eq!(query1.items().count(), 100);
+        assert!(query1.items().all(|(_, item, _)| item.0 == [1., 2., 3.]));
+        assert_eq!(query2.items().count(), 101);
+        assert!(query2.items().all(|item| item.0 == [1., 2., 3.]));
+        Ok(())
+    }
+
     fn boba() -> Result<(), Error> {
         let database = Database::new();
         let create = database.create()?;
@@ -412,8 +508,12 @@ mod tests {
             let query = &mut query;
             let mut handles = Vec::new();
             let mut counts = Vec::new();
-            for _ in 0..10 {
-                handles.push(scope.spawn(move || create.all_n([C(123); 10_000])));
+            for _ in 0..100 {
+                handles.push(scope.spawn(move || {
+                    for _ in 0..100 {
+                        create.all_n([C(123); 100]);
+                    }
+                }));
                 counts.push(query.items().count());
             }
             for handle in handles {
@@ -443,11 +543,11 @@ mod tests {
             let _item2 = query2.item(key);
             // dbg!(_item1.0);
         }
-        query1.items_with(|item| {
-            a = Some(item.clone());
-            // b = Some(item); // The closure properly prevents this!
-            let _item2 = query2.item(key);
-        });
+        // query1.items_with(|item| {
+        //     a = Some(item.clone());
+        //     // b = Some(item); // The closure properly prevents this!
+        //     let _item2 = query2.item(key);
+        // });
         if let Some(mut a) = a {
             a.0 += 1;
         }
@@ -458,21 +558,360 @@ mod tests {
 
         Ok(())
     }
+
+    fn jango() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(C(1));
+        let mut query = database.query::<&mut C>()?;
+        for _ in query.items() {}
+        Ok(())
+        // const ITERATIONS: usize = 100_000_000;
+        // let lock = RwLock::new(1);
+        // let mut locks = Vec::with_capacity(ITERATIONS);
+        // let mut sum = || {
+        //     let mut sum = 0;
+        //     for _ in 0..ITERATIONS {
+        //         let read = lock.read_recursive();
+        //         sum += *read;
+        //         locks.push(read);
+        //     }
+        //     locks.clear();
+        //     sum
+        // };
+        // dbg!((sum(), sum(), sum()));
+    }
+}
+
+mod queries {
+    use parking_lot::MappedRwLockReadGuard;
+
+    use crate::{
+        database::Database,
+        key::Key,
+        query::Context,
+        table::{Store, Table},
+        Datum, Error,
+    };
+    use std::{
+        any::TypeId,
+        collections::HashMap,
+        marker::PhantomData,
+        ops::{Deref, DerefMut},
+    };
+
+    pub trait Columns {
+        type State: for<'a> Lock<'a>;
+        fn declare(context: Context) -> Result<(), Error>;
+        fn initialize(table: &Table) -> Option<Self::State>;
+    }
+
+    pub trait Lock<'a> {
+        type Guard;
+        type Item;
+        type Chunk;
+
+        fn try_lock(&self, keys: &'a [Key], stores: &'a [Store]) -> Option<Self::Guard>;
+        fn lock(&self, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard;
+        fn item(guard: &mut Self::Guard, index: usize) -> Self::Item;
+        fn chunk(guard: &mut Self::Guard) -> Self::Chunk;
+    }
+
+    pub trait Item {
+        fn key(&self) -> Key;
+    }
+
+    pub struct Read<C>(usize, PhantomData<C>);
+
+    impl<D: Datum> Columns for &D {
+        type State = Read<D>;
+
+        #[inline]
+        fn declare(mut context: Context) -> Result<(), Error> {
+            context.read::<D>()
+        }
+
+        #[inline]
+        fn initialize(table: &Table) -> Option<Self::State> {
+            Some(Read(table.store(TypeId::of::<D>())?, PhantomData))
+        }
+    }
+
+    impl<'a, D: Datum> Lock<'a> for Read<D> {
+        type Guard = MappedRwLockReadGuard<'a, [D]>;
+        type Item = &'a D;
+        type Chunk = &'a [D];
+
+        #[inline]
+        fn try_lock(&self, keys: &'a [Key], stores: &'a [Store]) -> Option<Self::Guard> {
+            debug_assert!(self.0 < stores.len());
+            let store = unsafe { stores.get_unchecked(self.0) };
+            unsafe { store.try_read(.., keys.len()) }
+        }
+
+        #[inline]
+        fn lock(&self, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard {
+            debug_assert!(self.0 < stores.len());
+            let store = unsafe { stores.get_unchecked(self.0) };
+            unsafe { store.read(.., keys.len()) }
+        }
+
+        #[inline]
+        fn item(guard: &mut Self::Guard, index: usize) -> Self::Item {
+            unsafe { Self::chunk(guard).get_unchecked(index) }
+        }
+
+        #[inline]
+        fn chunk(guard: &mut Self::Guard) -> Self::Chunk {
+            // TODO: Fix this...
+            unsafe { &*(guard as *mut Self::Guard) }
+        }
+    }
+
+    pub trait Query {
+        type Item: Item;
+        type Items<'a>: Iterator<Item = Self::Item>
+        where
+            Self: 'a;
+
+        fn item(&mut self, key: Key) -> Result<Self::Item, Error>;
+        fn items(&mut self) -> Self::Items<'_>;
+
+        #[inline]
+        fn join<Q: Query, B: FnMut(&Self::Item) -> Key>(self, query: Q, by: B) -> Join<Self, Q, B>
+        where
+            Self: Sized,
+        {
+            Join {
+                left: self,
+                right: query,
+                by,
+            }
+        }
+    }
+
+    pub struct Rows<'a, C: Columns> {
+        database: &'a Database,
+        indices: HashMap<u32, u32>,
+        states: Vec<(C::State, &'a Table)>,
+        _marker: PhantomData<fn(C)>,
+    }
+
+    pub struct Join<L, R, B> {
+        left: L,
+        right: R,
+        by: B,
+    }
+
+    impl Item for Key {
+        #[inline]
+        fn key(&self) -> Key {
+            *self
+        }
+    }
+
+    impl<I: Item> Item for &I {
+        #[inline]
+        fn key(&self) -> Key {
+            I::key(self)
+        }
+    }
+
+    impl<I: Item> Item for &mut I {
+        #[inline]
+        fn key(&self) -> Key {
+            I::key(self)
+        }
+    }
+
+    impl<I: Item> Item for (I,) {
+        #[inline]
+        fn key(&self) -> Key {
+            self.0.key()
+        }
+    }
+
+    impl<I: Item, T1> Item for (I, T1) {
+        #[inline]
+        fn key(&self) -> Key {
+            self.0.key()
+        }
+    }
+
+    impl<I: Item, T1, T2> Item for (I, T1, T2) {
+        #[inline]
+        fn key(&self) -> Key {
+            self.0.key()
+        }
+    }
+
+    impl<I: Item, T1, T2, T3> Item for (I, T1, T2, T3) {
+        #[inline]
+        fn key(&self) -> Key {
+            self.0.key()
+        }
+    }
+
+    pub struct Row<C>(Key, C);
+
+    impl<C> Item for Row<C> {
+        #[inline]
+        fn key(&self) -> Key {
+            self.0
+        }
+    }
+
+    impl<C> Deref for Row<C> {
+        type Target = C;
+
+        #[inline]
+        fn deref(&self) -> &Self::Target {
+            &self.1
+        }
+    }
+
+    impl<C> DerefMut for Row<C> {
+        #[inline]
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.1
+        }
+    }
+
+    impl<'a, C: Columns> Query for Rows<'a, C> {
+        type Item = (Key, <C::State as Lock<'a>>::Item);
+        type Items<'b> = impl Iterator<Item = Self::Item> where Self: 'b;
+
+        #[inline]
+        fn item(&mut self, key: Key) -> Result<Self::Item, Error> {
+            todo!()
+        }
+
+        #[inline]
+        fn items(&mut self) -> Self::Items<'_> {
+            [].into_iter()
+        }
+    }
+
+    impl<L: Query, R: Query, B: FnMut(&L::Item) -> Key> Query for Join<L, R, B> {
+        type Item = (L::Item, R::Item);
+        type Items<'a> = impl Iterator<Item = Self::Item> where Self: 'a;
+
+        #[inline]
+        fn item(&mut self, key: Key) -> Result<Self::Item, Error> {
+            let left = self.left.item(key)?;
+            let by = (self.by)(&left);
+            if key == by {
+                Err(Error::KeysMustDiffer(by))
+            } else {
+                Ok((left, self.right.item(by)?))
+            }
+        }
+
+        #[inline]
+        fn items(&mut self) -> Self::Items<'_> {
+            self.left.items().filter_map(|left| {
+                let by = (self.by)(&left);
+                if left.key() == by {
+                    None
+                } else {
+                    // TODO: Call `item_unchecked`?
+                    Some((left, self.right.item(by).ok()?))
+                }
+            })
+        }
+    }
 }
 
 mod locks {
-    use parking_lot::RwLock;
-    use std::rc::Weak;
+    use std::marker::PhantomData;
 
-    pub enum Kind {
-        Read,
-        Upgrade,
-        Write,
+    pub trait Datum {}
+    pub trait Item {}
+    impl<D: Datum> Item for &D {}
+    impl<D: Datum> Item for &mut D {}
+    impl Item for () {}
+    impl<I1: Item> Item for (I1,) {}
+    impl<I1: Item, I2: Item + Allow<I1>> Item for (I1, I2) {}
+    impl<I1: Item, I2: Item + Allow<I1>, I3: Item + Allow<I1> + Allow<I2>> Item for (I1, I2, I3) {}
+    impl Datum for bool {}
+    impl Datum for char {}
+
+    pub auto trait Safe {}
+    impl<T, U> Safe for (&T, &U) {}
+    impl<T> !Safe for (&mut T, &T) {}
+    impl<T> !Safe for (&mut T, &mut T) {}
+    impl<T> !Safe for (&T, &mut T) {}
+
+    pub trait Allow<T> {}
+    impl<T, U> Allow<U> for &T where for<'a> (&'a T, U): Safe {}
+    impl<T, U> Allow<U> for &mut T where for<'a> (&'a mut T, U): Safe {}
+    impl<U> Allow<U> for () {}
+    impl<T1, U: Allow<T1>> Allow<U> for (T1,) {}
+    impl<T1, T2, U: Allow<T1> + Allow<T2>> Allow<U> for (T1, T2) {}
+    impl<T1, T2, T3, U: Allow<T1> + Allow<T2> + Allow<T3>> Allow<U> for (T1, T2, T3) {}
+
+    struct Query<I: Item>(PhantomData<I>);
+    impl<I: Item, U: Allow<I>> Allow<U> for Query<I> {}
+    impl<I: Item> Query<I> {
+        pub fn new() -> Self {
+            todo!()
+        }
+        pub fn each(&mut self, each: impl FnMut(I) + 'static) {}
+        pub fn each_with<S: Allow<I>>(&mut self, state: S, each: impl FnMut(I, S) + 'static) {}
     }
-    pub struct Locks(Vec<Weak<RwLock<()>>>);
 
-    impl Locks {
-        fn boba(&self) {}
+    fn boba<T, U>(a: T, b: U)
+    where
+        (T, U): Item,
+    {
+    }
+    fn jango<T: Item>(a: T) {}
+    fn karl(mut query1: Query<&mut bool>) {
+        let a = &mut 'a';
+        let c = &mut true;
+        let e = true;
+        let query2 = Query::<&mut char>::new();
+        query1.each(move |b| *b = e);
+        query1.each_with(a, move |b, c| *b = *c == '0');
+        query1.each_with(query2, move |b, mut query| {
+            query.each_with(b, |c, b| *b = *c == '0')
+        });
+        // query.each_with(c, move |b, c| *b = *c);
+        // query.each(|b| *b = *c);
+        // karl([a], move |b: &bool, a| {
+        //     *a[0] = *b;
+        //     // *c = *a;
+        //     d += 1;
+        // });
+    }
+    fn fett<T: Datum>(value: &T) {
+        // Succeed
+
+        jango(&true);
+        jango(&mut true);
+        jango((&true, &true));
+        jango((&mut 'a', &true));
+        jango((&true, &mut 'a'));
+
+        boba(value, &true);
+        boba(&'a', &mut true);
+        boba(&mut 'a', &mut true);
+        boba(&true, (&'a', &true));
+        boba((&'a', &true), &true);
+        boba(value, value);
+
+        // Fail
+        // boba(&mut 'a', value);
+        // jango(((&true, ((),)), (&mut 'a', (), &mut true)));
+        // jango((&mut true, &true));
+        // jango((&true, &mut true));
+        // jango((&mut true, &mut true));
+        // boba(&false, &mut true);
+        // boba(&mut false, &true);
+        // boba(&true, (&mut 'b', &mut true));
+        // boba(
+        //     (&'a', (&true, &'b', ((), ()))),
+        //     ((), &'b', (&'a', (&mut true, ((), ())))),
+        // );
     }
 }
 

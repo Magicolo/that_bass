@@ -181,8 +181,8 @@ impl<L: Iterator, R: Iterator> Iterator for Iter<L, R> {
     }
 }
 
-impl<T> Deref for Or<T, T> {
-    type Target = T;
+impl<T: Deref> Deref for Or<T, T> {
+    type Target = T::Target;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
@@ -193,7 +193,7 @@ impl<T> Deref for Or<T, T> {
     }
 }
 
-impl<T> DerefMut for Or<T, T> {
+impl<T: DerefMut> DerefMut for Or<T, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
