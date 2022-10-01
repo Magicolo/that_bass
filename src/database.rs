@@ -52,7 +52,7 @@ impl Database {
         // All keys can be reserved at once.
         self.keys.reserve(keys);
 
-        // Hold this lock until the operation is fully complete such that no move operation are interleaved.
+        // Hold this lock until the operation is fully completed such that no move operations are interleaved.
         let table_upgrade = self.table_upgrade(table);
         match Self::add_to_reserve(keys.len() as _, table_upgrade) {
             Ok((row_index, row_count, table_read)) => {
@@ -247,7 +247,7 @@ impl Database {
         Some(TableWrite::new(self, table, table.inner.try_write()?))
     }
 
-    pub(crate) fn resolve_table_defers(&self, table_write: &mut TableWrite) {
+    pub(crate) fn resolve_table(&self, table_write: &mut TableWrite) {
         while let Some(defer) = table_write.table().defer.write().pop_front() {
             match defer {
                 Defer::Add {
@@ -294,7 +294,7 @@ impl Database {
 
         // There can not be more than `u32::MAX` keys at a given time.
         assert!(row_count < u32::MAX as _);
-        let table_read = if row_count > table_upgrade.inner().capacity() {
+        let table_read = if row_count > table_upgrade.capacity() {
             match table_upgrade.try_upgrade() {
                 Ok(mut table_write) => {
                     table_write.inner_mut().grow(row_count);
@@ -302,7 +302,7 @@ impl Database {
                 }
                 Err(table_upgrade) => {
                     // Do not run `TableUpgrade::drop` since it just failed to upgrade its lock.
-                    table_upgrade.forget();
+                    drop(table_upgrade.guard());
                     return Err((row_index, row_count));
                 }
             }

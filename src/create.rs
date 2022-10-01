@@ -4,11 +4,12 @@ use crate::{
     table::{Store, Table},
     Datum, Error, Meta,
 };
-use std::{collections::BTreeSet, marker::PhantomData, sync::Arc};
+use std::{any::TypeId, collections::HashSet, marker::PhantomData, sync::Arc};
 
 pub unsafe trait Template: 'static {
     type State: Send + Sync;
-    fn initialize(context: Context) -> Self::State;
+    fn declare(context: Context) -> Result<(), Error>;
+    fn initialize(table: &Table) -> Result<Self::State, Error>;
     unsafe fn apply(self, state: &Self::State, row: usize, stores: &[Store]);
 }
 
@@ -21,6 +22,7 @@ pub struct Create<'a, T: Template> {
 }
 
 pub struct Context<'a> {
+    types: &'a mut HashSet<TypeId>,
     metas: &'a mut Vec<&'static Meta>,
 }
 
@@ -30,12 +32,16 @@ impl Database {
 
         let shared = self.resources().global(|| {
             let mut metas = Vec::new();
-            let context = Context { metas: &mut metas };
-            let state = Arc::new(T::initialize(context));
-            let mut types = BTreeSet::new();
-            if metas.iter().all(|meta| types.insert(meta.identifier)) {
-                metas.sort_unstable_by_key(|meta| meta.identifier);
+            let context = Context {
+                types: &mut HashSet::new(),
+                metas: &mut metas,
+            };
+            T::declare(context)?;
+            let mut types = HashSet::new();
+            if metas.iter().all(|meta| types.insert(meta.identifier())) {
+                metas.sort_unstable_by_key(|meta| meta.identifier());
                 let table = self.tables().find_or_add(metas, 0);
+                let state = Arc::new(T::initialize(&table)?);
                 Ok(Shared::<T>(state, table, PhantomData))
             } else {
                 Err(Error::DuplicateMeta)
@@ -53,32 +59,48 @@ impl Database {
 }
 
 impl Context<'_> {
-    pub fn declare(&mut self, meta: &'static Meta) {
-        self.metas.push(meta);
+    pub fn declare(&mut self, meta: &'static Meta) -> Result<(), Error> {
+        if self.types.insert(meta.identifier()) {
+            self.metas.push(meta);
+            Ok(())
+        } else {
+            Err(Error::DuplicateMeta)
+        }
     }
 
     pub fn own(&mut self) -> Context {
-        Context { metas: self.metas }
+        Context {
+            types: self.types,
+            metas: self.metas,
+        }
     }
 }
 
 unsafe impl<D: Datum> Template for D {
-    type State = ();
+    type State = usize;
 
-    fn initialize(mut context: Context) -> Self::State {
-        context.declare(D::meta());
+    fn declare(mut context: Context) -> Result<(), Error> {
+        context.declare(D::meta())
+    }
+
+    fn initialize(table: &Table) -> Result<Self::State, Error> {
+        table.store::<D>()
     }
 
     #[inline]
-    unsafe fn apply(self, _: &Self::State, row: usize, stores: &[Store]) {
-        unsafe { stores.get_unchecked(0).set_unlocked_at(row, self) };
+    unsafe fn apply(self, &state: &Self::State, row: usize, stores: &[Store]) {
+        unsafe { stores.get_unchecked(state).set_unlocked_at(row, self) };
     }
 }
 
 unsafe impl Template for () {
     type State = ();
-    #[inline]
-    fn initialize(_: Context) -> Self::State {}
+    fn declare(_: Context) -> Result<(), Error> {
+        Ok(())
+    }
+    fn initialize(_: &Table) -> Result<Self::State, Error> {
+        Ok(())
+    }
     #[inline]
     unsafe fn apply(self, _: &Self::State, _: usize, _: &[Store]) {}
 }
@@ -86,8 +108,13 @@ unsafe impl Template for () {
 unsafe impl<T1: Template, T2: Template> Template for (T1, T2) {
     type State = (T1::State, T2::State);
 
-    fn initialize(mut context: Context) -> Self::State {
-        (T1::initialize(context.own()), T2::initialize(context.own()))
+    fn declare(mut context: Context) -> Result<(), Error> {
+        T1::declare(context.own())?;
+        T2::declare(context)
+    }
+
+    fn initialize(table: &Table) -> Result<Self::State, Error> {
+        Ok((T1::initialize(table)?, T2::initialize(table)?))
     }
 
     #[inline]

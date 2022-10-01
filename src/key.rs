@@ -74,8 +74,8 @@ unsafe impl Item for Key {
         Ok(())
     }
 
-    fn initialize(_: &Table) -> Option<Self::State> {
-        Some(State)
+    fn initialize(_: &Table) -> Result<Self::State, Error> {
+        Ok(State)
     }
 }
 
@@ -268,6 +268,16 @@ impl Slot {
     #[inline]
     pub fn indices(&self) -> (u32, u32) {
         Self::decompose_indices(self.indices.load(Acquire))
+    }
+
+    #[inline]
+    pub fn table(&self) -> u32 {
+        self.indices().0
+    }
+
+    #[inline]
+    pub fn store(&self) -> u32 {
+        self.indices().1
     }
 }
 

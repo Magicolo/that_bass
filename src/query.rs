@@ -61,7 +61,7 @@ pub struct Has<D: Datum>(PhantomData<D>);
 pub unsafe trait Item {
     type State: for<'a> Lock<'a> + 'static;
     fn declare(context: Context) -> Result<(), Error>;
-    fn initialize(table: &Table) -> Option<Self::State>;
+    fn initialize(table: &Table) -> Result<Self::State, Error>;
 }
 
 pub trait Lock<'a> {
@@ -251,7 +251,7 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
     fn update(&mut self) -> Result<(), Error> {
         while let Some(table) = self.database.tables().get(self.index) {
             if self.filter.filter(&table) {
-                if let Some(state) = I::initialize(&table) {
+                if let Ok(state) = I::initialize(&table) {
                     let table_locks = self
                         .database
                         .resources()
@@ -486,8 +486,8 @@ unsafe impl<D: Datum> Item for &D {
         context.read::<D>()
     }
 
-    fn initialize(table: &Table) -> Option<Self::State> {
-        Some(Read(table.store(TypeId::of::<D>())?, PhantomData))
+    fn initialize(table: &Table) -> Result<Self::State, Error> {
+        Ok(Read(table.store::<D>()?, PhantomData))
     }
 }
 
@@ -541,8 +541,8 @@ unsafe impl<D: Datum> Item for &mut D {
         context.write::<D>()
     }
 
-    fn initialize(table: &Table) -> Option<Self::State> {
-        Some(Write(table.store(TypeId::of::<D>())?, PhantomData))
+    fn initialize(table: &Table) -> Result<Self::State, Error> {
+        Ok(Write(table.store::<D>()?, PhantomData))
     }
 }
 
@@ -595,8 +595,8 @@ unsafe impl Item for () {
         Ok(())
     }
 
-    fn initialize(_: &Table) -> Option<Self::State> {
-        Some(())
+    fn initialize(_: &Table) -> Result<Self::State, Error> {
+        Ok(())
     }
 }
 
@@ -630,8 +630,8 @@ unsafe impl<I1: Item, I2: Item> Item for (I1, I2) {
         Ok(())
     }
 
-    fn initialize(table: &Table) -> Option<Self::State> {
-        Some((I1::initialize(table)?, I2::initialize(table)?))
+    fn initialize(table: &Table) -> Result<Self::State, Error> {
+        Ok((I1::initialize(table)?, I2::initialize(table)?))
     }
 }
 
@@ -645,8 +645,8 @@ unsafe impl<I1: Item, I2: Item, I3: Item> Item for (I1, I2, I3) {
         Ok(())
     }
 
-    fn initialize(table: &Table) -> Option<Self::State> {
-        Some((
+    fn initialize(table: &Table) -> Result<Self::State, Error> {
+        Ok((
             I1::initialize(table)?,
             I2::initialize(table)?,
             I3::initialize(table)?,

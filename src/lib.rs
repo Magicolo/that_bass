@@ -2,6 +2,9 @@
 #![feature(auto_traits)]
 #![feature(negative_impls)]
 #![feature(generic_associated_types)]
+#![feature(generators)]
+#![feature(iter_from_generator)]
+#![feature(generator_trait)]
 
 pub mod bits;
 pub mod create;
@@ -10,6 +13,7 @@ pub mod destroy;
 pub mod key;
 pub mod or;
 pub mod query;
+pub mod query2;
 pub mod resources;
 pub mod table;
 mod utility;
@@ -75,9 +79,13 @@ pub enum Error {
     InvalidKey,
     InvalidType,
     WrongGeneration,
+    FailedToLockTable,
+    FailedToLockColumns,
     KeyNotInQuery(Key),
     KeysMustDiffer(Key),
     QueryConflict,
+    Invalid,
+    MissingStore(&'static str),
 }
 
 pub struct Meta {
@@ -579,245 +587,6 @@ mod tests {
         //     sum
         // };
         // dbg!((sum(), sum(), sum()));
-    }
-}
-
-mod queries {
-    use parking_lot::MappedRwLockReadGuard;
-
-    use crate::{
-        database::Database,
-        key::Key,
-        query::Context,
-        table::{Store, Table},
-        Datum, Error,
-    };
-    use std::{
-        any::TypeId,
-        collections::HashMap,
-        marker::PhantomData,
-        ops::{Deref, DerefMut},
-    };
-
-    pub trait Columns {
-        type State: for<'a> Lock<'a>;
-        fn declare(context: Context) -> Result<(), Error>;
-        fn initialize(table: &Table) -> Option<Self::State>;
-    }
-
-    pub trait Lock<'a> {
-        type Guard;
-        type Item;
-        type Chunk;
-
-        fn try_lock(&self, keys: &'a [Key], stores: &'a [Store]) -> Option<Self::Guard>;
-        fn lock(&self, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard;
-        fn item(guard: &mut Self::Guard, index: usize) -> Self::Item;
-        fn chunk(guard: &mut Self::Guard) -> Self::Chunk;
-    }
-
-    pub trait Item {
-        fn key(&self) -> Key;
-    }
-
-    pub struct Read<C>(usize, PhantomData<C>);
-
-    impl<D: Datum> Columns for &D {
-        type State = Read<D>;
-
-        #[inline]
-        fn declare(mut context: Context) -> Result<(), Error> {
-            context.read::<D>()
-        }
-
-        #[inline]
-        fn initialize(table: &Table) -> Option<Self::State> {
-            Some(Read(table.store(TypeId::of::<D>())?, PhantomData))
-        }
-    }
-
-    impl<'a, D: Datum> Lock<'a> for Read<D> {
-        type Guard = MappedRwLockReadGuard<'a, [D]>;
-        type Item = &'a D;
-        type Chunk = &'a [D];
-
-        #[inline]
-        fn try_lock(&self, keys: &'a [Key], stores: &'a [Store]) -> Option<Self::Guard> {
-            debug_assert!(self.0 < stores.len());
-            let store = unsafe { stores.get_unchecked(self.0) };
-            unsafe { store.try_read(.., keys.len()) }
-        }
-
-        #[inline]
-        fn lock(&self, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard {
-            debug_assert!(self.0 < stores.len());
-            let store = unsafe { stores.get_unchecked(self.0) };
-            unsafe { store.read(.., keys.len()) }
-        }
-
-        #[inline]
-        fn item(guard: &mut Self::Guard, index: usize) -> Self::Item {
-            unsafe { Self::chunk(guard).get_unchecked(index) }
-        }
-
-        #[inline]
-        fn chunk(guard: &mut Self::Guard) -> Self::Chunk {
-            // TODO: Fix this...
-            unsafe { &*(guard as *mut Self::Guard) }
-        }
-    }
-
-    pub trait Query {
-        type Item: Item;
-        type Items<'a>: Iterator<Item = Self::Item>
-        where
-            Self: 'a;
-
-        fn item(&mut self, key: Key) -> Result<Self::Item, Error>;
-        fn items(&mut self) -> Self::Items<'_>;
-
-        #[inline]
-        fn join<Q: Query, B: FnMut(&Self::Item) -> Key>(self, query: Q, by: B) -> Join<Self, Q, B>
-        where
-            Self: Sized,
-        {
-            Join {
-                left: self,
-                right: query,
-                by,
-            }
-        }
-    }
-
-    pub struct Rows<'a, C: Columns> {
-        database: &'a Database,
-        indices: HashMap<u32, u32>,
-        states: Vec<(C::State, &'a Table)>,
-        _marker: PhantomData<fn(C)>,
-    }
-
-    pub struct Join<L, R, B> {
-        left: L,
-        right: R,
-        by: B,
-    }
-
-    impl Item for Key {
-        #[inline]
-        fn key(&self) -> Key {
-            *self
-        }
-    }
-
-    impl<I: Item> Item for &I {
-        #[inline]
-        fn key(&self) -> Key {
-            I::key(self)
-        }
-    }
-
-    impl<I: Item> Item for &mut I {
-        #[inline]
-        fn key(&self) -> Key {
-            I::key(self)
-        }
-    }
-
-    impl<I: Item> Item for (I,) {
-        #[inline]
-        fn key(&self) -> Key {
-            self.0.key()
-        }
-    }
-
-    impl<I: Item, T1> Item for (I, T1) {
-        #[inline]
-        fn key(&self) -> Key {
-            self.0.key()
-        }
-    }
-
-    impl<I: Item, T1, T2> Item for (I, T1, T2) {
-        #[inline]
-        fn key(&self) -> Key {
-            self.0.key()
-        }
-    }
-
-    impl<I: Item, T1, T2, T3> Item for (I, T1, T2, T3) {
-        #[inline]
-        fn key(&self) -> Key {
-            self.0.key()
-        }
-    }
-
-    pub struct Row<C>(Key, C);
-
-    impl<C> Item for Row<C> {
-        #[inline]
-        fn key(&self) -> Key {
-            self.0
-        }
-    }
-
-    impl<C> Deref for Row<C> {
-        type Target = C;
-
-        #[inline]
-        fn deref(&self) -> &Self::Target {
-            &self.1
-        }
-    }
-
-    impl<C> DerefMut for Row<C> {
-        #[inline]
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            &mut self.1
-        }
-    }
-
-    impl<'a, C: Columns> Query for Rows<'a, C> {
-        type Item = (Key, <C::State as Lock<'a>>::Item);
-        type Items<'b> = impl Iterator<Item = Self::Item> where Self: 'b;
-
-        #[inline]
-        fn item(&mut self, key: Key) -> Result<Self::Item, Error> {
-            todo!()
-        }
-
-        #[inline]
-        fn items(&mut self) -> Self::Items<'_> {
-            [].into_iter()
-        }
-    }
-
-    impl<L: Query, R: Query, B: FnMut(&L::Item) -> Key> Query for Join<L, R, B> {
-        type Item = (L::Item, R::Item);
-        type Items<'a> = impl Iterator<Item = Self::Item> where Self: 'a;
-
-        #[inline]
-        fn item(&mut self, key: Key) -> Result<Self::Item, Error> {
-            let left = self.left.item(key)?;
-            let by = (self.by)(&left);
-            if key == by {
-                Err(Error::KeysMustDiffer(by))
-            } else {
-                Ok((left, self.right.item(by)?))
-            }
-        }
-
-        #[inline]
-        fn items(&mut self) -> Self::Items<'_> {
-            self.left.items().filter_map(|left| {
-                let by = (self.by)(&left);
-                if left.key() == by {
-                    None
-                } else {
-                    // TODO: Call `item_unchecked`?
-                    Some((left, self.right.item(by).ok()?))
-                }
-            })
-        }
     }
 }
 

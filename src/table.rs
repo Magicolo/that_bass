@@ -1,10 +1,10 @@
-use crate::{database::Database, key::Key, utility::FullIterator, Meta};
+use crate::{database::Database, key::Key, utility::FullIterator, Datum, Error, Meta};
 use parking_lot::{
     MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard,
     RwLockUpgradableReadGuard, RwLockWriteGuard,
 };
 use std::{
-    any::TypeId,
+    any::{type_name, TypeId},
     cell::UnsafeCell,
     collections::{HashMap, VecDeque},
     mem::ManuallyDrop,
@@ -44,15 +44,15 @@ pub struct Tables {
     tables: UnsafeCell<Vec<Arc<Table>>>,
 }
 
-pub(crate) struct TableRead<'a>(&'a Database, &'a Table, Option<RwLockReadGuard<'a, Inner>>);
+pub struct TableRead<'a>(&'a Database, &'a Table, Option<RwLockReadGuard<'a, Inner>>);
 
-pub(crate) struct TableUpgrade<'a>(
+pub struct TableUpgrade<'a>(
     &'a Database,
     &'a Table,
     Option<RwLockUpgradableReadGuard<'a, Inner>>,
 );
 
-pub(crate) struct TableWrite<'a>(&'a Database, &'a Table, Option<RwLockWriteGuard<'a, Inner>>);
+pub struct TableWrite<'a>(&'a Database, &'a Table, Option<RwLockWriteGuard<'a, Inner>>);
 
 pub(crate) enum Defer {
     Add {
@@ -349,8 +349,11 @@ impl Table {
     }
 
     #[inline]
-    pub fn store(&self, identifier: TypeId) -> Option<usize> {
-        self.indices.get(&identifier).copied()
+    pub fn store<D: Datum>(&self) -> Result<usize, Error> {
+        self.indices
+            .get(&TypeId::of::<D>())
+            .copied()
+            .ok_or(Error::MissingStore(type_name::<D>()))
     }
 
     #[inline]
@@ -460,13 +463,14 @@ impl<'a> TableRead<'a> {
     }
 
     #[inline]
-    pub(crate) fn inner(&self) -> &Inner {
-        unsafe { self.2.as_deref().unwrap_unchecked() }
+    pub(crate) fn guard(self) -> RwLockReadGuard<'a, Inner> {
+        let mut guard = ManuallyDrop::new(self);
+        unsafe { guard.2.take().unwrap_unchecked() }
     }
 
     #[inline]
-    pub(crate) fn forget(self) {
-        drop(ManuallyDrop::new(self).2.take());
+    pub(crate) fn inner(&self) -> &Inner {
+        unsafe { self.2.as_deref().unwrap_unchecked() }
     }
 }
 
@@ -511,42 +515,42 @@ impl<'a> TableUpgrade<'a> {
     }
 
     #[inline]
+    pub(crate) fn guard(self) -> RwLockUpgradableReadGuard<'a, Inner> {
+        let mut guard = ManuallyDrop::new(self);
+        unsafe { guard.2.take().unwrap_unchecked() }
+    }
+
+    #[inline]
     pub(crate) fn inner(&self) -> &Inner {
         unsafe { self.2.as_deref().unwrap_unchecked() }
     }
 
     #[inline]
     pub fn upgrade(self) -> TableWrite<'a> {
-        let mut guard = ManuallyDrop::new(self);
         TableWrite::new(
-            guard.0,
-            guard.1,
-            RwLockUpgradableReadGuard::upgrade(unsafe { guard.2.take().unwrap_unchecked() }),
+            self.0,
+            self.1,
+            RwLockUpgradableReadGuard::upgrade(self.guard()),
         )
     }
 
     #[inline]
     pub fn try_upgrade(self) -> Result<TableWrite<'a>, Self> {
-        let mut guard = ManuallyDrop::new(self);
-        match RwLockUpgradableReadGuard::try_upgrade(unsafe { guard.2.take().unwrap_unchecked() }) {
-            Ok(write) => Ok(TableWrite::new(guard.0, guard.1, write)),
-            Err(upgrade) => Err(Self::new(guard.0, guard.1, upgrade)),
+        let databse = self.0;
+        let table = self.1;
+        match RwLockUpgradableReadGuard::try_upgrade(self.guard()) {
+            Ok(write) => Ok(TableWrite::new(databse, table, write)),
+            Err(upgrade) => Err(Self::new(databse, table, upgrade)),
         }
     }
 
     #[inline]
     pub fn downgrade(self) -> TableRead<'a> {
-        let mut guard = ManuallyDrop::new(self);
         TableRead::new(
-            guard.0,
-            guard.1,
-            RwLockUpgradableReadGuard::downgrade(unsafe { guard.2.take().unwrap_unchecked() }),
+            self.0,
+            self.1,
+            RwLockUpgradableReadGuard::downgrade(self.guard()),
         )
-    }
-
-    #[inline]
-    pub(crate) fn forget(self) {
-        drop(ManuallyDrop::new(self).2.take());
     }
 }
 
@@ -593,6 +597,12 @@ impl<'a> TableWrite<'a> {
     }
 
     #[inline]
+    pub(crate) fn guard(self) -> RwLockWriteGuard<'a, Inner> {
+        let mut guard = ManuallyDrop::new(self);
+        unsafe { guard.2.take().unwrap_unchecked() }
+    }
+
+    #[inline]
     pub(crate) fn inner(&self) -> &Inner {
         unsafe { self.2.as_deref().unwrap_unchecked() }
     }
@@ -604,22 +614,12 @@ impl<'a> TableWrite<'a> {
 
     #[inline]
     pub fn downgrade(self) -> TableRead<'a> {
-        let mut guard = ManuallyDrop::new(self);
-        TableRead::new(
-            guard.0,
-            guard.1,
-            RwLockWriteGuard::downgrade(unsafe { guard.2.take().unwrap_unchecked() }),
-        )
+        TableRead::new(self.0, self.1, RwLockWriteGuard::downgrade(self.guard()))
     }
 
     #[inline]
     pub(crate) fn resolve(&mut self) {
-        self.database().resolve_table_defers(self);
-    }
-
-    #[inline]
-    pub(crate) fn forget(self) {
-        drop(ManuallyDrop::new(self).2.take());
+        self.database().resolve_table(self);
     }
 }
 
