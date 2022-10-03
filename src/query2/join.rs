@@ -6,7 +6,7 @@ use crate::{
     key::{Key, Slot},
     Error,
 };
-use std::iter::from_generator;
+use std::{collections::VecDeque, iter::from_generator};
 
 /// This query, as the name suggests, joins two queries together by using a function that retrieves join keys from the
 /// left query to find an item in the right query.
@@ -18,7 +18,7 @@ pub struct Join<'a, L, R, K, B> {
     left: L,
     right: R,
     by: B,
-    keys: Vec<K>,
+    keys: VecDeque<K>,
     slots: Vec<Vec<(K, &'a Slot)>>,
 }
 
@@ -33,7 +33,7 @@ impl<L, R, K, B> Join<'_, L, R, K, B> {
             left,
             right,
             by,
-            keys: Vec::new(),
+            keys: VecDeque::new(),
             slots: Vec::new(),
         }
     }
@@ -51,7 +51,7 @@ impl<'a, L: Query<'a>, R: Row, K: JoinKey, B: FnMut(L::Item) -> K> Query<'a>
     fn item<'b>(
         &'b mut self,
         key: Key,
-        mut context: ItemContext<'a, 'b>,
+        mut context: Context<'a>,
     ) -> Result<Guard<Self::Item, Self::Guard>, Error> {
         let left = self.left.item(key, context.own())?;
         let by = (self.by)(left.0);
@@ -62,7 +62,7 @@ impl<'a, L: Query<'a>, R: Row, K: JoinKey, B: FnMut(L::Item) -> K> Query<'a>
         }
     }
 
-    fn items<'b>(&'b mut self, mut context: ItemContext<'a, 'b>) -> Self::Items<'b> {
+    fn items<'b>(&'b mut self, mut context: Context<'a>) -> Self::Items<'b> {
         let Self {
             left,
             right,
@@ -71,25 +71,28 @@ impl<'a, L: Query<'a>, R: Row, K: JoinKey, B: FnMut(L::Item) -> K> Query<'a>
             slots,
             ..
         } = self;
+        let database = context.database;
         // Collect all join keys and release all locks as fast as possible. This is important to reduce contention but also
         // to ensure that no deadlock occurs.
         keys.extend(left.items(context.own()).map(by));
-        // For consistency, `update` must only be called before iterating, not while iterating.
-        right.update(context.database);
         // States with no joined keys will be skipped.
         right.done.clear();
         // Ensure that `states` has the same length as `right.states`.
         slots.resize_with(right.states.len(), Vec::new);
 
         // Sort keys by state such that table locks can be used for (hopefully) more than one key at a time.
-        for key in keys.drain(..) {
-            if let Ok(slot) = context.database.keys().get(key.key()) {
-                if let Some(&state_index) = right.indices.get(&slot.table()) {
-                    let slots = unsafe { slots.get_unchecked_mut(state_index as usize) };
-                    if slots.len() == 0 {
-                        right.done.push_back(state_index);
+        for _ in 0..keys.len() {
+            let key = unsafe { keys.pop_front().unwrap_unchecked() };
+            if let Ok(slot) = database.keys().get(key.key()) {
+                match right.indices.get(&slot.table()) {
+                    Some(&state_index) => {
+                        let slots = unsafe { slots.get_unchecked_mut(state_index as usize) };
+                        if slots.len() == 0 {
+                            right.done.push_back(state_index);
+                        }
+                        slots.push((key, slot));
                     }
-                    slots.push((key, slot));
+                    None => keys.push_back(key),
                 }
             }
         }
@@ -100,10 +103,17 @@ impl<'a, L: Query<'a>, R: Row, K: JoinKey, B: FnMut(L::Item) -> K> Query<'a>
             // - `slots` may not be cleared properly.
             // - Add a drop implementation that clears keys and slots.
             // - Will most likely require the manual implementation of an iterator.
-            for Guard((state_index, mut guard), table_read) in right.guards(context.database) {
+
+            // The keys that remain in `keys` have been already checked to not correspond to the right query.
+            for key in keys.drain(..) {
+                yield (key, None);
+            }
+
+            for Guard((state_index, mut guard), table_read) in right.guards(database) {
                 let slots = unsafe { slots.get_unchecked_mut(state_index as usize) };
                 for (key, slot) in slots.drain(..) {
                     let (table_index, store_index) = slot.indices();
+                    // The key is allowed to move within its table (such as with a swap as part of a remove).
                     if table_read.table().index() == table_index {
                         yield (
                             key,
@@ -113,15 +123,15 @@ impl<'a, L: Query<'a>, R: Row, K: JoinKey, B: FnMut(L::Item) -> K> Query<'a>
                             )),
                         )
                     } else {
-                        // Key has moved to another table between the last moment the slot indices were read and now.
-                        keys.push(key);
+                        // The key has moved to another table between the last moment the slot indices were read and now.
+                        keys.push_back(key);
                     }
                 }
                 drop(table_read);
             }
 
             for key in keys.drain(..) {
-                match right.with(key.key(), |guard| guard, context.database) {
+                match right.item(key.key(), context.own()) {
                     Ok(right) => {
                         yield (key, Some(right.0));
                         drop(right.1);
@@ -140,6 +150,10 @@ impl<'a, L: Query<'a>, R: Row, K: JoinKey, B: FnMut(L::Item) -> K> Query<'a>
             slots: self.slots,
             keys: self.keys,
         }
+    }
+
+    fn add(&mut self, table: &'a Table) -> bool {
+        self.left.add(table) | self.right.add(table)
     }
 }
 

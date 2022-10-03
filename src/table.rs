@@ -344,8 +344,8 @@ impl Table {
     }
 
     #[inline]
-    pub fn has(&self, identifier: TypeId) -> bool {
-        self.indices.contains_key(&identifier)
+    pub fn has<D: Datum>(&self) -> bool {
+        self.indices.contains_key(&TypeId::of::<D>())
     }
 
     #[inline]

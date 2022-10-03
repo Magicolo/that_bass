@@ -779,7 +779,7 @@ impl<F: Filter> Filter for Not<F> {
 
 impl<D: Datum> Filter for Has<D> {
     fn filter(&mut self, table: &Table) -> bool {
-        table.has(TypeId::of::<D>())
+        table.has::<D>()
     }
 }
 

@@ -19,8 +19,9 @@ pub trait Row {
     type State: for<'a> Lock<'a>;
     type Read: Row;
 
-    fn declare(context: DeclareContext) -> Result<(), Error>;
+    fn declare(context: Context) -> Result<(), Error>;
     fn initialize(table: &Table) -> Result<Self::State, Error>;
+    fn read(state: Self::State) -> <Self::Read as Row>::State;
 }
 
 pub trait Lock<'a> {
@@ -33,7 +34,7 @@ pub trait Lock<'a> {
     fn item(guard: &mut Self::Guard, index: usize) -> Self::Item;
 }
 
-pub struct DeclareContext<'a> {
+pub struct Context<'a> {
     reads: &'a mut HashSet<TypeId>,
     writes: &'a mut HashSet<TypeId>,
 }
@@ -42,26 +43,25 @@ pub struct Read<T>(usize, PhantomData<T>);
 pub struct Write<T>(usize, PhantomData<T>);
 pub struct State;
 
-pub struct Rows<'a, R: Row> {
-    pub(crate) index: usize,               // Last table index checked.
+pub struct Rows<'d, R: Row> {
     pub(crate) indices: HashMap<u32, u32>, // From table index to state index.
-    pub(crate) states: Vec<(R::State, &'a Table)>,
+    pub(crate) states: Vec<(R::State, &'d Table)>,
     pub(crate) done: VecDeque<u32>,
     pub(crate) pending: VecDeque<u32>,
     _marker: PhantomData<fn(R)>,
 }
 
-pub(crate) struct Guards<'a, 'b, R: Row> {
+pub(crate) struct Guards<'d, 'a, R: Row> {
     count: usize,
-    database: &'a Database,
-    done: &'b mut VecDeque<u32>,
-    pending: &'b mut VecDeque<u32>,
-    states: &'b [(R::State, &'a Table)],
+    database: &'d Database,
+    done: &'a mut VecDeque<u32>,
+    pending: &'a mut VecDeque<u32>,
+    states: &'a [(R::State, &'d Table)],
 }
 
-impl<'a> DeclareContext<'a> {
-    pub fn own(&mut self) -> DeclareContext {
-        DeclareContext {
+impl<'a> Context<'a> {
+    pub fn own(&mut self) -> Context {
+        Context {
             reads: self.reads,
             writes: self.writes,
         }
@@ -89,15 +89,14 @@ impl<'a> DeclareContext<'a> {
     }
 }
 
-impl<'a, R: Row> Rows<'a, R> {
+impl<'d, R: Row> Rows<'d, R> {
     pub fn new() -> Result<Self, Error> {
         // Detects violations of rust's invariants.
-        R::declare(DeclareContext {
+        R::declare(Context {
             reads: &mut HashSet::new(),
             writes: &mut HashSet::new(),
         })?;
         Ok(Self {
-            index: 0,
             indices: HashMap::new(),
             states: Vec::new(),
             done: VecDeque::new(),
@@ -106,43 +105,8 @@ impl<'a, R: Row> Rows<'a, R> {
         })
     }
 
-    pub(crate) fn with<'b, T>(
-        &'b mut self,
-        key: Key,
-        with: impl FnOnce(Guard<<R::State as Lock<'a>>::Item, TableRead<'a>>) -> T,
-        database: &'a Database,
-    ) -> Result<T, Error> {
-        loop {
-            let slot = database.keys().get(key)?;
-            let (table_index, store_index) = slot.indices();
-            let &state_index = self
-                .indices
-                .get(&table_index)
-                .ok_or(Error::KeyNotInQuery(key))?;
-            if let Some(mut guard) = Self::guard(database, &self.states, state_index, true, || {
-                // If this is not the case, it means that the `key` has just been moved.
-                slot.indices() == (table_index, store_index)
-            }) {
-                let item = R::State::item(&mut guard.0, store_index as _);
-                break Ok(with(Guard(item, guard.1)));
-            }
-        }
-    }
-
-    pub(crate) fn update(&mut self, database: &'a Database) {
-        while let Some(table) = database.tables().get(self.index) {
-            if let Ok(state) = R::initialize(&table) {
-                let index = self.states.len() as _;
-                self.done.push_back(index);
-                self.indices.insert(table.index(), index);
-                self.states.push((state, table));
-            }
-            self.index += 1;
-        }
-    }
-
     #[inline]
-    pub(crate) fn guards(&mut self, database: &'a Database) -> Guards<'a, '_, R> {
+    pub(crate) fn guards(&mut self, database: &'d Database) -> Guards<'d, '_, R> {
         // It is assumed that all states to be visited are queued in `self.done`.
         swap(&mut self.done, &mut self.pending);
         Guards {
@@ -154,12 +118,12 @@ impl<'a, R: Row> Rows<'a, R> {
         }
     }
 
-    pub(crate) fn try_guard<'b>(
-        database: &'a Database,
-        states: &'b [(R::State, &'a Table)],
+    fn try_guard<'a>(
+        database: &'d Database,
+        states: &'a [(R::State, &'d Table)],
         index: u32,
         mut valid: impl FnMut() -> bool,
-    ) -> Option<Guard<<R::State as Lock<'a>>::Guard, TableRead<'a>>> {
+    ) -> Option<Guard<<R::State as Lock<'d>>::Guard, TableRead<'d>>> {
         debug_assert!((index as usize) < states.len());
         let state = unsafe { states.get_unchecked(index as usize) };
         let table_read = database.table_try_read(state.1)?;
@@ -171,13 +135,13 @@ impl<'a, R: Row> Rows<'a, R> {
         }
     }
 
-    pub(crate) fn guard<'b>(
-        database: &'a Database,
-        states: &'b [(R::State, &'a Table)],
+    fn guard<'a>(
+        database: &'d Database,
+        states: &'a [(R::State, &'d Table)],
         index: u32,
         write: bool,
         mut valid: impl FnMut() -> bool,
-    ) -> Option<Guard<<R::State as Lock<'a>>::Guard, TableRead<'a>>> {
+    ) -> Option<Guard<<R::State as Lock<'d>>::Guard, TableRead<'d>>> {
         debug_assert!((index as usize) < states.len());
         let state = unsafe { states.get_unchecked(index as usize) };
         let table_read = database.table_read(state.1);
@@ -206,25 +170,46 @@ impl<'a, R: Row> Rows<'a, R> {
             )),
         }
     }
+
+    fn with<'a, T>(
+        &'a mut self,
+        key: Key,
+        with: impl FnOnce(Guard<<R::State as Lock<'d>>::Item, TableRead<'d>>) -> T,
+        database: &'d Database,
+    ) -> Result<T, Error> {
+        loop {
+            let slot = database.keys().get(key)?;
+            let (table_index, store_index) = slot.indices();
+            let &state_index = self
+                .indices
+                .get(&table_index)
+                .ok_or(Error::KeyNotInQuery(key))?;
+            if let Some(mut guard) = Self::guard(database, &self.states, state_index, true, || {
+                // If this is not the case, it means that the `key` has just been moved.
+                slot.indices() == (table_index, store_index)
+            }) {
+                let item = R::State::item(&mut guard.0, store_index as _);
+                break Ok(with(Guard(item, guard.1)));
+            }
+        }
+    }
 }
 
-impl<'a, R: Row> Query<'a> for Rows<'a, R> {
-    type Item = <R::State as Lock<'a>>::Item;
+impl<'d, R: Row> Query<'d> for Rows<'d, R> {
+    type Item = <R::State as Lock<'d>>::Item;
     type Items<'b> = impl Iterator<Item = Self::Item> where Self: 'b;
-    type Guard = TableRead<'a>;
-    type Read = Rows<'a, R::Read>;
+    type Guard = TableRead<'d>;
+    type Read = Rows<'d, R::Read>;
 
-    fn item<'b>(
-        &'b mut self,
+    fn item<'a>(
+        &'a mut self,
         key: Key,
-        context: ItemContext<'a, 'b>,
+        context: super::Context<'d>,
     ) -> Result<Guard<Self::Item, Self::Guard>, Error> {
-        self.update(context.database);
         self.with(key, |guard| guard, context.database)
     }
 
-    fn items<'b>(&'b mut self, context: ItemContext<'a, 'b>) -> Self::Items<'b> {
-        self.update(context.database);
+    fn items<'a>(&'a mut self, context: super::Context<'d>) -> Self::Items<'a> {
         self.guards(context.database)
             .flat_map(|Guard((_, mut guard), table)| {
                 (0..table.count()).map(move |index| {
@@ -234,17 +219,30 @@ impl<'a, R: Row> Query<'a> for Rows<'a, R> {
             })
     }
 
-    fn read(mut self) -> Self::Read {
-        self.done.clear();
-        self.pending.clear();
-        self.indices.clear();
+    fn read(self) -> Self::Read {
         Rows {
-            index: 0,
             indices: self.indices,
-            states: Vec::new(),
+            states: self
+                .states
+                .into_iter()
+                .map(|(state, table)| (R::read(state), table))
+                .collect(),
             done: self.done,
             pending: self.pending,
             _marker: PhantomData,
+        }
+    }
+
+    fn add(&mut self, table: &'d Table) -> bool {
+        match R::initialize(&table) {
+            Ok(state) => {
+                let index = self.states.len() as _;
+                self.done.push_back(index);
+                self.indices.insert(table.index(), index);
+                self.states.push((state, table));
+                true
+            }
+            Err(_) => false,
         }
     }
 }
@@ -253,12 +251,16 @@ impl Row for Key {
     type State = State;
     type Read = Self;
 
-    fn declare(_: DeclareContext) -> Result<(), Error> {
+    fn declare(_: Context) -> Result<(), Error> {
         Ok(())
     }
 
     fn initialize(_: &Table) -> Result<Self::State, Error> {
         Ok(State)
+    }
+
+    fn read(state: Self::State) -> <Self::Read as Row>::State {
+        state
     }
 }
 
@@ -287,12 +289,16 @@ impl<D: Datum> Row for &D {
     type State = Read<D>;
     type Read = Self;
 
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
+    fn declare(mut context: Context) -> Result<(), Error> {
         context.read::<D>()
     }
 
     fn initialize(table: &Table) -> Result<Self::State, Error> {
         Ok(Read(table.store::<D>()?, PhantomData))
+    }
+
+    fn read(state: Self::State) -> <Self::Read as Row>::State {
+        state
     }
 }
 
@@ -325,12 +331,16 @@ impl<'a, D: Datum> Row for &'a mut D {
     type State = Write<D>;
     type Read = &'a D;
 
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
+    fn declare(mut context: Context) -> Result<(), Error> {
         context.read::<D>()
     }
 
     fn initialize(table: &Table) -> Result<Self::State, Error> {
         Ok(Write(table.store::<D>()?, PhantomData))
+    }
+
+    fn read(state: Self::State) -> <Self::Read as Row>::State {
+        Read(state.0, PhantomData)
     }
 }
 
@@ -363,25 +373,31 @@ impl Row for () {
     type State = ();
     type Read = ();
 
-    fn declare(_: DeclareContext) -> Result<(), Error> {
+    fn declare(_: Context) -> Result<(), Error> {
         Ok(())
     }
 
     fn initialize(_: &Table) -> Result<Self::State, Error> {
         Ok(())
     }
+
+    fn read(_: Self::State) -> <Self::Read as Row>::State {}
 }
 
 impl<C1: Row> Row for (C1,) {
     type State = (C1::State,);
     type Read = (C1::Read,);
 
-    fn declare(context: DeclareContext) -> Result<(), Error> {
+    fn declare(context: Context) -> Result<(), Error> {
         C1::declare(context)
     }
 
     fn initialize(table: &Table) -> Result<Self::State, Error> {
         Ok((C1::initialize(table)?,))
+    }
+
+    fn read(state: Self::State) -> <Self::Read as Row>::State {
+        (C1::read(state.0),)
     }
 }
 
@@ -389,13 +405,17 @@ impl<C1: Row, C2: Row> Row for (C1, C2) {
     type State = (C1::State, C2::State);
     type Read = (C1::Read, C2::Read);
 
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
+    fn declare(mut context: Context) -> Result<(), Error> {
         C1::declare(context.own())?;
         C2::declare(context)
     }
 
     fn initialize(table: &Table) -> Result<Self::State, Error> {
         Ok((C1::initialize(table)?, C2::initialize(table)?))
+    }
+
+    fn read(state: Self::State) -> <Self::Read as Row>::State {
+        (C1::read(state.0), C2::read(state.1))
     }
 }
 

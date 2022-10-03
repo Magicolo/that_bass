@@ -5,6 +5,7 @@
 #![feature(generators)]
 #![feature(iter_from_generator)]
 #![feature(generator_trait)]
+#![feature(associated_type_defaults)]
 
 pub mod bits;
 pub mod create;
@@ -149,7 +150,7 @@ pub fn identify() -> usize {
 #[cfg(test)]
 mod tests {
     use crate::{database::Database, key::Key, Datum, Error};
-    use std::{any::TypeId, collections::HashSet, thread::scope};
+    use std::{collections::HashSet, thread::scope};
 
     struct A;
     struct B;
@@ -174,7 +175,7 @@ mod tests {
         assert_eq!(database.tables().len(), 0);
         database.create::<A>()?;
         let table = database.tables().get(0).unwrap();
-        assert!(table.has(TypeId::of::<A>()));
+        assert!(table.has::<A>());
         Ok(())
     }
 
@@ -184,8 +185,8 @@ mod tests {
         assert_eq!(database.tables().len(), 0);
         database.create::<(A, B)>()?;
         let table = database.tables().get(0).unwrap();
-        assert!(table.has(TypeId::of::<A>()));
-        assert!(table.has(TypeId::of::<B>()));
+        assert!(table.has::<A>());
+        assert!(table.has::<B>());
         Ok(())
     }
 
@@ -587,6 +588,97 @@ mod tests {
         //     sum
         // };
         // dbg!((sum(), sum(), sum()));
+    }
+}
+
+mod lifetime {
+    use std::marker::PhantomData;
+
+    use crate::{key::Key, table::Store, Datum};
+    use parking_lot::MappedRwLockReadGuard;
+
+    fn boba(mut query: impl Query) {
+        let mut items = query.items();
+        while let Some(item) = items.next() {
+            drop(item);
+        }
+        drop(items);
+
+        // let mut items = query.items();
+        // let mut a = None;
+        // while let Some(item) = items.next() {
+        //     a = Some(item);
+        // }
+        // drop(a);
+        // drop(items);
+    }
+
+    trait Iterate {
+        type Item<'a>
+        where
+            Self: 'a;
+
+        fn next(&mut self) -> Option<Self::Item<'_>>;
+    }
+
+    trait Query {
+        type Items<'a>: Iterate
+        where
+            Self: 'a;
+
+        fn item(&mut self) -> Item<'_, Self>;
+        fn items(&mut self) -> Self::Items<'_>;
+    }
+
+    type Item<'a, Q: Query> = <Q::Items<'a> as Iterate>::Item<'a>;
+
+    struct Rows<R: Row>(Vec<R::State>);
+
+    trait Row {
+        type State;
+        type Read: Row;
+        type Guard<'a>;
+        type Item<'a>;
+
+        fn lock<'a>(state: &Self::State, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard<'a>;
+        fn item<'a: 'b, 'b>(guard: &'b mut Self::Guard<'a>, index: usize) -> Self::Item<'b>;
+    }
+
+    impl<D: Datum> Row for &D {
+        type State = usize;
+        type Read = Self;
+        type Guard<'a> = MappedRwLockReadGuard<'a, [D]>;
+        type Item<'a> = &'a D;
+
+        fn lock<'a>(&state: &Self::State, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard<'a> {
+            unsafe { stores.get_unchecked(state).read(.., keys.len()) }
+        }
+
+        fn item<'a: 'b, 'b>(guard: &'b mut Self::Guard<'a>, index: usize) -> Self::Item<'b> {
+            unsafe { guard.get_unchecked(index) }
+        }
+    }
+
+    struct RowsItems<'a, R: Row>(&'a mut Rows<R>);
+
+    impl<R: Row> Query for Rows<R> {
+        type Items<'a> = RowsItems<'a, R> where Self: 'a;
+
+        fn item(&mut self) -> Item<'_, Self> {
+            todo!()
+        }
+
+        fn items(&mut self) -> Self::Items<'_> {
+            RowsItems(self)
+        }
+    }
+
+    impl<R: Row> Iterate for RowsItems<'_, R> {
+        type Item<'a> = R::Item<'a> where Self: 'a;
+
+        fn next(&mut self) -> Option<Self::Item<'_>> {
+            todo!()
+        }
     }
 }
 

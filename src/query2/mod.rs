@@ -1,9 +1,11 @@
 use self::{
+    filter::{Filter, FilterCondition},
     join::{Join, JoinKey},
     row::{Row, Rows},
 };
-use crate::{database::Database, key::Key, Error};
+use crate::{database::Database, key::Key, table::Table, Error};
 
+pub mod filter;
 pub mod join;
 pub mod row;
 
@@ -13,8 +15,6 @@ pub mod row;
         the same when both items are yielded.
         - A `FullJoin` will require very careful synchronization between locks to prevent the `symmetric join` problem
         (i.e. `FullJoin<A, B>` running concurrently with `FullJoin<B, A>` must not deadlock).
-
-    TODO: Share some of the state in `Rows`?
     TODO: Implement `Filter`.
         - Static filtering using types (or a function pointer?).
         - Should be possible to filter at any depth of a query since it adds nothing to the items.
@@ -28,63 +28,77 @@ pub mod row;
         - Use a filter similar to `A.key() < B.key()` to eliminate duplicates.
     TODO: `Query::Item` should implement `Item`?
     TODO: Implement compile-time checking of `Columns`, if possible.
+    TODO: Fix the lifetime problem with `Query::Item`.
+        - `trait Items {
+            type Item<'a>;
+            fn next(&mut self) -> Option<Self::Item<'_>>;
+        }`
+        - `Query::Item<'b>: Item<'b>;`
+        - `Query::Items<'b>: for<'c> Items<Item<'c> = Self::Item<'c>>`
 */
 
-pub trait Query<'a>: Sized {
+pub trait Query<'d>: Sized {
     type Item;
-    type Items<'b>: Iterator<Item = Self::Item>
+    type Items<'a>: Iterator<Item = Self::Item>
     where
-        Self: 'b;
+        Self: 'a;
     type Guard;
-    type Read: Query<'a>;
+    type Read: Query<'d>;
 
-    fn item<'b>(
-        &'b mut self,
+    fn item<'a>(
+        &'a mut self,
         key: Key,
-        context: ItemContext<'a, 'b>,
+        context: Context<'d>,
     ) -> Result<Guard<Self::Item, Self::Guard>, Error>;
-    fn items<'b>(&'b mut self, context: ItemContext<'a, 'b>) -> Self::Items<'b>;
+    fn items<'b>(&'b mut self, context: Context<'d>) -> Self::Items<'b>;
     fn read(self) -> Self::Read;
+    fn add(&mut self, table: &'d Table) -> bool;
 
     #[inline]
-    fn join<Q: Query<'a>, B: FnMut(Self::Item) -> K, K: JoinKey>(
+    fn join<Q: Query<'d>, B: FnMut(Self::Item) -> K, K: JoinKey>(
         self,
         query: Q,
         by: B,
-    ) -> Join<'a, Self, Q, K, B> {
+    ) -> Join<'d, Self, Q, K, B> {
         Join::new(self, query, by)
+    }
+
+    #[inline]
+    fn filter<F: FilterCondition>(self, filter: F) -> Filter<Self, F> {
+        Filter::new(self, filter)
     }
 }
 
 pub struct Guard<T, G>(T, G);
 
-pub struct Root<'a, Q> {
-    database: &'a Database,
+pub struct Root<'d, Q> {
+    index: usize,
+    database: &'d Database,
     query: Q,
 }
 
-pub struct ItemContext<'a, 'b> {
-    database: &'a Database,
-    table_locks: &'b mut [()],
+pub struct Context<'d> {
+    database: &'d Database,
 }
 
 impl Database {
     pub fn query2<R: Row>(&self) -> Result<Root<Rows<R>>, Error> {
         Ok(Root {
+            index: 0,
             database: self,
             query: Rows::new()?,
         })
     }
 }
 
-impl<'a, Q: Query<'a>> Root<'a, Q> {
+impl<'d, Q: Query<'d>> Root<'d, Q> {
     #[inline]
     pub fn item(&mut self, key: Key) -> Result<Guard<Q::Item, Q::Guard>, Error> {
+        self.update();
         self.query.item(
             key,
-            ItemContext {
+            Context {
                 database: self.database,
-                table_locks: &mut [],
             },
         )
     }
@@ -99,36 +113,45 @@ impl<'a, Q: Query<'a>> Root<'a, Q> {
 
     #[inline]
     pub fn items(&mut self) -> Q::Items<'_> {
-        self.query.items(ItemContext {
+        self.update();
+        self.query.items(Context {
             database: self.database,
-            table_locks: &mut [],
         })
     }
 
-    pub fn read(self) -> Root<'a, Q::Read> {
+    pub fn read(self) -> Root<'d, Q::Read> {
         Root {
+            index: self.index,
             database: self.database,
             query: self.query.read(),
         }
     }
 
     #[inline]
-    pub fn join<R: Row, K: JoinKey, B: FnMut(<Q::Read as Query<'a>>::Item) -> K>(
+    pub fn join<R: Row, K: JoinKey, B: FnMut(<Q::Read as Query<'d>>::Item) -> K>(
         self,
         by: B,
-    ) -> Result<Root<'a, Join<'a, Q::Read, Rows<'a, R>, K, B>>, Error> {
+    ) -> Result<Root<'d, Join<'d, Q::Read, Rows<'d, R>, K, B>>, Error> {
         Ok(Root {
+            index: self.index,
             database: self.database,
             query: self.query.read().join(Rows::new()?, by),
         })
     }
+
+    #[inline]
+    fn update(&mut self) {
+        while let Some(table) = self.database.tables().get(self.index) {
+            self.query.add(table);
+            self.index += 1;
+        }
+    }
 }
 
-impl<'a> ItemContext<'a, '_> {
-    pub fn own(&mut self) -> ItemContext<'a, '_> {
-        ItemContext {
+impl<'d> Context<'d> {
+    pub fn own(&mut self) -> Context<'d> {
+        Context {
             database: self.database,
-            table_locks: self.table_locks,
         }
     }
 }
@@ -173,6 +196,15 @@ mod tests {
             }
             _ => assert!(false),
         }
+
+        assert_eq!(query.items().count(), 2);
+
+        let mut a = None;
+        for (_, item) in query.items() {
+            a = item;
+        }
+        // TODO: Fix this access outside the iterator...
+        a.unwrap().0 = [3.; 3];
 
         Ok(())
     }
