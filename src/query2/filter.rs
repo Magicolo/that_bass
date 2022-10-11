@@ -1,66 +1,102 @@
 use std::marker::PhantomData;
 
-use super::{Context, Guard, Query};
-use crate::{key::Key, table::Table, Datum};
+use super::{Context, Query};
+use crate::{key::Key, table::Table, Datum, Error};
 
-pub struct Filter<Q, F>(Q, F);
+pub struct Filter<Q, C>(Q, C);
 
-pub trait FilterCondition {
+pub trait Condition {
     fn filter(&self, table: &Table) -> bool;
 }
 
-pub struct Not<F: FilterCondition>(F);
+pub struct Not<C: Condition>(C);
 pub struct Has<D: Datum>(PhantomData<D>);
 
-impl<F: FilterCondition> FilterCondition for Not<F> {
+impl<F: Condition> Condition for Not<F> {
     fn filter(&self, table: &Table) -> bool {
         !self.0.filter(table)
     }
 }
 
-impl<D: Datum> FilterCondition for Has<D> {
+impl<D: Datum> Condition for Has<D> {
     fn filter(&self, table: &Table) -> bool {
         table.has::<D>()
     }
 }
 
-impl<F: Fn(&Table) -> bool> FilterCondition for F {
+impl<F: Fn(&Table) -> bool> Condition for F {
     fn filter(&self, table: &Table) -> bool {
         self(table)
     }
 }
 
-impl<'a, Q: Query<'a>, F: FilterCondition> Filter<Q, F> {
-    pub fn new(query: Q, filter: F) -> Self {
+impl<'a, Q: Query<'a>, C: Condition> Filter<Q, C> {
+    pub fn new(query: Q, filter: C) -> Self {
         Self(query, filter)
     }
 }
 
-impl<'a, Q: Query<'a>, F: FnMut(&Table) -> bool> Query<'a> for Filter<Q, F> {
-    type Item = Q::Item;
-    type Items<'b> = Q::Items<'b> where Self: 'b;
-    type Guard = Q::Guard;
-    type Read = Filter<Q::Read, F>;
+impl<'d, Q: Query<'d>, C: Condition> Query<'d> for Filter<Q, C> {
+    type Item<'a> = Q::Item<'a>;
+    type Read = Filter<Q::Read, C>;
 
-    #[inline]
-    fn item<'b>(
-        &'b mut self,
-        key: Key,
-        context: Context<'a>,
-    ) -> Result<Guard<Self::Item, Self::Guard>, crate::Error> {
-        self.0.item(key, context)
+    fn initialize(&mut self, table: &'d Table) {
+        if self.1.filter(table) {
+            self.0.initialize(table);
+        }
     }
 
     #[inline]
-    fn items<'b>(&'b mut self, context: Context<'a>) -> Self::Items<'b> {
-        self.0.items(context)
+    fn try_find<T, F: FnOnce(Result<Self::Item<'_>, Error>) -> T>(
+        &mut self,
+        key: Key,
+        context: super::Context<'d>,
+        find: F,
+    ) -> T {
+        self.0.try_find(key, context, find)
+    }
+
+    #[inline]
+    fn find<T, F: FnOnce(Self::Item<'_>) -> T>(
+        &mut self,
+        key: Key,
+        context: Context<'d>,
+        find: F,
+    ) -> Result<T, Error> {
+        self.0.find(key, context, find)
+    }
+
+    #[inline]
+    fn try_fold<S, F: FnMut(S, Self::Item<'_>) -> Result<S, S>>(
+        &mut self,
+        context: Context<'d>,
+        state: S,
+        fold: F,
+    ) -> S {
+        self.0.try_fold(context, state, fold)
+    }
+
+    #[inline]
+    fn fold<S, F: FnMut(S, Self::Item<'_>) -> S>(
+        &mut self,
+        context: Context<'d>,
+        state: S,
+        fold: F,
+    ) -> S {
+        self.0.fold(context, state, fold)
+    }
+
+    #[inline]
+    fn try_each<F: FnMut(Self::Item<'_>) -> bool>(&mut self, context: Context<'d>, each: F) {
+        self.0.try_each(context, each)
+    }
+
+    #[inline]
+    fn each<F: FnMut(Self::Item<'_>)>(&mut self, context: Context<'d>, each: F) {
+        self.0.each(context, each)
     }
 
     fn read(self) -> Self::Read {
         Filter(self.0.read(), self.1)
-    }
-
-    fn add(&mut self, table: &'a Table) -> bool {
-        self.1(table) && self.0.add(table)
     }
 }

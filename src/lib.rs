@@ -7,17 +7,16 @@
 #![feature(generator_trait)]
 #![feature(associated_type_defaults)]
 
-pub mod bits;
+pub mod core;
 pub mod create;
 pub mod database;
 pub mod destroy;
 pub mod key;
-pub mod or;
 pub mod query;
 pub mod query2;
 pub mod resources;
 pub mod table;
-mod utility;
+
 /*
 COHERENCE RULES:
 - Legend:
@@ -92,6 +91,7 @@ pub enum Error {
 pub struct Meta {
     identifier: fn() -> TypeId,
     name: fn() -> &'static str,
+    size: usize,
     allocate: fn(usize) -> NonNull<()>,
     free: unsafe fn(NonNull<()>, usize, usize),
     copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), usize),
@@ -104,6 +104,7 @@ pub trait Datum: Sized + 'static {
         &Meta {
             identifier: TypeId::of::<Self>,
             name: type_name::<Self>,
+            size: size_of::<Self>(),
             allocate: |capacity| {
                 let mut items = Vec::<Self>::with_capacity(capacity);
                 let data = unsafe { NonNull::new_unchecked(items.as_mut_ptr().cast()) };
@@ -591,10 +592,77 @@ mod tests {
     }
 }
 
-mod lifetime {
-    use std::marker::PhantomData;
+mod simpler {
+    use crate::{core::Iterate, key::Key, table::Store, Datum};
+    use parking_lot::MappedRwLockReadGuard;
 
-    use crate::{key::Key, table::Store, Datum};
+    fn boba(mut query: impl Query) {
+        // let mut a = None;
+        // let b = query.find(|item| item);
+        // query.each(|item| {
+        //     a = Some(item);
+        //     true
+        // });
+    }
+
+    trait Query {
+        type Item<'a>;
+        fn find<T>(&mut self, with: impl FnOnce(Self::Item<'_>) -> T) -> Option<T>;
+        fn each(&mut self, each: impl FnMut(Self::Item<'_>) -> bool);
+    }
+
+    struct Rows<R: Row>(Vec<R::State>);
+
+    trait Row {
+        type State;
+        type Read: Row;
+        type Guard<'a>;
+        type Item<'a>;
+
+        fn lock<'a>(state: &Self::State, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard<'a>;
+        fn item<'a: 'b, 'b>(guard: &'b mut Self::Guard<'a>, index: usize) -> Self::Item<'b>;
+    }
+
+    impl<D: Datum> Row for &D {
+        type State = usize;
+        type Read = Self;
+        type Guard<'a> = MappedRwLockReadGuard<'a, [D]>;
+        type Item<'a> = &'a D;
+
+        fn lock<'a>(&state: &Self::State, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard<'a> {
+            unsafe { stores.get_unchecked(state).read(.., keys.len()) }
+        }
+
+        fn item<'a: 'b, 'b>(guard: &'b mut Self::Guard<'a>, index: usize) -> Self::Item<'b> {
+            unsafe { guard.get_unchecked(index) }
+        }
+    }
+
+    struct RowsItems<'a, R: Row>(&'a mut Rows<R>);
+
+    impl<R: Row> Query for Rows<R> {
+        type Item<'a> = R::Item<'a>;
+
+        fn find<T>(&mut self, with: impl FnOnce(Self::Item<'_>) -> T) -> Option<T> {
+            todo!()
+        }
+
+        fn each(&mut self, each: impl FnMut(Self::Item<'_>) -> bool) {
+            todo!()
+        }
+    }
+
+    impl<R: Row> Iterate for RowsItems<'_, R> {
+        type Item<'a> = R::Item<'a> where Self: 'a;
+
+        fn next(&mut self) -> Option<Self::Item<'_>> {
+            todo!()
+        }
+    }
+}
+
+mod lifetime {
+    use crate::{core::Iterate, key::Key, table::Store, Datum};
     use parking_lot::MappedRwLockReadGuard;
 
     fn boba(mut query: impl Query) {
@@ -613,14 +681,6 @@ mod lifetime {
         // drop(items);
     }
 
-    trait Iterate {
-        type Item<'a>
-        where
-            Self: 'a;
-
-        fn next(&mut self) -> Option<Self::Item<'_>>;
-    }
-
     trait Query {
         type Items<'a>: Iterate
         where
@@ -630,7 +690,7 @@ mod lifetime {
         fn items(&mut self) -> Self::Items<'_>;
     }
 
-    type Item<'a, Q: Query> = <Q::Items<'a> as Iterate>::Item<'a>;
+    type Item<'a, Q> = <<Q as Query>::Items<'a> as Iterate>::Item<'a>;
 
     struct Rows<R: Row>(Vec<R::State>);
 

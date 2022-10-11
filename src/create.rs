@@ -1,7 +1,7 @@
 use crate::{
     database::Database,
     key::Key,
-    table::{Store, Table},
+    table::{Add, Store, Table},
     Datum, Error, Meta,
 };
 use std::{any::TypeId, collections::HashSet, marker::PhantomData, sync::Arc};
@@ -210,18 +210,25 @@ fn apply<T: Template, I: ExactSizeIterator<Item = T>>(
         keys,
         table,
         (state, templates),
-        |(state, templates), row, stores| unsafe {
-            for i in 0..row.1 {
-                templates
-                    .next()
-                    .expect("Expected initialize to be called once per template.")
-                    .apply(&state, row.0 + i, stores)
+        |(state, templates), mut row_index, stores| {
+            for template in templates {
+                unsafe { template.apply(state, row_index as _, stores) };
+                row_index += 1;
             }
         },
-        |(state, templates), count| (state.clone(), templates.take(count).collect::<Vec<_>>()),
-        |(state, templates), row, stores| {
-            for template in templates.drain(..) {
-                unsafe { template.apply(state, row, stores) }
+        |(state, templates), keys, mut row_index, row_count| {
+            let state = state.clone();
+            let templates = templates.collect::<Vec<_>>();
+            Add {
+                keys: keys.iter().copied().collect(),
+                row_index,
+                row_count,
+                initialize: Box::new(move |stores| {
+                    for template in templates {
+                        unsafe { template.apply(&state, row_index as _, stores) }
+                        row_index += 1;
+                    }
+                }),
             }
         },
     );

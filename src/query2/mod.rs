@@ -1,5 +1,5 @@
 use self::{
-    filter::{Filter, FilterCondition},
+    filter::{Condition, Filter},
     join::{Join, JoinKey},
     row::{Row, Rows},
 };
@@ -37,25 +37,62 @@ pub mod row;
         - `Query::Items<'b>: for<'c> Items<Item<'c> = Self::Item<'c>>`
 */
 
+// pub type Item<'d, 'a, 'b, Q> = <<Q as Query<'d>>::Items<'a> as Iterate>::Item<'b>;
+
 pub trait Query<'d>: Sized {
-    type Item;
-    type Items<'a>: Iterator<Item = Self::Item>
-    where
-        Self: 'a;
-    type Guard;
+    type Item<'a>;
     type Read: Query<'d>;
 
-    fn item<'a>(
-        &'a mut self,
+    fn initialize(&mut self, table: &'d Table);
+
+    fn try_find<T, F: FnOnce(Result<Self::Item<'_>, Error>) -> T>(
+        &mut self,
         key: Key,
         context: Context<'d>,
-    ) -> Result<Guard<Self::Item, Self::Guard>, Error>;
-    fn items<'b>(&'b mut self, context: Context<'d>) -> Self::Items<'b>;
-    fn read(self) -> Self::Read;
-    fn add(&mut self, table: &'d Table) -> bool;
+        find: F,
+    ) -> T;
 
     #[inline]
-    fn join<Q: Query<'d>, B: FnMut(Self::Item) -> K, K: JoinKey>(
+    fn find<T, F: FnOnce(Self::Item<'_>) -> T>(
+        &mut self,
+        key: Key,
+        context: Context<'d>,
+        find: F,
+    ) -> Result<T, Error> {
+        self.try_find(key, context, |item| item.map(find))
+    }
+
+    fn try_fold<S, F: FnMut(S, Self::Item<'_>) -> Result<S, S>>(
+        &mut self,
+        context: Context<'d>,
+        state: S,
+        fold: F,
+    ) -> S;
+
+    #[inline]
+    fn fold<S, F: FnMut(S, Self::Item<'_>) -> S>(
+        &mut self,
+        context: Context<'d>,
+        state: S,
+        mut fold: F,
+    ) -> S {
+        self.try_fold(context, state, |state, item| Ok(fold(state, item)))
+    }
+
+    #[inline]
+    fn try_each<F: FnMut(Self::Item<'_>) -> bool>(&mut self, context: Context<'d>, mut each: F) {
+        self.try_fold(context, (), |_, item| each(item).then_some(()).ok_or(()))
+    }
+
+    #[inline]
+    fn each<F: FnMut(Self::Item<'_>)>(&mut self, context: Context<'d>, mut each: F) {
+        self.fold(context, (), |_, item| each(item))
+    }
+
+    fn read(self) -> Self::Read;
+
+    #[inline]
+    fn join<Q: Query<'d>, B: FnMut(Self::Item<'_>) -> K, K: JoinKey>(
         self,
         query: Q,
         by: B,
@@ -64,12 +101,10 @@ pub trait Query<'d>: Sized {
     }
 
     #[inline]
-    fn filter<F: FilterCondition>(self, filter: F) -> Filter<Self, F> {
+    fn filter<F: Condition>(self, filter: F) -> Filter<Self, F> {
         Filter::new(self, filter)
     }
 }
-
-pub struct Guard<T, G>(T, G);
 
 pub struct Root<'d, Q> {
     index: usize,
@@ -93,30 +128,48 @@ impl Database {
 
 impl<'d, Q: Query<'d>> Root<'d, Q> {
     #[inline]
-    pub fn item(&mut self, key: Key) -> Result<Guard<Q::Item, Q::Guard>, Error> {
+    pub fn try_find<T, F: FnOnce(Result<Q::Item<'_>, Error>) -> T>(
+        &mut self,
+        key: Key,
+        find: F,
+    ) -> T {
         self.update();
-        self.query.item(
-            key,
-            Context {
-                database: self.database,
-            },
-        )
+        self.query.try_find(key, Context::new(self.database), find)
     }
 
     #[inline]
-    pub fn item_with<T>(&mut self, key: Key, with: impl FnOnce(Q::Item) -> T) -> Result<T, Error> {
-        let Guard(item, guard) = self.item(key)?;
-        let value = with(item);
-        drop(guard);
-        Ok(value)
+    pub fn find<T, F: FnOnce(Q::Item<'_>) -> T>(&mut self, key: Key, find: F) -> Result<T, Error> {
+        self.update();
+        self.query.find(key, Context::new(self.database), find)
     }
 
     #[inline]
-    pub fn items(&mut self) -> Q::Items<'_> {
+    pub fn try_fold<S, F: FnMut(S, Q::Item<'_>) -> Result<S, S>>(
+        &mut self,
+        state: S,
+        fold: F,
+    ) -> S {
         self.update();
-        self.query.items(Context {
-            database: self.database,
-        })
+        self.query
+            .try_fold(Context::new(self.database), state, fold)
+    }
+
+    #[inline]
+    pub fn fold<S, F: FnMut(S, Q::Item<'_>) -> S>(&mut self, state: S, fold: F) -> S {
+        self.update();
+        self.query.fold(Context::new(self.database), state, fold)
+    }
+
+    #[inline]
+    pub fn try_each<F: FnMut(Q::Item<'_>) -> bool>(&mut self, each: F) {
+        self.update();
+        self.query.try_each(Context::new(self.database), each)
+    }
+
+    #[inline]
+    pub fn each<F: FnMut(Q::Item<'_>)>(&mut self, each: F) {
+        self.update();
+        self.query.each(Context::new(self.database), each)
     }
 
     pub fn read(self) -> Root<'d, Q::Read> {
@@ -128,7 +181,7 @@ impl<'d, Q: Query<'d>> Root<'d, Q> {
     }
 
     #[inline]
-    pub fn join<R: Row, K: JoinKey, B: FnMut(<Q::Read as Query<'d>>::Item) -> K>(
+    pub fn join<R: Row, K: JoinKey, B: FnMut(<Q::Read as Query<'d>>::Item<'_>) -> K>(
         self,
         by: B,
     ) -> Result<Root<'d, Join<'d, Q::Read, Rows<'d, R>, K, B>>, Error> {
@@ -142,13 +195,17 @@ impl<'d, Q: Query<'d>> Root<'d, Q> {
     #[inline]
     fn update(&mut self) {
         while let Some(table) = self.database.tables().get(self.index) {
-            self.query.add(table);
             self.index += 1;
+            self.query.initialize(table);
         }
     }
 }
 
 impl<'d> Context<'d> {
+    pub fn new(database: &'d Database) -> Self {
+        Self { database }
+    }
+
     pub fn own(&mut self) -> Context<'d> {
         Context {
             database: self.database,
@@ -158,8 +215,7 @@ impl<'d> Context<'d> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::Datum;
+    use crate::{database::Database, key::Key, Datum, Error};
 
     #[test]
     fn join() -> Result<(), Error> {
@@ -178,33 +234,25 @@ mod tests {
             .query2::<(Key, &Target)>()?
             .join::<&mut Position, _, _>(|(key, target)| (target.0, key, target.1))?;
 
-        match &*query.item(key2)? {
-            (by, Some(Position(position))) => {
+        query
+            .find(key2, |(by, item)| {
                 assert_eq!(by.0, key1);
                 assert_eq!(by.1, key2);
                 assert_eq!(by.2, "boba");
-                assert_eq!(*position, [1.; 3]);
-            }
-            _ => assert!(false),
-        }
+                assert_eq!(item.unwrap().0, [1.; 3]);
+            })
+            .unwrap();
 
-        match &*query.item(key3)? {
-            (by, None) => {
+        query
+            .find(key3, |(by, item)| {
                 assert_eq!(by.0, key2);
                 assert_eq!(by.1, key3);
                 assert_eq!(by.2, "fett");
-            }
-            _ => assert!(false),
-        }
+                assert_eq!(item.err(), Some(Error::KeyNotInQuery(key2)));
+            })
+            .unwrap();
 
-        assert_eq!(query.items().count(), 2);
-
-        let mut a = None;
-        for (_, item) in query.items() {
-            a = item;
-        }
-        // TODO: Fix this access outside the iterator...
-        a.unwrap().0 = [3.; 3];
+        assert_eq!(query.fold(0, |count, _| count + 1), 2);
 
         Ok(())
     }

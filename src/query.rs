@@ -1,5 +1,5 @@
 use crate::{
-    bits::Bits,
+    core::Bits,
     database::Database,
     key::Key,
     resources::Local,
@@ -84,15 +84,15 @@ pub enum UnsafeGuard<'a, 'b, I: Item> {
     Safe(Guard<'a, 'b, <I::State as Lock<'a>>::Item>),
     Unsafe(<I::State as Lock<'a>>::Item),
 }
-enum GuardError<'a, 'b, I: Item> {
+enum GuardError<'d, 'a, I: Item> {
     Invalid,
     WouldBlock,
-    WouldDeadlock(&'b I::State, TableRead<'a>),
+    WouldDeadlock(&'a I::State, TableRead<'d>),
 }
 
-struct TableGuard<'a, 'b> {
-    table_state: &'b TableState<'a>,
-    table_read: TableRead<'a>,
+struct TableGuard<'d, 'a> {
+    table_state: &'a TableState<'d>,
+    table_read: TableRead<'d>,
 }
 
 #[derive(Default)]
@@ -175,9 +175,9 @@ impl<'a, I: Item> DerefMut for UnsafeGuard<'a, '_, I> {
     }
 }
 
-impl<'a, I: Item, F: Filter> Query<'a, I, F> {
+impl<'d, I: Item, F: Filter> Query<'d, I, F> {
     #[inline]
-    pub fn item(&mut self, key: Key) -> Result<Guard<<I::State as Lock<'a>>::Item>, Error> {
+    pub fn item(&mut self, key: Key) -> Result<Guard<<I::State as Lock<'d>>::Item>, Error> {
         self.with(key, Ok, |_, _| None)?
     }
 
@@ -190,10 +190,10 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
     /// - The conflicting lock (most likely held by another query `Guard` or `Iterator`) must be held for at least as long as the
     /// `UnsafeGuard` is alive.
     #[inline]
-    pub unsafe fn item_unchecked<'b>(
-        &'b mut self,
+    pub unsafe fn item_unchecked<'a>(
+        &'a mut self,
         key: Key,
-    ) -> Result<UnsafeGuard<'a, 'b, I>, Error> {
+    ) -> Result<UnsafeGuard<'d, 'a, I>, Error> {
         self.with(key, UnsafeGuard::Safe, |state, table| {
             Some(UnsafeGuard::Unsafe(state.item_unlocked(
                 table.keys(),
@@ -310,11 +310,11 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
         Ok(())
     }
 
-    fn with<'b, T>(
-        &'b mut self,
+    fn with<'a, T>(
+        &'a mut self,
         key: Key,
-        with: impl FnOnce(Guard<'a, 'b, <I::State as Lock<'a>>::Item>) -> T,
-        deadlock: impl FnOnce(&'b I::State, TableRead<'a>) -> Option<T>,
+        with: impl FnOnce(Guard<'d, 'a, <I::State as Lock<'d>>::Item>) -> T,
+        deadlock: impl FnOnce(&'a I::State, TableRead<'d>) -> Option<T>,
     ) -> Result<T, Error> {
         self.update()?;
         loop {
@@ -341,7 +341,7 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
     }
 
     #[inline]
-    fn guards(&mut self) -> Guards<'a, '_, I> {
+    fn guards(&mut self) -> Guards<'d, '_, I> {
         self.update().unwrap();
         swap(&mut self.done, &mut self.pending);
         Guards {
@@ -354,12 +354,12 @@ impl<'a, I: Item, F: Filter> Query<'a, I, F> {
     }
 
     fn guard<'b>(
-        database: &'a Database,
-        states: &'b Vec<(I::State, TableState<'a>)>,
+        database: &'d Database,
+        states: &'b Vec<(I::State, TableState<'d>)>,
         index: u32,
         block: bool,
         mut valid: impl FnMut() -> bool,
-    ) -> Result<Guard<'a, 'b, <I::State as Lock<'a>>::Guard>, GuardError<'a, 'b, I>> {
+    ) -> Result<Guard<'d, 'b, <I::State as Lock<'d>>::Guard>, GuardError<'d, 'b, I>> {
         debug_assert!((index as usize) < states.len());
         let state = unsafe { states.get_unchecked(index as usize) };
         let table_read = if block {
@@ -783,9 +783,9 @@ impl<D: Datum> Filter for Has<D> {
     }
 }
 
-impl<'a, 'b> TableGuard<'a, 'b> {
+impl<'d, 'a> TableGuard<'d, 'a> {
     #[inline]
-    pub fn new(table_state: &'b TableState<'a>, table_read: TableRead<'a>) -> Self {
+    pub fn new(table_state: &'a TableState<'d>, table_read: TableRead<'d>) -> Self {
         let mut locks = table_state.table_locks.borrow_mut();
         debug_assert!(!locks.locks.has(table_state.locks_index as _));
         locks.readers += 1;

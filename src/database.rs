@@ -1,10 +1,10 @@
 use crate::{
     key::{Key, Keys},
     resources::Resources,
-    table::{self, Defer, Store, Table, TableRead, TableUpgrade, TableWrite, Tables},
+    table::{self, Add, Defer, Remove, Store, Table, TableRead, TableUpgrade, TableWrite, Tables},
     Error,
 };
-use std::{mem::replace, sync::atomic::Ordering::*};
+use std::sync::atomic::Ordering::*;
 
 pub struct Database {
     keys: Keys,
@@ -36,14 +36,13 @@ impl Database {
         &self.resources
     }
 
-    pub(crate) fn add_to_table<S, D: 'static>(
+    pub(crate) fn add_to_table<S>(
         &self,
         keys: &mut [Key],
         table: &Table,
-        mut state: S,
-        mut initialize: impl FnMut(&mut S, (usize, usize), &[Store]),
-        mut state_defer: impl FnMut(&mut S, usize) -> D,
-        mut initialize_defer: impl FnMut(&mut D, usize, &[Store]) + Copy + 'static,
+        state: S,
+        initialize: impl FnOnce(S, u32, &[Store]),
+        defer: impl FnOnce(S, &[Key], u32, usize) -> Add,
     ) {
         if keys.len() == 0 {
             return;
@@ -62,20 +61,12 @@ impl Database {
                     row_count,
                     table_read.table(),
                     table_read.inner(),
-                    |row, stores| initialize(&mut state, row, stores),
+                    |stores| initialize(state, row_index, stores),
                 );
                 drop(table_read);
             }
             Err((row_index, row_count)) => {
-                let mut state = state_defer(&mut state, keys.len());
-                table.defer(Defer::Add {
-                    keys: keys.iter().copied().collect(),
-                    row_index,
-                    row_count,
-                    initialize: Box::new(move |row_index, stores| {
-                        initialize_defer(&mut state, row_index, stores)
-                    }),
-                });
+                table.defer(Defer::Add(defer(state, keys, row_index, row_count)))
             }
         }
     }
@@ -90,7 +81,7 @@ impl Database {
                 Ok(true)
             }
             None => {
-                table.defer(Defer::Remove { row_index });
+                table.defer(Defer::Remove(Remove { row_index }));
                 Ok(false)
             }
         }
@@ -104,127 +95,144 @@ impl Database {
         mut initialize: impl FnMut(usize, usize, &Store),
     ) -> Option<()> {
         let target_table = self.tables.get(target_index as usize)?;
-        loop {
+        let (slot, indices, mut source_write, target_upgrade) = loop {
             let slot = self.keys.get(key).ok()?;
-            let source_indices = slot.indices();
-            if source_indices.0 == target_index {
+            let indices = slot.indices();
+            let source_table = self.tables.get(indices.0 as usize)?;
+
+            // If locks are always taken in order (lower index first), there can not be a deadlock between move operations.
+            // TODO: Defer the operation if a local deadlock is detected...
+            let (source_write, target_upgrade) = if source_table.index() < target_table.index() {
+                let left = self.table_write(source_table);
+                let right = self.table_upgrade(target_table);
+                (left, right)
+            } else if source_table.index() > target_table.index() {
+                let right = self.table_upgrade(target_table);
+                let left = self.table_write(source_table);
+                (left, right)
+            } else {
                 // No move is needed.
-                break Some(());
-            }
-            let source_table = self.tables.get(source_indices.0 as usize)?;
-
-            // Note that 2 very synchronized threads with their `source_table` and `target_table` swapped may
-            // defeat this scheme for taking 2 write locks without dead locking. It is assumed that it doesn't
-            // really happen in practice.
-            let source_write = self.table_write(source_table);
-            let (mut source_write, target_upgrade) = match self.table_try_upgrade(target_table) {
-                Some(target_read) => (source_write, target_read),
-                None => {
-                    drop(source_write);
-                    let target_read = self.table_upgrade(target_table);
-                    match self.table_try_write(source_table) {
-                        Some(source_write) => (source_write, target_read),
-                        None => continue,
-                    }
-                }
-            };
-            if source_indices != slot.indices() {
-                continue;
-            }
-
-            let last_index = Self::remove_from_reserve(&mut source_write);
-            // TODO: Defer
-            let (row_index, row_count, target_read) = match Self::add_to_reserve(1, target_upgrade)
-            {
-                Ok((row_index, row_count, target_read)) => (row_index, row_count, target_read),
-                Err((row_index, row_count)) => return None,
+                return Some(());
             };
 
-            let mut store_indices = (0, 0);
-
-            fn drop_or_squash(source: u32, target: u32, store: &mut Store) {
-                if source == target {
-                    unsafe { store.drop(target as _, 1) };
-                } else {
-                    unsafe { store.squash(source as _, target as _, 1) };
-                }
+            // Check the indices while holding the source table lock to ensure that the key wasn't moved.
+            if indices == slot.indices() {
+                break (slot, indices, source_write, target_upgrade);
             }
+        };
 
-            loop {
-                match (
-                    source_write.inner_mut().stores.get_mut(store_indices.0),
-                    target_read.inner().stores.get(store_indices.1),
-                ) {
-                    (Some(source_store), Some(target_store)) => {
-                        let source_identifier = source_store.meta().identifier;
-                        let target_identifier = target_store.meta().identifier;
-                        if source_identifier == target_identifier {
-                            store_indices.0 += 1;
-                            store_indices.1 += 1;
-                            unsafe {
-                                Store::copy(
-                                    (source_store, source_indices.1 as _),
-                                    (target_store, row_index as _),
-                                    1,
-                                );
-                            };
-                            drop_or_squash(last_index, source_indices.1, source_store);
-                        } else if source_identifier < target_identifier {
-                            store_indices.0 += 1;
-                            drop_or_squash(last_index, source_indices.1, source_store);
-                        } else {
-                            store_indices.1 += 1;
-                            initialize(row_index as _, row_count, target_store);
-                        }
-                    }
-                    (Some(source_store), None) => {
+        let last_index = Self::remove_from_reserve(&mut source_write);
+        // TODO: Defer
+        let (row_index, row_count, target_read) = match Self::add_to_reserve(1, target_upgrade) {
+            Ok((row_index, row_count, target_read)) => (row_index, row_count, target_read),
+            Err((row_index, row_count)) => return None,
+        };
+
+        fn drop_or_squash(source: u32, target: u32, store: &mut Store) {
+            if source == target {
+                unsafe { store.drop(target as _, 1) };
+            } else {
+                unsafe { store.squash(source as _, target as _, 1) };
+            }
+        }
+
+        let mut store_indices = (0, 0);
+        loop {
+            match (
+                source_write.inner_mut().stores.get_mut(store_indices.0),
+                target_read.inner().stores.get(store_indices.1),
+            ) {
+                (Some(source_store), Some(target_store)) => {
+                    let source_identifier = source_store.meta().identifier;
+                    let target_identifier = target_store.meta().identifier;
+                    if source_identifier == target_identifier {
                         store_indices.0 += 1;
-                        drop_or_squash(last_index, source_indices.1, source_store);
-                    }
-                    (None, Some(target_store)) => {
+                        store_indices.1 += 1;
+                        unsafe {
+                            Store::copy(
+                                (source_store, indices.1 as _),
+                                (target_store, row_index as _),
+                                1,
+                            );
+                        };
+                        drop_or_squash(last_index, indices.1, source_store);
+                    } else if source_identifier < target_identifier {
+                        store_indices.0 += 1;
+                        drop_or_squash(last_index, indices.1, source_store);
+                    } else {
                         store_indices.1 += 1;
                         initialize(row_index as _, row_count, target_store);
                     }
-                    (None, None) => break,
                 }
+                (Some(source_store), None) => {
+                    store_indices.0 += 1;
+                    drop_or_squash(last_index, indices.1, source_store);
+                }
+                (None, Some(target_store)) => {
+                    store_indices.1 += 1;
+                    initialize(row_index as _, row_count, target_store);
+                }
+                (None, None) => break,
             }
-
-            if last_index == source_indices.1 {
-                unsafe {
-                    let keys = &mut *target_read.inner().keys.get();
-                    *keys.get_unchecked_mut(row_index as usize) = key;
-                    self.keys.get_unchecked(key).update(target_index, row_index);
-                }
-            } else {
-                let source_keys = source_write.inner_mut().keys.get_mut();
-                unsafe {
-                    let last_key = *source_keys.get_unchecked(last_index as usize);
-                    let source_key = source_keys.get_unchecked_mut(source_indices.1 as usize);
-                    let source_key = replace(source_key, last_key);
-
-                    let target_keys = &mut *target_read.inner().keys.get();
-                    *target_keys.get_unchecked_mut(row_index as usize) = source_key;
-                    self.keys
-                        .get_unchecked(source_key)
-                        .update(target_index, row_index);
-                    self.keys
-                        .get_unchecked(last_key)
-                        .update(source_indices.0, source_indices.1);
-                }
-            }
-
-            Self::add_to_commit(1, target_read.inner());
-            drop(source_write);
-            break Some(());
         }
+
+        if last_index == indices.1 {
+            unsafe {
+                let keys = &mut *target_read.inner().keys.get();
+                *keys.get_unchecked_mut(row_index as usize) = key;
+                slot.update(target_index, row_index);
+            }
+        } else {
+            let source_keys = source_write.inner_mut().keys.get_mut();
+            unsafe {
+                let target_keys = &mut *target_read.inner().keys.get();
+                let last_key = *source_keys.get_unchecked(last_index as usize);
+                *source_keys.get_unchecked_mut(indices.1 as usize) = last_key;
+                *target_keys.get_unchecked_mut(row_index as usize) = key;
+                slot.update(target_index, row_index);
+                self.keys
+                    .get_unchecked(last_key)
+                    .update(indices.0, indices.1);
+            }
+        }
+
+        Self::add_to_commit(1, target_read.inner());
+        drop(source_write);
+        Some(())
     }
 
     pub(crate) fn table_read<'a>(&'a self, table: &'a Table) -> TableRead<'a> {
         TableRead::new(self, table, table.inner.read())
     }
 
+    pub(crate) fn table_read_with<'a>(
+        &'a self,
+        table: &'a Table,
+        valid: impl FnOnce(&table::Inner) -> bool,
+    ) -> Option<TableRead<'a>> {
+        let read = table.inner.read();
+        if valid(&read) {
+            Some(TableRead::new(self, table, read))
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn table_try_read<'a>(&'a self, table: &'a Table) -> Option<TableRead<'a>> {
         Some(TableRead::new(self, table, table.inner.try_read()?))
+    }
+
+    pub(crate) fn table_try_read_with<'a>(
+        &'a self,
+        table: &'a Table,
+        valid: impl FnOnce(&table::Inner) -> bool,
+    ) -> Option<TableRead<'a>> {
+        let read = table.inner.try_read()?;
+        if valid(&read) {
+            Some(TableRead::new(self, table, read))
+        } else {
+            None
+        }
     }
 
     pub(crate) fn table_upgrade<'a>(&'a self, table: &'a Table) -> TableUpgrade<'a> {
@@ -243,6 +251,19 @@ impl Database {
         TableWrite::new(self, table, table.inner.write())
     }
 
+    pub(crate) fn table_write_with<'a>(
+        &'a self,
+        table: &'a Table,
+        valid: impl FnOnce(&mut table::Inner) -> bool,
+    ) -> Option<TableWrite<'a>> {
+        let mut write = table.inner.write();
+        if valid(&mut write) {
+            Some(TableWrite::new(self, table, write))
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn table_try_write<'a>(&'a self, table: &'a Table) -> Option<TableWrite<'a>> {
         Some(TableWrite::new(self, table, table.inner.try_write()?))
     }
@@ -250,12 +271,12 @@ impl Database {
     pub(crate) fn resolve_table(&self, table_write: &mut TableWrite) {
         while let Some(defer) = table_write.table().defer.write().pop_front() {
             match defer {
-                Defer::Add {
+                Defer::Add(Add {
                     keys,
                     row_index,
                     row_count,
-                    mut initialize,
-                } => {
+                    initialize,
+                }) => {
                     table_write.inner_mut().grow(row_count);
                     self.add_to_resolve(
                         &keys,
@@ -263,10 +284,12 @@ impl Database {
                         row_count,
                         table_write.table(),
                         table_write.inner(),
-                        |row, stores| initialize(row.0, stores),
+                        initialize,
                     )
                 }
-                Defer::Remove { row_index } => self.remove_from_resolve(table_write, row_index),
+                Defer::Remove(Remove { row_index }) => {
+                    self.remove_from_resolve(table_write, row_index)
+                }
             }
         }
     }
@@ -295,17 +318,21 @@ impl Database {
         // There can not be more than `u32::MAX` keys at a given time.
         assert!(row_count < u32::MAX as _);
         let table_read = if row_count > table_upgrade.capacity() {
-            match table_upgrade.try_upgrade() {
-                Ok(mut table_write) => {
-                    table_write.inner_mut().grow(row_count);
-                    table_write.downgrade()
-                }
-                Err(table_upgrade) => {
-                    // Do not run `TableUpgrade::drop` since it just failed to upgrade its lock.
-                    drop(table_upgrade.guard());
-                    return Err((row_index, row_count));
-                }
-            }
+            // TODO: Prevent local deadlocks.
+            let mut table_write = table_upgrade.upgrade();
+            table_write.inner_mut().grow(row_count);
+            table_write.downgrade()
+            // match table_upgrade.try_upgrade() {
+            //     Ok(mut table_write) => {
+            //         table_write.inner_mut().grow(row_count);
+            //         table_write.downgrade()
+            //     }
+            //     Err(table_upgrade) => {
+            //         // Do not run `TableUpgrade::drop` since it just failed to upgrade its lock.
+            //         drop(table_upgrade.guard());
+            //         return Err((row_index, row_count));
+            //     }
+            // }
         } else {
             table_upgrade.downgrade()
         };
@@ -319,14 +346,14 @@ impl Database {
         row_count: usize,
         table: &Table,
         inner: &table::Inner,
-        mut initialize: impl FnMut((usize, usize), &[Store]),
+        initialize: impl FnOnce(&[Store]),
     ) {
         unsafe {
             let table_keys = &mut *inner.keys.get();
             table_keys.get_unchecked_mut(row_index as usize..row_count as usize)
         }
         .copy_from_slice(keys);
-        initialize((row_index as _, keys.len()), inner.stores());
+        initialize(inner.stores());
 
         // Initialize the slot only after the table row has been fully initialized and while holding the `table_read`
         // lock to ensure that no keys can be observed in an uninitialized state either through the `Keys` or the table.
