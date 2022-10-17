@@ -29,7 +29,7 @@ impl<K: Eq + Hash> Globals<K> {
         Self(HashMap::new())
     }
 
-    pub fn get<T: Send + Sync + 'static>(
+    pub fn try_get<T: Send + Sync + 'static>(
         &mut self,
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
@@ -43,6 +43,30 @@ impl<K: Eq + Hash> Globals<K> {
                 .map_err(|_| Error::InvalidType)?,
         ))
     }
+
+    pub fn get<T: Send + Sync + 'static>(
+        &mut self,
+        key: K,
+        default: impl FnOnce() -> T,
+    ) -> Global<T> {
+        match self.0.get_mut(&key) {
+            Some(result) => {
+                if let Ok(resource) = result {
+                    if let Ok(resource) = resource.clone().downcast() {
+                        return Global(resource);
+                    }
+                }
+                let resource = Arc::new(RwLock::new(default()));
+                *result = Ok(resource.clone());
+                Global(resource)
+            }
+            None => {
+                let resource = Arc::new(RwLock::new(default()));
+                self.0.insert(key, Ok(resource.clone()));
+                Global(resource)
+            }
+        }
+    }
 }
 
 impl<K: Eq + Hash> Locals<K> {
@@ -50,7 +74,7 @@ impl<K: Eq + Hash> Locals<K> {
         Self(HashMap::new())
     }
 
-    pub fn get<T: 'static>(
+    pub fn try_get<T: 'static>(
         &mut self,
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
@@ -64,6 +88,26 @@ impl<K: Eq + Hash> Locals<K> {
                 .map_err(|_| Error::InvalidType)?,
         ))
     }
+
+    pub fn get<T: 'static>(&mut self, key: K, default: impl FnOnce() -> T) -> Local<T> {
+        match self.0.get_mut(&key) {
+            Some(result) => {
+                if let Ok(resource) = result {
+                    if let Ok(resource) = resource.clone().downcast() {
+                        return Local(resource);
+                    }
+                }
+                let resource = Rc::new(RefCell::new(default()));
+                *result = Ok(resource.clone());
+                Local(resource)
+            }
+            None => {
+                let resource = Rc::new(RefCell::new(default()));
+                self.0.insert(key, Ok(resource.clone()));
+                Local(resource)
+            }
+        }
+    }
 }
 
 impl Resources {
@@ -74,40 +118,64 @@ impl Resources {
         }
     }
 
-    pub fn global<T: Send + Sync + 'static>(
+    pub fn global<T: Send + Sync + 'static>(&self, default: impl FnOnce() -> T) -> Global<T> {
+        self.globals.lock().get(TypeId::of::<T>(), default)
+    }
+
+    pub fn try_global<T: Send + Sync + 'static>(
         &self,
         default: impl FnOnce() -> Result<T, Error>,
     ) -> Result<Global<T>, Error> {
-        self.globals.lock().get(TypeId::of::<T>(), default)
+        self.globals.lock().try_get(TypeId::of::<T>(), default)
     }
 
     pub fn global_with<K: Eq + Hash + Send + Sync + 'static, T: Send + Sync + 'static>(
         &self,
         key: K,
-        default: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<Global<T>, Error> {
-        self.global(|| Ok(Globals::<K>::new()))?
-            .write()
-            .get(key, default)
+        default: impl FnOnce() -> T,
+    ) -> Global<T> {
+        self.global(Globals::<K>::new).write().get(key, default)
     }
 
-    pub fn local<T: 'static>(
+    pub fn try_global_with<K: Eq + Hash + Send + Sync + 'static, T: Send + Sync + 'static>(
         &self,
+        key: K,
         default: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<Local<T>, Error> {
+    ) -> Result<Global<T>, Error> {
+        self.global(Globals::<K>::new).write().try_get(key, default)
+    }
+
+    pub fn local<T: 'static>(&self, default: impl FnOnce() -> T) -> Local<T> {
         self.locals
             .lock()
             .get((thread::current().id(), TypeId::of::<T>()), default)
     }
 
+    pub fn try_local<T: 'static>(
+        &self,
+        default: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<Local<T>, Error> {
+        self.locals
+            .lock()
+            .try_get((thread::current().id(), TypeId::of::<T>()), default)
+    }
+
     pub fn local_with<K: Eq + Hash + 'static, T: 'static>(
+        &self,
+        key: K,
+        default: impl FnOnce() -> T,
+    ) -> Local<T> {
+        self.local(Locals::<K>::new).borrow_mut().get(key, default)
+    }
+
+    pub fn try_local_with<K: Eq + Hash + 'static, T: 'static>(
         &self,
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
     ) -> Result<Local<T>, Error> {
-        self.local(|| Ok(Locals::<K>::new()))?
+        self.local(Locals::<K>::new)
             .borrow_mut()
-            .get(key, default)
+            .try_get(key, default)
     }
 }
 

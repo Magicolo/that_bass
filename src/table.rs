@@ -1,9 +1,4 @@
-use crate::{
-    core::{Bits, FullIterator, IntoRef},
-    database::Database,
-    key::Key,
-    Datum, Error, Meta,
-};
+use crate::{core::FullIterator, database::Database, key::Key, Datum, Error, Meta};
 use parking_lot::{
     MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard,
     RwLockUpgradableReadGuard, RwLockWriteGuard,
@@ -11,7 +6,7 @@ use parking_lot::{
 use std::{
     any::{type_name, TypeId},
     cell::UnsafeCell,
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     mem::ManuallyDrop,
     ptr::NonNull,
     slice::{from_raw_parts, from_raw_parts_mut, SliceIndex},
@@ -24,7 +19,6 @@ use std::{
 pub struct Table {
     index: u32,
     indices: HashMap<TypeId, usize>,
-    pub(crate) defer: RwLock<VecDeque<Defer>>,
     pub(crate) inner: RwLock<Inner>,
 }
 
@@ -65,28 +59,6 @@ pub struct TableUpgrade<'d>(
 
 pub struct TableWrite<'d>(&'d Database, &'d Table, Option<RwLockWriteGuard<'d, Inner>>);
 
-pub(crate) struct Locks {
-    pub reads: Bits,
-    pub upgrades: Bits,
-    pub writes: Bits,
-}
-
-pub(crate) enum Defer {
-    Add(Add),
-    Remove(Remove),
-}
-
-pub(crate) struct Add {
-    pub keys: Box<[Key]>,
-    pub row_index: u32,
-    pub row_count: usize,
-    pub initialize: Box<dyn FnOnce(&[Store])>,
-}
-
-pub(crate) struct Remove {
-    pub row_index: u32,
-}
-
 impl Store {
     pub fn new(meta: &'static Meta, capacity: usize) -> Self {
         let data = if capacity == 0 {
@@ -101,19 +73,26 @@ impl Store {
     }
 
     #[inline]
-    pub const fn meta(&self) -> &Meta {
-        &self.meta
+    pub const fn meta(&self) -> &'static Meta {
+        self.meta
     }
 
     #[inline]
     pub unsafe fn copy(source: (&mut Self, usize), target: (&Self, usize), count: usize) {
-        debug_assert_eq!(source.0.meta().identifier, target.0.meta().identifier);
+        debug_assert_eq!(source.0.meta().identifier(), target.0.meta().identifier());
         let &Meta { copy, .. } = source.0.meta();
         copy(
             (*source.0.data.get_mut(), source.1),
             (*target.0.data.data_ptr(), target.1),
             count,
         );
+    }
+
+    #[inline]
+    pub unsafe fn swap(&mut self, source: usize, target: usize, count: usize) {
+        debug_assert!(source.abs_diff(target) >= count);
+        let &Meta { swap, .. } = self.meta();
+        swap(*self.data.get_mut(), source, target, count);
     }
 
     pub unsafe fn grow(&mut self, old_capacity: usize, new_capacity: usize) {
@@ -329,7 +308,6 @@ impl Tables {
             index: index as _,
             indices,
             inner: RwLock::new(inner),
-            defer: RwLock::new(VecDeque::new()),
         });
         let write = RwLockUpgradableReadGuard::upgrade(upgrade);
         // SAFETY: The lock has been upgraded before `tables` is mutated, which satisfy the requirement above.
@@ -382,11 +360,6 @@ impl Table {
     pub fn stores(&self) -> usize {
         self.indices.len()
     }
-
-    #[inline]
-    pub(crate) fn defer(&self, defer: Defer) {
-        self.defer.write().push_back(defer);
-    }
 }
 
 unsafe impl Send for Table {}
@@ -416,6 +389,12 @@ impl Inner {
     #[inline]
     pub fn stores(&self) -> &[Store] {
         &self.stores
+    }
+
+    #[inline]
+    pub fn ensure(&mut self) {
+        let (begun, _) = Database::decompose_pending(*self.pending.get_mut());
+        self.grow(begun as _)
     }
 
     pub fn grow(&mut self, capacity: usize) {
@@ -496,19 +475,19 @@ impl<'d> TableRead<'d> {
     }
 }
 
-impl<'d> Drop for TableRead<'d> {
-    #[inline]
-    fn drop(&mut self) {
-        if match self.table().defer.try_read() {
-            Some(defer) if defer.len() > 0 => true,
-            None => true,
-            _ => false,
-        } {
-            drop(self.2.take());
-            self.0.table_try_write(self.1);
-        }
-    }
-}
+// impl<'d> Drop for TableRead<'d> {
+//     #[inline]
+//     fn drop(&mut self) {
+//         if match self.table().defer.try_read() {
+//             Some(defer) if defer.len() > 0 => true,
+//             None => true,
+//             _ => false,
+//         } {
+//             drop(self.2.take());
+//             self.0.table_try_write(self.1);
+//         }
+//     }
+// }
 
 impl<'d> TableUpgrade<'d> {
     #[inline]
@@ -590,31 +569,22 @@ impl<'d> TableUpgrade<'d> {
     }
 }
 
-impl Drop for TableUpgrade<'_> {
-    #[inline]
-    fn drop(&mut self) {
-        if match self.table().defer.try_read() {
-            Some(defer) if defer.len() > 0 => true,
-            None => true,
-            _ => false,
-        } {
-            if let Some(upgrade) = self.2.take() {
-                if let Ok(write) = RwLockUpgradableReadGuard::try_upgrade(upgrade) {
-                    TableWrite::new(self.0, self.1, write);
-                }
-            }
-        }
-    }
-}
-
-impl<'d> IntoRef for TableUpgrade<'d> {
-    type Ref = TableRead<'d>;
-
-    #[inline]
-    fn into_ref(self) -> Self::Ref {
-        self.downgrade()
-    }
-}
+// impl Drop for TableUpgrade<'_> {
+//     #[inline]
+//     fn drop(&mut self) {
+//         if match self.table().defer.try_read() {
+//             Some(defer) if defer.len() > 0 => true,
+//             None => true,
+//             _ => false,
+//         } {
+//             if let Some(upgrade) = self.2.take() {
+//                 if let Ok(write) = RwLockUpgradableReadGuard::try_upgrade(upgrade) {
+//                     TableWrite::new(self.0, self.1, write);
+//                 }
+//             }
+//         }
+//     }
+// }
 
 impl<'d> TableWrite<'d> {
     #[inline]
@@ -623,9 +593,7 @@ impl<'d> TableWrite<'d> {
         table: &'d Table,
         guard: RwLockWriteGuard<'d, Inner>,
     ) -> Self {
-        let mut guard = Self(database, table, Some(guard));
-        guard.resolve();
-        guard
+        Self(database, table, Some(guard))
     }
 
     #[inline]
@@ -679,24 +647,15 @@ impl<'d> TableWrite<'d> {
         TableRead::new(self.0, self.1, RwLockWriteGuard::downgrade(self.guard()))
     }
 
-    #[inline]
-    pub(crate) fn resolve(&mut self) {
-        self.database().resolve_table(self);
-    }
+    // #[inline]
+    // pub(crate) fn resolve(&mut self) {
+    //     self.database().resolve_table(self);
+    // }
 }
 
-impl<'d> IntoRef for TableWrite<'d> {
-    type Ref = TableRead<'d>;
-
-    #[inline]
-    fn into_ref(self) -> Self::Ref {
-        self.downgrade()
-    }
-}
-
-impl Drop for TableWrite<'_> {
-    #[inline]
-    fn drop(&mut self) {
-        self.resolve();
-    }
-}
+// impl Drop for TableWrite<'_> {
+//     #[inline]
+//     fn drop(&mut self) {
+//         self.resolve();
+//     }
+// }

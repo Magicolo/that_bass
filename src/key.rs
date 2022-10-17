@@ -51,6 +51,11 @@ impl Key {
     }
 
     #[inline]
+    pub const fn valid(&self) -> bool {
+        self.index < u32::MAX && self.generation < u32::MAX
+    }
+
+    #[inline]
     pub const fn index(&self) -> u32 {
         self.index
     }
@@ -170,7 +175,7 @@ impl Keys {
             let tail = tail as usize;
             let count = tail.min(keys.len());
             let head = tail - count;
-            keys.copy_from_slice(&free_read.0[head..tail]);
+            keys[..count].copy_from_slice(&free_read.0[head..tail]);
             drop(free_read);
             count
         } else {
@@ -201,10 +206,14 @@ impl Keys {
         }
     }
 
-    pub fn release(&self, mut key: Key) -> Result<(u32, u32), Error> {
+    pub fn release(&self, key: Key) -> Result<(u32, u32), Error> {
         let slot = self.get(key)?;
-        let (table_index, row_index) = slot.release(key.generation())?;
+        let (table, row) = slot.release(key.generation())?;
+        self.release_unchecked(key);
+        Ok((table, row))
+    }
 
+    pub(crate) fn release_unchecked(&self, mut key: Key) {
         // If the key reached generation `u32::MAX`, its index is discarded which results in a dead `Slot`.
         if key.increment() < u32::MAX {
             let mut free_write = self.free.write();
@@ -214,8 +223,6 @@ impl Keys {
             *free_write.1.get_mut() = free_write.0.len() as _;
             drop(free_write);
         }
-
-        Ok((table_index, row_index))
     }
 }
 
@@ -276,7 +283,7 @@ impl Slot {
     }
 
     #[inline]
-    pub fn store(&self) -> u32 {
+    pub fn row(&self) -> u32 {
         self.indices().1
     }
 }

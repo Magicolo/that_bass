@@ -130,11 +130,11 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
                 |mut state, index, mut guard, table| {
                     let slots = unsafe { slots.get_unchecked_mut(index as usize) };
                     for (key, slot) in slots.drain(..) {
-                        let (table_index, store_index) = slot.indices();
+                        let (table_index, row_index) = slot.indices();
                         // The key is allowed to move within its table (such as with a swap as part of a remove).
                         if table.table().index() == table_index {
                             state =
-                                fold(state, (key, Ok(R::item(&mut guard, store_index as usize))))?;
+                                fold(state, (key, Ok(R::item(&mut guard, row_index as usize))))?;
                         } else {
                             // The key has moved to another table between the last moment the slot indices were read and now.
                             keys.push_back(key);

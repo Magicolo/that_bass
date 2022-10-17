@@ -255,7 +255,7 @@ impl<'d, I: Item, F: Filter> Query<'d, I, F> {
                     let table_locks = self
                         .database
                         .resources()
-                        .local_with(table.index(), || Ok(TableLocks::default()))?;
+                        .local_with(table.index(), TableLocks::default);
                     let locks_index = {
                         let mut locks = table_locks.borrow_mut();
                         let new_index = match locks.free.pop() {
@@ -319,17 +319,17 @@ impl<'d, I: Item, F: Filter> Query<'d, I, F> {
         self.update()?;
         loop {
             let slot = self.database.keys().get(key)?;
-            let (table_index, store_index) = slot.indices();
+            let (table_index, row_index) = slot.indices();
             let &state_index = self
                 .indices
                 .get(&table_index)
                 .ok_or(Error::KeyNotInQuery(key))?;
             match Self::guard(self.database, &self.states, state_index, true, || {
                 // If this is not the case, it means that the `key` has just been moved.
-                slot.indices() == (table_index, store_index)
+                slot.indices() == (table_index, row_index)
             }) {
                 Ok(mut guard) => {
-                    let item = unsafe { I::State::item(&mut guard.0, store_index as _) };
+                    let item = unsafe { I::State::item(&mut guard.0, row_index as _) };
                     break Ok(with(Guard(item, guard.1)));
                 }
                 Err(GuardError::Invalid | GuardError::WouldBlock) => continue,
