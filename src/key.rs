@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
 
 use crate::{
+    core::FullIterator,
     query::{Context, Item, Lock},
     table::{Store, Table},
     Error,
@@ -176,12 +177,11 @@ impl Keys {
             let count = tail.min(keys.len());
             let head = tail - count;
             keys[..count].copy_from_slice(&free_read.0[head..tail]);
-            drop(free_read);
             count
         } else {
-            drop(free_read);
             0
         };
+        drop(free_read);
 
         if done < keys.len() {
             let keys = &mut keys[done..];
@@ -206,23 +206,20 @@ impl Keys {
         }
     }
 
-    pub fn release(&self, key: Key) -> Result<(u32, u32), Error> {
-        let slot = self.get(key)?;
-        let (table, row) = slot.release(key.generation())?;
-        self.release_unchecked(key);
-        Ok((table, row))
-    }
+    /// Assumes that the keys have had their `Slot` released.
+    pub(crate) fn release(&self, keys: impl FullIterator<Item = Key>) {
+        let mut free_write = self.free.write();
+        let (free_keys, free_count) = &mut *free_write;
+        free_keys.truncate((*free_count.get_mut()).max(0) as _);
 
-    pub(crate) fn release_unchecked(&self, mut key: Key) {
-        // If the key reached generation `u32::MAX`, its index is discarded which results in a dead `Slot`.
-        if key.increment() < u32::MAX {
-            let mut free_write = self.free.write();
-            let free_count = *free_write.1.get_mut();
-            free_write.0.truncate(free_count.max(0) as _);
-            free_write.0.push(key);
-            *free_write.1.get_mut() = free_write.0.len() as _;
-            drop(free_write);
+        for mut key in keys {
+            // If the key reached generation `u32::MAX`, its index is discarded which results in a dead `Slot`.
+            if key.increment() < u32::MAX {
+                free_keys.push(key);
+            }
         }
+
+        *free_count.get_mut() = free_keys.len() as _;
     }
 }
 

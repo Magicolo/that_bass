@@ -203,17 +203,14 @@ mod tests {
     #[test]
     fn create_one_returns_non_null_key() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(());
-        assert_ne!(key, Key::NULL);
+        assert_ne!(database.create()?.one(()), Key::NULL);
         Ok(())
     }
 
     #[test]
     fn create_all_returns_no_null_key() -> Result<(), Error> {
         let database = Database::new();
-        let mut create = database.create()?;
-        let keys = create.all([(); 1000]);
-        assert!(keys.iter().all(|&key| key != Key::NULL));
+        assert!(database.create()?.all([(); 1000]).iter().all(Key::valid));
         Ok(())
     }
 
@@ -222,8 +219,7 @@ mod tests {
         let database = Database::new();
         let mut set = HashSet::new();
         let mut create = database.create()?;
-        let keys = create.all([(); 1000]);
-        assert!(keys.iter().all(|&key| set.insert(key)));
+        assert!(create.all([(); 1000]).iter().all(|&key| set.insert(key)));
         Ok(())
     }
 
@@ -232,6 +228,17 @@ mod tests {
         let database = Database::new();
         let result = database.create::<(A, A)>();
         assert_eq!(result.err(), Some(Error::DuplicateMeta));
+    }
+
+    #[test]
+    fn create_destroy_create_reuses_key_index() -> Result<(), Error> {
+        let database = Database::new();
+        let key1 = database.create()?.one(());
+        database.destroy().one(key1);
+        let key2 = database.create()?.one(());
+        assert_eq!(key1.index(), key2.index());
+        assert_ne!(key1.generation(), key2.generation());
+        Ok(())
     }
 
     // #[test]
@@ -257,7 +264,7 @@ mod tests {
     fn destroy_one_fails_with_null_key() {
         let database = Database::new();
         let mut destroy = database.destroy();
-        destroy.one(Key::NULL);
+        assert_eq!(destroy.one(Key::NULL), false);
         assert_eq!(destroy.resolve(), 0);
     }
 
@@ -266,7 +273,7 @@ mod tests {
         let database = Database::new();
         let key = database.create::<()>()?.one(());
         let mut destroy = database.destroy();
-        destroy.one(key);
+        assert_eq!(destroy.one(key), true);
         assert_eq!(destroy.resolve(), 1);
         Ok(())
     }
@@ -274,8 +281,9 @@ mod tests {
     #[test]
     fn destroy_all_n_with_create_all_n_resolves_n() -> Result<(), Error> {
         let database = Database::new();
+        let keys = database.create::<()>()?.all_n([(); 1000]);
         let mut destroy = database.destroy();
-        destroy.all(database.create::<()>()?.all_n([(); 1000]));
+        assert_eq!(destroy.all(keys), 1000);
         assert_eq!(destroy.resolve(), 1000);
         Ok(())
     }
@@ -324,19 +332,15 @@ mod tests {
         let database = Database::new();
         let key = database.create()?.one(());
         database.destroy().one(key);
-        assert_eq!(
-            database.query::<()>()?.item(key).err(),
-            Some(Error::InvalidKey)
-        );
+        let mut query = database.query::<()>()?;
+        assert_eq!(query.item(key).err(), Some(Error::InvalidKey));
         Ok(())
     }
 
     #[test]
     fn query_is_some_all_create_all() -> Result<(), Error> {
         let database = Database::new();
-        let mut create = database.create()?;
-        let keys = create.all_n([(); 1000]);
-        create.resolve();
+        let keys = database.create()?.all_n([(); 1000]);
         let mut query = database.query::<()>()?;
         assert!(keys.iter().all(|&key| query.item(key).is_ok()));
         Ok(())
@@ -346,7 +350,7 @@ mod tests {
     fn query_is_some_remain_destroy_all() -> Result<(), Error> {
         let database = Database::new();
         let keys = database.create()?.all_n([(); 1000]);
-        database.destroy().all(keys[..500].into_iter().copied());
+        database.destroy().all(keys[..500].iter().copied());
         let mut query = database.query::<()>()?;
         assert!(keys[..500].iter().all(|&key| query.item(key).is_err()));
         assert!(keys[500..].iter().all(|&key| query.item(key).is_ok()));
@@ -355,20 +359,22 @@ mod tests {
 
     #[test]
     fn query_is_err_with_write_write() {
+        let database = Database::new();
         assert_eq!(
-            Database::new().query::<(&mut A, &mut A)>().err(),
+            database.query::<(&mut A, &mut A)>().err(),
             Some(Error::WriteWriteConflict)
         );
     }
 
     #[test]
     fn query_is_err_with_read_write() {
+        let database = Database::new();
         assert_eq!(
-            Database::new().query::<(&A, &mut A)>().err(),
+            database.query::<(&A, &mut A)>().err(),
             Some(Error::ReadWriteConflict)
         );
         assert_eq!(
-            Database::new().query::<(&mut A, &A)>().err(),
+            database.query::<(&mut A, &A)>().err(),
             Some(Error::ReadWriteConflict)
         );
     }
@@ -388,8 +394,7 @@ mod tests {
     fn query_reads_same_datum_as_create_one() -> Result<(), Error> {
         let database = Database::new();
         let key = database.create()?.one(C(1));
-        let mut query = database.query::<&C>()?;
-        assert_eq!(query.item(key).unwrap().0, 1);
+        assert_eq!(database.query::<&C>()?.item(key).unwrap().0, 1);
         Ok(())
     }
 
@@ -397,10 +402,8 @@ mod tests {
     fn query1_reads_datum_written_by_query2() -> Result<(), Error> {
         let database = Database::new();
         let key = database.create()?.one(C(1));
-        let mut query1 = database.query::<&C>()?;
-        let mut query2 = database.query::<&mut C>()?;
-        query2.item(key).unwrap().0 += 1;
-        assert_eq!(query1.item(key).unwrap().0, 2);
+        database.query::<&mut C>()?.item(key).unwrap().0 += 1;
+        assert_eq!(database.query::<&C>()?.item(key).unwrap().0, 2);
         Ok(())
     }
 

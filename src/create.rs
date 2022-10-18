@@ -58,72 +58,6 @@ impl Database {
     }
 }
 
-impl Context<'_> {
-    pub fn declare(&mut self, meta: &'static Meta) -> Result<(), Error> {
-        if self.types.insert(meta.identifier()) {
-            self.metas.push(meta);
-            Ok(())
-        } else {
-            Err(Error::DuplicateMeta)
-        }
-    }
-
-    pub fn own(&mut self) -> Context {
-        Context {
-            types: self.types,
-            metas: self.metas,
-        }
-    }
-}
-
-unsafe impl<D: Datum> Template for D {
-    type State = usize;
-
-    fn declare(mut context: Context) -> Result<(), Error> {
-        context.declare(D::meta())
-    }
-
-    fn initialize(table: &Table) -> Result<Self::State, Error> {
-        table.store::<D>()
-    }
-
-    #[inline]
-    unsafe fn apply(self, &state: &Self::State, row: usize, stores: &[Store]) {
-        unsafe { stores.get_unchecked(state).set_unlocked_at(row, self) };
-    }
-}
-
-unsafe impl Template for () {
-    type State = ();
-    fn declare(_: Context) -> Result<(), Error> {
-        Ok(())
-    }
-    fn initialize(_: &Table) -> Result<Self::State, Error> {
-        Ok(())
-    }
-    #[inline]
-    unsafe fn apply(self, _: &Self::State, _: usize, _: &[Store]) {}
-}
-
-unsafe impl<T1: Template, T2: Template> Template for (T1, T2) {
-    type State = (T1::State, T2::State);
-
-    fn declare(mut context: Context) -> Result<(), Error> {
-        T1::declare(context.own())?;
-        T2::declare(context)
-    }
-
-    fn initialize(table: &Table) -> Result<Self::State, Error> {
-        Ok((T1::initialize(table)?, T2::initialize(table)?))
-    }
-
-    #[inline]
-    unsafe fn apply(self, state: &Self::State, row: usize, stores: &[Store]) {
-        self.0.apply(&state.0, row, stores);
-        self.1.apply(&state.1, row, stores);
-    }
-}
-
 impl<'d, T: Template> Create<'d, T> {
     #[inline]
     pub fn all<I: IntoIterator<Item = T>>(&mut self, templates: I) -> &[Key] {
@@ -205,11 +139,84 @@ impl<'d, T: Template> Create<'d, T> {
             self.templates.drain(..),
         )
     }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        let keys = self.database.keys();
+        keys.release(self.keys[..self.templates.len()].iter().copied());
+        self.templates.clear();
+    }
 }
 
 impl<T: Template> Drop for Create<'_, T> {
     fn drop(&mut self) {
         self.resolve();
+    }
+}
+
+impl Context<'_> {
+    pub fn declare(&mut self, meta: &'static Meta) -> Result<(), Error> {
+        if self.types.insert(meta.identifier()) {
+            self.metas.push(meta);
+            Ok(())
+        } else {
+            Err(Error::DuplicateMeta)
+        }
+    }
+
+    pub fn own(&mut self) -> Context {
+        Context {
+            types: self.types,
+            metas: self.metas,
+        }
+    }
+}
+
+unsafe impl<D: Datum> Template for D {
+    type State = usize;
+
+    fn declare(mut context: Context) -> Result<(), Error> {
+        context.declare(D::meta())
+    }
+
+    fn initialize(table: &Table) -> Result<Self::State, Error> {
+        table.store::<D>()
+    }
+
+    #[inline]
+    unsafe fn apply(self, &state: &Self::State, row: usize, stores: &[Store]) {
+        unsafe { stores.get_unchecked(state).set_unlocked_at(row, self) };
+    }
+}
+
+unsafe impl Template for () {
+    type State = ();
+    fn declare(_: Context) -> Result<(), Error> {
+        Ok(())
+    }
+    fn initialize(_: &Table) -> Result<Self::State, Error> {
+        Ok(())
+    }
+    #[inline]
+    unsafe fn apply(self, _: &Self::State, _: usize, _: &[Store]) {}
+}
+
+unsafe impl<T1: Template, T2: Template> Template for (T1, T2) {
+    type State = (T1::State, T2::State);
+
+    fn declare(mut context: Context) -> Result<(), Error> {
+        T1::declare(context.own())?;
+        T2::declare(context)
+    }
+
+    fn initialize(table: &Table) -> Result<Self::State, Error> {
+        Ok((T1::initialize(table)?, T2::initialize(table)?))
+    }
+
+    #[inline]
+    unsafe fn apply(self, state: &Self::State, row: usize, stores: &[Store]) {
+        self.0.apply(&state.0, row, stores);
+        self.1.apply(&state.1, row, stores);
     }
 }
 
