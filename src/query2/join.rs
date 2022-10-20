@@ -1,5 +1,5 @@
 use super::{
-    row::{Row, Rows},
+    row::{ItemContext, Row, Rows},
     *,
 };
 use crate::{
@@ -45,9 +45,20 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
     type Item<'a> = (K, Result<R::Item<'a>, Error>);
     type Read = Join<'d, L, <Rows<'d, R> as Query<'d>>::Read, K, B>;
 
-    fn initialize(&mut self, table: &'d Table) {
-        self.left.initialize(table);
-        self.right.initialize(table);
+    fn initialize(&mut self, table: &'d Table) -> Result<(), Error> {
+        self.left.initialize(table)?;
+        self.right.initialize(table)?;
+        Ok(())
+    }
+
+    fn read(self) -> Self::Read {
+        Join {
+            left: self.left,
+            right: self.right.read(),
+            by: self.by,
+            slots: self.slots,
+            keys: self.keys,
+        }
     }
 
     #[inline]
@@ -101,7 +112,7 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
             // to ensure that no deadlock occurs.
             left.each(context.own(), |item| keys.push_back(by(item)));
             // States with no joined keys will be skipped.
-            right.done.clear();
+            right.pending.clear();
             // Ensure that `states` has the same length as `right.states`.
             slots.resize_with(right.states.len(), Vec::new);
 
@@ -113,7 +124,7 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
                         Some(&state_index) => {
                             let slots = unsafe { slots.get_unchecked_mut(state_index as usize) };
                             if slots.len() == 0 {
-                                right.done.push_back(state_index);
+                                right.pending.push_back(state_index);
                             }
                             slots.push((join, slot));
                             continue;
@@ -124,25 +135,21 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
                 }
             }
 
-            state = right.guards(
-                context.database,
-                state,
-                |mut state, index, mut guard, table| {
-                    let slots = unsafe { slots.get_unchecked_mut(index as usize) };
-                    for (key, slot) in slots.drain(..) {
-                        let (table_index, row_index) = slot.indices();
-                        // The key is allowed to move within its table (such as with a swap as part of a remove).
-                        if table.table().index() == table_index {
-                            state =
-                                fold(state, (key, Ok(R::item(&mut guard, row_index as usize))))?;
-                        } else {
-                            // The key has moved to another table between the last moment the slot indices were read and now.
-                            keys.push_back(key);
-                        }
+            state = right.try_guards(state, |mut state, index, row, pointers, table, inner| {
+                let context = ItemContext(inner.keys(), pointers, 0);
+                let slots = unsafe { slots.get_unchecked_mut(index as usize) };
+                for (key, slot) in slots.drain(..) {
+                    let (table_index, row_index) = slot.indices();
+                    // The key is allowed to move within its table (such as with a swap as part of a remove).
+                    if table.index() == table_index {
+                        state = fold(state, (key, Ok(R::item(row, context.with(row_index as _)))))?;
+                    } else {
+                        // The key has moved to another table between the last moment the slot indices were read and now.
+                        keys.push_back(key);
                     }
-                    Ok(state)
-                },
-            );
+                }
+                Ok(state)
+            });
 
             for key in keys.drain(..) {
                 let old = state;
@@ -165,14 +172,70 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
         }
     }
 
-    fn read(self) -> Self::Read {
-        Join {
-            left: self.left,
-            right: self.right.read(),
-            by: self.by,
-            slots: self.slots,
-            keys: self.keys,
+    fn fold<S, F: FnMut(S, Self::Item<'_>) -> S>(
+        &mut self,
+        mut context: Context<'d>,
+        mut state: S,
+        mut fold: F,
+    ) -> S {
+        let Self {
+            left,
+            right,
+            by,
+            keys,
+            slots,
+            ..
+        } = self;
+        // Collect all join keys and release all locks as fast as possible. This is important to reduce contention but also
+        // to ensure that no deadlock occurs.
+        left.each(context.own(), |item| keys.push_back(by(item)));
+        // States with no joined keys will be skipped.
+        right.pending.clear();
+        // Ensure that `states` has the same length as `right.states`.
+        slots.resize_with(right.states.len(), Vec::new);
+
+        // Sort keys by state such that table locks can be used for (hopefully) more than one key at a time.
+        for join in keys.drain(..) {
+            let key = join.key();
+            match context.database.keys().get(key) {
+                Ok(slot) => match right.indices.get(&slot.table()) {
+                    Some(&state_index) => {
+                        let slots = unsafe { slots.get_unchecked_mut(state_index as usize) };
+                        if slots.len() == 0 {
+                            right.pending.push_back(state_index);
+                        }
+                        slots.push((join, slot));
+                        continue;
+                    }
+                    None => state = fold(state, (join, Err(Error::KeyNotInQuery(key)))),
+                },
+                Err(error) => state = fold(state, (join, Err(error))),
+            }
         }
+
+        state = right.guards(state, |mut state, index, row, pointers, table, inner| {
+            let context = ItemContext(inner.keys(), pointers, 0);
+            let slots = unsafe { slots.get_unchecked_mut(index as usize) };
+            for (key, slot) in slots.drain(..) {
+                let (table_index, row_index) = slot.indices();
+                // The key is allowed to move within its table (such as with a swap as part of a remove).
+                if table.index() == table_index {
+                    let item = R::item(row, context.with(row_index as usize));
+                    state = fold(state, (key, Ok(item)));
+                } else {
+                    // The key has moved to another table between the last moment the slot indices were read and now.
+                    keys.push_back(key);
+                }
+            }
+            state
+        });
+
+        for key in keys.drain(..) {
+            let old = state;
+            state = right.try_find(key.key(), context.own(), |item| fold(old, (key, item)));
+        }
+
+        state
     }
 }
 

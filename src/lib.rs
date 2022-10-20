@@ -18,19 +18,6 @@ pub mod resources;
 pub mod table;
 
 /*
-COHERENCE RULES:
-- Legend:
-    ->: Left happens before right.
-    <->: Left before or after right.
-    <-: Left happens after right.
-    -^: Left is used before and resolved after right.
-    <-^: Left is used before or after and resolved after right.
-
-- `Query` -> `Create`: `Query` must read the count of its overlapping tables before the `Create` begins.
-- `Create` -> `Query`: `Query` must wait for the end of `Create` before reading/writing its overlapping tables.
-- `Defer<Create>` <-^ `Query`: `Query` must read the count of its overlapping tables before the `Defer<Create>` is resolved.
-- `Create` -> `Destroy`:
-
 TODO: There is no need to take a `Table` lock when querying as long as the store locks are always taken from left to right.
     - By declaring used metas in `Item` it should be possible to pass the `Store`.
     - The `Lock` might need specialized methods
@@ -49,15 +36,25 @@ TODO: Allow filtering with a struct or enum with a `#[derive(Filter)]`. All memb
     - The table then must go into a state where any `Destroy` operations must consider the `reserved` count of the table when doing
     the swap and the resolution of `Create` must consider that it may have been moved or destroyed (maybe `slot.generation` can help?).
 
-Design an ergonomic and massively parallel database with granular locking and great cache locality.
-- Most of the locking would be accomplished with `parking_lot::RWLock`.
-- Locking could be as granular as a single field within a `struct`.
-    - Ex: Writing to `position.y` could require a read lock on the `Position` store and a write lock on `y`.
-    This way, `Position` can still be read or written to by other threads.
-- All accessors to the database that use locks can safely modify it immediately. The lock free accessors will defer their operations.
-- A defer accessor will provide its 2 parts: `Defer` and `Resolve`.
-    - They will share a special access to some data in the database to allow `Resolve` to properly resolve the deferred operations.
-    - The ordering of different deferred operations is currently unclear.
+
+
+Scheduler library:
+    let database = Database::new();
+    // Scheduler::new(): Scheduler<()>
+    // Scheduler::with(&database): Scheduler<&Database>
+    database
+        .scheduler()
+        .add(a_system) // impl FnOnce(T) -> Run<impl Depend>
+        .schedule()?;
+
+    fn a_system(database: &Database) -> Run<impl Depend> {
+        Run::new(
+            (database.create(), database.query()), // impl Depend
+            |(create, query)| {
+                let key = create.one(());
+                query.find(key, |item| {});
+            }) // impl FnMut(&mut S) -> O + 'static
+    }
 */
 
 use std::{
@@ -87,7 +84,8 @@ pub enum Error {
     KeysMustDiffer(Key),
     QueryConflict,
     Invalid,
-    MissingStore(&'static str),
+    MissingStore,
+    MissingIndex,
 }
 
 pub struct Meta {

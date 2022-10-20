@@ -4,7 +4,7 @@ use parking_lot::{
     RwLockUpgradableReadGuard, RwLockWriteGuard,
 };
 use std::{
-    any::{type_name, TypeId},
+    any::TypeId,
     cell::UnsafeCell,
     collections::HashMap,
     mem::ManuallyDrop,
@@ -75,6 +75,11 @@ impl Store {
     #[inline]
     pub const fn meta(&self) -> &'static Meta {
         self.meta
+    }
+
+    #[inline]
+    pub(crate) const fn data(&self) -> &RwLock<NonNull<()>> {
+        &self.data
     }
 
     #[inline]
@@ -350,10 +355,15 @@ impl Table {
 
     #[inline]
     pub fn store<D: Datum>(&self) -> Result<usize, Error> {
+        self.store_with(TypeId::of::<D>())
+    }
+
+    #[inline]
+    pub fn store_with(&self, identifier: TypeId) -> Result<usize, Error> {
         self.indices
-            .get(&TypeId::of::<D>())
+            .get(&identifier)
             .copied()
-            .ok_or(Error::MissingStore(type_name::<D>()))
+            .ok_or(Error::MissingStore)
     }
 
     #[inline]

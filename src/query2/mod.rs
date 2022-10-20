@@ -43,7 +43,8 @@ pub trait Query<'d>: Sized {
     type Item<'a>;
     type Read: Query<'d>;
 
-    fn initialize(&mut self, table: &'d Table);
+    fn initialize(&mut self, table: &'d Table) -> Result<(), Error>;
+    fn read(self) -> Self::Read;
 
     fn try_find<T, F: FnOnce(Result<Self::Item<'_>, Error>) -> T>(
         &mut self,
@@ -88,8 +89,6 @@ pub trait Query<'d>: Sized {
     fn each<F: FnMut(Self::Item<'_>)>(&mut self, context: Context<'d>, mut each: F) {
         self.fold(context, (), |_, item| each(item))
     }
-
-    fn read(self) -> Self::Read;
 
     #[inline]
     fn join<Q: Query<'d>, B: FnMut(Self::Item<'_>) -> K, K: JoinKey>(
@@ -196,7 +195,7 @@ impl<'d, Q: Query<'d>> Root<'d, Q> {
     fn update(&mut self) {
         while let Some(table) = self.database.tables().get(self.index) {
             self.index += 1;
-            self.query.initialize(table);
+            let _ = self.query.initialize(table);
         }
     }
 }

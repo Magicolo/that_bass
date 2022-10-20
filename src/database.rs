@@ -79,12 +79,12 @@ impl Database {
             // If locks are always taken in order (lower index first), there can not be a deadlock between move operations.
             // TODO: Defer the operation if a local deadlock is detected...
             let (source_write, target_upgrade) = if source_table.index() < target_table.index() {
-                let left = self.table_write(source_table);
+                let left = source_table.inner.write();
                 let right = target_table.inner.upgradable_read();
                 (left, right)
             } else if source_table.index() > target_table.index() {
                 let right = target_table.inner.upgradable_read();
-                let left = self.table_write(source_table);
+                let left = source_table.inner.write();
                 (left, right)
             } else {
                 // No move is needed.
@@ -97,7 +97,7 @@ impl Database {
             }
         };
 
-        let last_index = Self::remove_from_reserve(source_write.inner_mut(), 1);
+        let last_index = Self::remove_from_reserve(&mut source_write, 1);
         let (index, target_read) = Self::add_to_reserve(1, target_upgrade);
         let start = index as usize;
 
@@ -112,7 +112,7 @@ impl Database {
         let mut store_indices = (0, 0);
         loop {
             match (
-                source_write.inner_mut().stores.get_mut(store_indices.0),
+                source_write.stores.get_mut(store_indices.0),
                 target_read.stores.get(store_indices.1),
             ) {
                 (Some(source_store), Some(target_store)) => {
@@ -152,7 +152,7 @@ impl Database {
                 slot.update(target_index, start as _);
             }
         } else {
-            let source_keys = source_write.inner_mut().keys.get_mut();
+            let source_keys = source_write.keys.get_mut();
             unsafe {
                 let target_keys = &mut *target_read.keys.get();
                 let last_key = *source_keys.get_unchecked(last_index as usize);

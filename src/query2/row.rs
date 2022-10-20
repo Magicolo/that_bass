@@ -1,128 +1,105 @@
 use super::*;
 use crate::{
     key::Key,
-    table::{Store, Table, TableRead},
+    table::{self, Table},
     Datum, Error,
 };
-use parking_lot::{MappedRwLockReadGuard, MappedRwLockWriteGuard};
 use std::{
     any::TypeId,
     collections::{HashMap, HashSet, VecDeque},
     marker::PhantomData,
     mem::swap,
-    slice::from_raw_parts,
+    ptr::NonNull,
+    slice::{from_raw_parts, from_raw_parts_mut},
 };
 
-pub trait Row {
+pub struct Read<D>(usize, PhantomData<D>);
+pub struct Write<D>(usize, PhantomData<D>);
+pub struct DeclareContext<'a>(&'a mut HashSet<Access>);
+pub struct InitializeContext<'a>(&'a HashMap<Access, usize>);
+pub struct ItemContext<'a, 'b>(
+    pub(crate) &'a [Key],
+    pub(crate) &'b [NonNull<()>],
+    pub(crate) usize,
+);
+pub struct ChunkContext<'a, 'b>(&'a [Key], &'b [NonNull<()>]);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Access {
+    Read(TypeId),
+    Write(TypeId),
+}
+
+pub unsafe trait Row {
     type State;
     type Read: Row;
-    type Guard<'a>;
     type Item<'a>;
+    type Chunk<'a>;
 
-    fn declare(context: Context) -> Result<(), Error>;
-    fn initialize(table: &Table) -> Result<Self::State, Error>;
+    fn declare(context: DeclareContext) -> Result<(), Error>;
+    fn initialize(context: InitializeContext) -> Result<Self::State, Error>;
     fn read(state: Self::State) -> <Self::Read as Row>::State;
-    fn try_lock<'a>(
-        state: &Self::State,
-        keys: &'a [Key],
-        stores: &'a [Store],
-    ) -> Option<Self::Guard<'a>>;
-    fn lock<'a>(state: &Self::State, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard<'a>;
-    fn item<'a: 'b, 'b>(guard: &'b mut Self::Guard<'a>, index: usize) -> Self::Item<'b>;
+    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a>;
+    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a>;
 }
-
-pub struct Context<'a> {
-    reads: &'a mut HashSet<TypeId>,
-    writes: &'a mut HashSet<TypeId>,
-}
-
-pub struct Read<T>(usize, PhantomData<T>);
-pub struct Write<T>(usize, PhantomData<T>);
-pub struct State;
 
 pub struct Rows<'d, R: Row> {
     pub(crate) indices: HashMap<u32, u32>, // From table index to state index.
-    pub(crate) states: Vec<(R::State, &'d Table)>,
+    pub(crate) states: Vec<(R::State, &'d Table, Vec<(usize, Access)>)>,
     pub(crate) done: VecDeque<u32>,
     pub(crate) pending: VecDeque<u32>,
+    accesses: HashSet<Access>,
+    pointers: Vec<NonNull<()>>,
     _marker: PhantomData<fn(R)>,
-}
-
-impl<'a> Context<'a> {
-    pub fn own(&mut self) -> Context {
-        Context {
-            reads: self.reads,
-            writes: self.writes,
-        }
-    }
-
-    pub fn read<T: 'static>(&mut self) -> Result<(), Error> {
-        let identifier = TypeId::of::<T>();
-        if self.writes.contains(&identifier) {
-            Err(Error::ReadWriteConflict)
-        } else {
-            self.reads.insert(identifier);
-            Ok(())
-        }
-    }
-
-    pub fn write<T: 'static>(&mut self) -> Result<(), Error> {
-        let identifier = TypeId::of::<T>();
-        if self.reads.contains(&identifier) {
-            Err(Error::ReadWriteConflict)
-        } else if self.writes.insert(identifier) {
-            Ok(())
-        } else {
-            Err(Error::WriteWriteConflict)
-        }
-    }
 }
 
 impl<'d, R: Row> Rows<'d, R> {
     pub fn new() -> Result<Self, Error> {
         // Detects violations of rust's invariants.
-        R::declare(Context {
-            reads: &mut HashSet::new(),
-            writes: &mut HashSet::new(),
-        })?;
+        let mut accesses = HashSet::new();
+        R::declare(DeclareContext(&mut accesses))?;
         Ok(Self {
             indices: HashMap::new(),
             states: Vec::new(),
             done: VecDeque::new(),
             pending: VecDeque::new(),
+            accesses,
+            pointers: Vec::new(),
             _marker: PhantomData,
         })
     }
 
     #[inline]
-    pub(crate) fn guards<S, F: FnMut(S, u32, R::Guard<'_>, &TableRead<'d>) -> Result<S, S>>(
+    pub(crate) fn try_guards<
+        S,
+        F: FnMut(S, u32, &R::State, &[NonNull<()>], &Table, &table::Inner) -> Result<S, S>,
+    >(
         &mut self,
-        database: &'d Database,
         state: S,
         mut fold: F,
     ) -> S {
         let mut fold = |mut state: S| -> Result<S, S> {
             for _ in 0..self.pending.len() {
-                let state_index = unsafe { self.pending.pop_front().unwrap_unchecked() };
-                let (row_state, table) = unsafe { self.states.get_unchecked(state_index as usize) };
-                if let Some(read) = database.table_try_read(table) {
-                    if let Some(guard) = R::try_lock(row_state, read.keys(), read.stores()) {
-                        self.done.push_back(state_index);
-                        state = fold(state, state_index, guard, &read)?;
-                        continue;
+                let index = unsafe { self.pending.pop_front().unwrap_unchecked() };
+                state = match self.try_lock(state, index, |state, row, pointers, table, inner| {
+                    fold(state, index, row, pointers, table, inner)
+                }) {
+                    Ok(result) => {
+                        self.done.push_back(index);
+                        result?
                     }
-                }
-                self.pending.push_back(state_index);
+                    Err(state) => {
+                        self.pending.push_back(index);
+                        state
+                    }
+                };
             }
 
             while let Some(state_index) = self.pending.pop_front() {
                 self.done.push_back(state_index);
-                let (row_state, table) = unsafe { self.states.get_unchecked(state_index as usize) };
-                let read = database.table_read(table);
-                // FIX: There could be a deadlock here.
-                // - Would be fixed if store locks were always taken in the same order.
-                let guard = R::lock(row_state, read.keys(), read.stores());
-                state = fold(state, state_index, guard, &read)?;
+                state = self.lock(state_index, |row, pointers, table, inner| {
+                    fold(state, state_index, row, pointers, table, inner)
+                })?;
             }
             Ok(state)
         };
@@ -148,18 +125,202 @@ impl<'d, R: Row> Rows<'d, R> {
             }
         }
     }
+
+    pub(crate) fn guards<
+        S,
+        F: FnMut(S, u32, &R::State, &[NonNull<()>], &Table, &table::Inner) -> S,
+    >(
+        &mut self,
+        mut state: S,
+        mut fold: F,
+    ) -> S {
+        for _ in 0..self.pending.len() {
+            let index = unsafe { self.pending.pop_front().unwrap_unchecked() };
+            state = match self.try_lock(state, index, |state, row, pointers, table, inner| {
+                fold(state, index, row, pointers, table, inner)
+            }) {
+                Ok(state) => {
+                    self.done.push_back(index);
+                    state
+                }
+                Err(state) => {
+                    self.pending.push_back(index);
+                    state
+                }
+            };
+        }
+
+        while let Some(state_index) = self.pending.pop_front() {
+            self.done.push_back(state_index);
+            state = self.lock(state_index, |row, pointers, table, inner| {
+                fold(state, state_index, row, pointers, table, inner)
+            });
+        }
+
+        swap(&mut self.done, &mut self.pending);
+        state
+    }
+
+    fn try_lock<S, T>(
+        &mut self,
+        state: S,
+        index: u32,
+        with: impl FnOnce(S, &R::State, &[NonNull<()>], &Table, &table::Inner) -> T,
+    ) -> Result<T, S> {
+        fn next<S, T>(
+            state: S,
+            indices: &[(usize, Access)],
+            pointers: &mut Vec<NonNull<()>>,
+            inner: &table::Inner,
+            with: impl FnOnce(S, &[NonNull<()>], &table::Inner) -> T,
+        ) -> Result<T, S> {
+            match indices.split_first() {
+                Some((&(index, access), rest)) => {
+                    let store = unsafe { inner.stores.get_unchecked(index) };
+                    debug_assert_eq!(access.identifier(), store.meta().identifier());
+                    match access {
+                        Access::Read(_) => {
+                            let guard = match store.data().try_read() {
+                                Some(guard) => guard,
+                                None => return Err(state),
+                            };
+                            pointers.push(*guard);
+                            let result = next(state, rest, pointers, inner, with);
+                            drop(guard);
+                            result
+                        }
+                        Access::Write(_) => {
+                            let guard = match store.data().try_write() {
+                                Some(guard) => guard,
+                                None => return Err(state),
+                            };
+                            pointers.push(*guard);
+                            let result = next(state, rest, pointers, inner, with);
+                            drop(guard);
+                            result
+                        }
+                    }
+                }
+                None => {
+                    let value = with(state, pointers, inner);
+                    pointers.clear();
+                    Ok(value)
+                }
+            }
+        }
+
+        let (row, table, indices) = unsafe { self.states.get_unchecked(index as usize) };
+        let inner = match table.inner.try_read() {
+            Some(inner) => inner,
+            None => return Err(state),
+        };
+        next(
+            state,
+            indices,
+            &mut self.pointers,
+            &inner,
+            |state, pointers, inner| with(state, row, pointers, table, inner),
+        )
+    }
+
+    fn lock<T>(
+        &mut self,
+        index: u32,
+        with: impl FnOnce(&R::State, &[NonNull<()>], &Table, &table::Inner) -> T,
+    ) -> T {
+        #[inline]
+        fn next<T>(
+            indices: &[(usize, Access)],
+            pointers: &mut Vec<NonNull<()>>,
+            inner: &table::Inner,
+            with: impl FnOnce(&[NonNull<()>], &table::Inner) -> T,
+        ) -> T {
+            match indices.split_first() {
+                Some((&(index, access), rest)) => {
+                    let store = unsafe { inner.stores.get_unchecked(index) };
+                    debug_assert_eq!(access.identifier(), store.meta().identifier());
+                    match access {
+                        Access::Read(_) => {
+                            let guard = store.data().read();
+                            pointers.push(*guard);
+                            let state = next(rest, pointers, inner, with);
+                            drop(guard);
+                            state
+                        }
+                        Access::Write(_) => {
+                            let guard = store.data().write();
+                            pointers.push(*guard);
+                            let state = next(rest, pointers, inner, with);
+                            drop(guard);
+                            state
+                        }
+                    }
+                }
+                None => {
+                    let state = with(pointers, inner);
+                    pointers.clear();
+                    state
+                }
+            }
+        }
+
+        let (row, table, indices) = unsafe { self.states.get_unchecked(index as usize) };
+        let inner = table.inner.read();
+        next(indices, &mut self.pointers, &inner, |pointers, inner| {
+            with(row, pointers, table, inner)
+        })
+    }
 }
 
 impl<'d, R: Row> Query<'d> for Rows<'d, R> {
     type Item<'a> = R::Item<'a>;
     type Read = Rows<'d, R::Read>;
 
-    fn initialize(&mut self, table: &'d Table) {
-        if let Ok(state) = R::initialize(&table) {
-            let index = self.states.len() as _;
-            self.pending.push_back(index);
-            self.indices.insert(table.index(), index);
-            self.states.push((state, table));
+    fn initialize(&mut self, table: &'d Table) -> Result<(), Error> {
+        let mut indices = Vec::with_capacity(self.accesses.len());
+        for &access in self.accesses.iter() {
+            indices.push((table.store_with(access.identifier())?, access));
+        }
+
+        // The sorting of indices ensures that there cannot be a deadlock between `Rows` when locking multiple stores as long as this
+        // happens while holding at most 1 table lock.
+        indices.sort_unstable_by_key(|&(index, _)| index);
+        let map = indices
+            .iter()
+            .enumerate()
+            .map(|(i, &(_, access))| (access, i))
+            .collect();
+
+        let state = R::initialize(InitializeContext(&map))?;
+        let index = self.states.len() as _;
+        self.pending.push_back(index);
+        self.indices.insert(table.index(), index);
+        self.states.push((state, table, indices));
+        Ok(())
+    }
+
+    fn read(self) -> Self::Read {
+        Rows {
+            indices: self.indices,
+            states: self
+                .states
+                .into_iter()
+                .map(|(state, table, mut indices)| {
+                    for (_, access) in indices.iter_mut() {
+                        *access = access.read();
+                    }
+                    (R::read(state), table, indices)
+                })
+                .collect(),
+            done: self.done,
+            pending: self.pending,
+            accesses: self
+                .accesses
+                .into_iter()
+                .map(|access| access.read())
+                .collect(),
+            pointers: self.pointers,
+            _marker: PhantomData,
         }
     }
 
@@ -167,10 +328,11 @@ impl<'d, R: Row> Query<'d> for Rows<'d, R> {
         &mut self,
         key: Key,
         context: super::Context<'d>,
-        find: F,
+        mut find: F,
     ) -> T {
+        let keys = context.database.keys();
         loop {
-            let slot = match context.database.keys().get(key) {
+            let slot = match keys.get(key) {
                 Ok(slot) => slot,
                 Err(error) => break find(Err(error)),
             };
@@ -180,282 +342,330 @@ impl<'d, R: Row> Query<'d> for Rows<'d, R> {
                 None => break find(Err(Error::KeyNotInQuery(key))),
             };
 
-            // If valid fails, it means that the `key` has just been moved.
-            let valid = || slot.indices() == (table_index, store_index);
-            let (row_state, table) = unsafe { self.states.get_unchecked(state_index as usize) };
-            if let Some(read) = context.database.table_read_with(table, |_| valid()) {
-                if let Some(mut guard) = R::try_lock(row_state, read.keys(), read.stores()) {
-                    break find(Ok(R::item(&mut guard, store_index as _)));
+            find = match self.lock(state_index, |row, pointers, _, inner| {
+                // If this check fails, it means that the `key` has just been moved or destroyed.
+                if slot.indices() == (table_index, store_index) {
+                    let context = ItemContext(inner.keys(), pointers, store_index as _);
+                    Ok(find(Ok(R::item(row, context))))
+                } else {
+                    Err(find)
                 }
-
-                drop(read);
-                if let Some(write) = context.database.table_write_with(table, |_| valid()) {
-                    let mut guard = R::lock(row_state, write.keys(), write.stores());
-                    break find(Ok(R::item(&mut guard, store_index as _)));
-                }
-            }
+            }) {
+                Ok(value) => break value,
+                Err(find) => find,
+            };
         }
     }
 
     #[inline]
     fn try_fold<S, F: FnMut(S, Self::Item<'_>) -> Result<S, S>>(
         &mut self,
-        context: super::Context<'d>,
+        _: super::Context<'d>,
         state: S,
         mut fold: F,
     ) -> S {
-        self.guards(context.database, state, |mut state, _, mut guard, table| {
-            for i in 0..table.count() {
-                state = fold(state, R::item(&mut guard, i as _))?;
+        self.try_guards(state, |mut state, _, row, pointers, _, inner| {
+            let context = ItemContext(inner.keys(), pointers, 0);
+            for i in 0..inner.count() {
+                state = fold(state, R::item(row, context.with(i as _)))?;
             }
             Ok(state)
         })
     }
 
-    fn read(self) -> Self::Read {
-        Rows {
-            indices: self.indices,
-            states: self
-                .states
-                .into_iter()
-                .map(|(state, table)| (R::read(state), table))
-                .collect(),
-            done: self.done,
-            pending: self.pending,
-            _marker: PhantomData,
+    #[inline]
+    fn fold<S, F: FnMut(S, Self::Item<'_>) -> S>(
+        &mut self,
+        _: super::Context<'d>,
+        state: S,
+        mut fold: F,
+    ) -> S {
+        self.guards(state, |mut state, _, row, pointers, _, inner| {
+            let context = ItemContext(inner.keys(), pointers, 0);
+            for i in 0..inner.count() {
+                state = fold(state, R::item(row, context.with(i as _)));
+            }
+            state
+        })
+    }
+}
+
+impl Access {
+    #[inline]
+    pub fn identifier(&self) -> TypeId {
+        match *self {
+            Access::Read(identifier) => identifier,
+            Access::Write(identifier) => identifier,
+        }
+    }
+
+    #[inline]
+    pub fn read(&self) -> Self {
+        Self::Read(self.identifier())
+    }
+}
+impl DeclareContext<'_> {
+    pub fn own(&mut self) -> DeclareContext<'_> {
+        DeclareContext(self.0)
+    }
+
+    pub fn read<D: Datum>(&mut self) -> Result<(), Error> {
+        let identifier = TypeId::of::<D>();
+        if self.0.contains(&Access::Write(identifier)) {
+            Err(Error::ReadWriteConflict)
+        } else {
+            self.0.insert(Access::Read(identifier));
+            Ok(())
+        }
+    }
+
+    pub fn write<D: Datum>(&mut self) -> Result<(), Error> {
+        let identifier = TypeId::of::<D>();
+        if self.0.contains(&Access::Read(identifier)) {
+            Err(Error::ReadWriteConflict)
+        } else if self.0.insert(Access::Write(identifier)) {
+            Ok(())
+        } else {
+            Err(Error::WriteWriteConflict)
         }
     }
 }
 
-impl Row for Key {
-    type State = State;
-    type Read = Self;
-    type Guard<'a> = &'a [Key];
-    type Item<'a> = Key;
-
-    fn declare(_: Context) -> Result<(), Error> {
-        Ok(())
+impl InitializeContext<'_> {
+    pub fn own(&self) -> Self {
+        Self(self.0)
     }
 
-    fn initialize(_: &Table) -> Result<Self::State, Error> {
-        Ok(State)
+    pub fn read<D: Datum>(&self) -> Result<Read<D>, Error> {
+        let index = self.index(Access::Read(TypeId::of::<D>()))?;
+        Ok(Read(index, PhantomData))
     }
 
-    fn read(state: Self::State) -> <Self::Read as Row>::State {
-        state
+    pub fn write<D: Datum>(&self) -> Result<Write<D>, Error> {
+        let index = self.index(Access::Write(TypeId::of::<D>()))?;
+        Ok(Write(index, PhantomData))
     }
 
-    #[inline]
-    fn try_lock<'a>(
-        state: &Self::State,
-        keys: &'a [Key],
-        stores: &'a [Store],
-    ) -> Option<Self::Guard<'a>> {
-        Some(Self::lock(state, keys, stores))
-    }
-
-    #[inline]
-    fn lock<'a>(_: &Self::State, keys: &'a [Key], _: &'a [Store]) -> Self::Guard<'a> {
-        unsafe { from_raw_parts(keys.as_ptr(), keys.len()) }
-    }
-
-    #[inline]
-    fn item<'a: 'b, 'b>(guard: &'b mut Self::Guard<'a>, index: usize) -> Self::Item<'b> {
-        unsafe { *guard.get_unchecked(index) }
+    fn index(&self, access: Access) -> Result<usize, Error> {
+        self.0.get(&access).copied().ok_or(Error::MissingStore)
     }
 }
 
-impl<D: Datum> Row for &D {
+impl<D> Write<D> {
+    pub fn read(self) -> Read<D> {
+        Read(self.0, PhantomData)
+    }
+}
+
+impl<'a> ItemContext<'a, '_> {
+    #[inline]
+    pub const fn own(&self) -> Self {
+        Self(self.0, self.1, self.2)
+    }
+
+    #[inline]
+    pub const fn with(&self, index: usize) -> Self {
+        Self(self.0, self.1, index)
+    }
+
+    #[inline]
+    pub fn key(&self) -> Key {
+        unsafe { *self.0.get_unchecked(self.2) }
+    }
+
+    #[inline]
+    pub fn read<D: Datum>(&self, state: &Read<D>) -> &'a D {
+        let data = unsafe { *self.1.get_unchecked(state.0) };
+        unsafe { &*data.as_ptr().cast::<D>().add(self.2) }
+    }
+
+    #[inline]
+    pub fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut D {
+        let data = unsafe { *self.1.get_unchecked(state.0) };
+        unsafe { &mut *data.as_ptr().cast::<D>().add(self.2) }
+    }
+}
+
+impl<'a> ChunkContext<'a, '_> {
+    #[inline]
+    pub const fn own(&self) -> Self {
+        Self(self.0, self.1)
+    }
+
+    #[inline]
+    pub const fn key(&self) -> &'a [Key] {
+        self.0
+    }
+
+    #[inline]
+    pub fn read<D: Datum>(&self, state: &Read<D>) -> &'a [D] {
+        let data = unsafe { *self.1.get_unchecked(state.0) };
+        unsafe { from_raw_parts(data.as_ptr().cast::<D>(), self.0.len()) }
+    }
+
+    #[inline]
+    pub fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut [D] {
+        let data = unsafe { *self.1.get_unchecked(state.0) };
+        unsafe { from_raw_parts_mut(data.as_ptr().cast::<D>(), self.0.len()) }
+    }
+}
+
+unsafe impl Row for Key {
+    type State = ();
+    type Read = Self;
+    type Item<'a> = Key;
+    type Chunk<'a> = &'a [Key];
+
+    fn declare(_: DeclareContext) -> Result<(), Error> {
+        Ok(())
+    }
+    fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
+        Ok(())
+    }
+    fn read(state: Self::State) -> <Self::Read as Row>::State {
+        state
+    }
+    fn item<'a>(_: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
+        context.key()
+    }
+    fn chunk<'a>(_: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
+        context.key()
+    }
+}
+
+unsafe impl<D: Datum> Row for &D {
     type State = Read<D>;
     type Read = Self;
-    type Guard<'a> = MappedRwLockReadGuard<'a, [D]>;
     type Item<'a> = &'a D;
+    type Chunk<'a> = &'a [D];
 
-    fn declare(mut context: Context) -> Result<(), Error> {
+    fn declare(mut context: DeclareContext) -> Result<(), Error> {
         context.read::<D>()
     }
-
-    fn initialize(table: &Table) -> Result<Self::State, Error> {
-        Ok(Read(table.store::<D>()?, PhantomData))
+    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
+        context.read::<D>()
     }
-
     fn read(state: Self::State) -> <Self::Read as Row>::State {
         state
     }
-
     #[inline]
-    fn try_lock<'a>(
-        state: &Self::State,
-        keys: &'a [Key],
-        stores: &'a [Store],
-    ) -> Option<Self::Guard<'a>> {
-        debug_assert!(state.0 < stores.len());
-        let store = unsafe { &*stores.as_ptr().add(state.0) };
-        unsafe { store.try_read(.., keys.len()) }
+    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
+        context.read(state)
     }
-
     #[inline]
-    fn lock<'a>(state: &Self::State, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard<'a> {
-        debug_assert!(state.0 < stores.len());
-        let store = unsafe { &*stores.as_ptr().add(state.0) };
-        unsafe { store.read(.., keys.len()) }
-    }
-
-    #[inline]
-    fn item<'a: 'b, 'b>(guard: &'b mut Self::Guard<'a>, index: usize) -> Self::Item<'b> {
-        unsafe { &*guard.as_ptr().add(index) }
+    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
+        context.read(state)
     }
 }
 
-impl<'c, D: Datum> Row for &'c mut D {
+unsafe impl<'b, D: Datum> Row for &'b mut D {
     type State = Write<D>;
-    type Read = &'c D;
-    type Guard<'a> = MappedRwLockWriteGuard<'a, [D]>;
+    type Read = &'b D;
     type Item<'a> = &'a mut D;
+    type Chunk<'a> = &'a mut [D];
 
-    fn declare(mut context: Context) -> Result<(), Error> {
-        context.read::<D>()
+    fn declare(mut context: DeclareContext) -> Result<(), Error> {
+        context.write::<D>()
     }
-
-    fn initialize(table: &Table) -> Result<Self::State, Error> {
-        Ok(Write(table.store::<D>()?, PhantomData))
+    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
+        context.write::<D>()
     }
-
     fn read(state: Self::State) -> <Self::Read as Row>::State {
-        Read(state.0, PhantomData)
+        state.read()
     }
-
     #[inline]
-    fn try_lock<'a>(
-        state: &Self::State,
-        keys: &'a [Key],
-        stores: &'a [Store],
-    ) -> Option<Self::Guard<'a>> {
-        debug_assert!(state.0 < stores.len());
-        let store = unsafe { &*stores.as_ptr().add(state.0) };
-        unsafe { store.try_write(.., keys.len()) }
+    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
+        context.write(state)
     }
-
     #[inline]
-    fn lock<'a>(state: &Self::State, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard<'a> {
-        debug_assert!(state.0 < stores.len());
-        let store = unsafe { &*stores.as_ptr().add(state.0) };
-        unsafe { store.write(.., keys.len()) }
-    }
-
-    #[inline]
-    fn item<'a: 'b, 'b>(guard: &'b mut Self::Guard<'a>, index: usize) -> Self::Item<'b> {
-        unsafe { &mut *guard.as_mut_ptr().add(index) }
+    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
+        context.write(state)
     }
 }
 
-impl Row for () {
+unsafe impl Row for () {
     type State = ();
     type Read = ();
-    type Guard<'a> = ();
     type Item<'a> = ();
+    type Chunk<'a> = ();
 
-    fn declare(_: Context) -> Result<(), Error> {
+    fn declare(_: DeclareContext) -> Result<(), Error> {
         Ok(())
     }
-
-    fn initialize(_: &Table) -> Result<Self::State, Error> {
+    fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
         Ok(())
     }
-
-    fn read(_: Self::State) -> <Self::Read as Row>::State {}
-
-    #[inline]
-    fn try_lock<'a>(_: &Self::State, _: &'a [Key], _: &'a [Store]) -> Option<Self::Guard<'a>> {
-        Some(())
+    fn read(_: Self::State) -> <Self::Read as Row>::State {
+        ()
     }
-
     #[inline]
-    fn lock<'a>(_: &Self::State, _: &'a [Key], _: &'a [Store]) -> Self::Guard<'a> {}
-
+    fn item<'a>(_: &Self::State, _: ItemContext<'a, '_>) -> Self::Item<'a> {
+        ()
+    }
     #[inline]
-    fn item<'a: 'b, 'b>(_: &'b mut Self::Guard<'a>, _: usize) -> Self::Item<'b> {}
-}
-
-impl<C1: Row> Row for (C1,) {
-    type State = (C1::State,);
-    type Read = (C1::Read,);
-    type Guard<'a> = (C1::Guard<'a>,);
-    type Item<'a> = (C1::Item<'a>,);
-
-    fn declare(context: Context) -> Result<(), Error> {
-        C1::declare(context)
-    }
-
-    fn initialize(table: &Table) -> Result<Self::State, Error> {
-        Ok((C1::initialize(table)?,))
-    }
-
-    fn read(state: Self::State) -> <Self::Read as Row>::State {
-        (C1::read(state.0),)
-    }
-
-    #[inline]
-    fn try_lock<'a>(
-        state: &Self::State,
-        keys: &'a [Key],
-        stores: &'a [Store],
-    ) -> Option<Self::Guard<'a>> {
-        Some((C1::try_lock(&state.0, keys, stores)?,))
-    }
-
-    #[inline]
-    fn lock<'a>(state: &Self::State, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard<'a> {
-        (C1::lock(&state.0, keys, stores),)
-    }
-
-    #[inline]
-    fn item<'a: 'b, 'b>(guard: &'b mut Self::Guard<'a>, index: usize) -> Self::Item<'b> {
-        (C1::item(&mut guard.0, index),)
+    fn chunk<'a>(_: &Self::State, _: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
+        ()
     }
 }
 
-impl<C1: Row, C2: Row> Row for (C1, C2) {
-    type State = (C1::State, C2::State);
-    type Read = (C1::Read, C2::Read);
-    type Guard<'a> = (C1::Guard<'a>, C2::Guard<'a>);
-    type Item<'a> = (C1::Item<'a>, C2::Item<'a>);
+unsafe impl<R1: Row> Row for (R1,) {
+    type State = (R1::State,);
+    type Read = (R1::Read,);
+    type Item<'a> = (R1::Item<'a>,);
+    type Chunk<'a> = (R1::Chunk<'a>,);
 
-    fn declare(mut context: Context) -> Result<(), Error> {
-        C1::declare(context.own())?;
-        C2::declare(context)
+    fn declare(mut context: DeclareContext) -> Result<(), Error> {
+        R1::declare(context.own())?;
+        Ok(())
     }
-
-    fn initialize(table: &Table) -> Result<Self::State, Error> {
-        Ok((C1::initialize(table)?, C2::initialize(table)?))
+    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
+        Ok((R1::initialize(context.own())?,))
     }
-
     fn read(state: Self::State) -> <Self::Read as Row>::State {
-        (C1::read(state.0), C2::read(state.1))
+        (R1::read(state.0),)
     }
-
     #[inline]
-    fn try_lock<'a>(
-        state: &Self::State,
-        keys: &'a [Key],
-        stores: &'a [Store],
-    ) -> Option<Self::Guard<'a>> {
-        Some((
-            C1::try_lock(&state.0, keys, stores)?,
-            C2::try_lock(&state.1, keys, stores)?,
+    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
+        (R1::item(&state.0, context.own()),)
+    }
+    #[inline]
+    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
+        (R1::chunk(&state.0, context.own()),)
+    }
+}
+
+unsafe impl<R1: Row, R2: Row> Row for (R1, R2) {
+    type State = (R1::State, R2::State);
+    type Read = (R1::Read, R2::Read);
+    type Item<'a> = (R1::Item<'a>, R2::Item<'a>);
+    type Chunk<'a> = (R1::Chunk<'a>, R2::Chunk<'a>);
+
+    fn declare(mut context: DeclareContext) -> Result<(), Error> {
+        R1::declare(context.own())?;
+        R2::declare(context.own())?;
+        Ok(())
+    }
+    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
+        Ok((
+            R1::initialize(context.own())?,
+            R2::initialize(context.own())?,
         ))
     }
-
+    fn read(state: Self::State) -> <Self::Read as Row>::State {
+        (R1::read(state.0), R2::read(state.1))
+    }
     #[inline]
-    fn lock<'a>(state: &Self::State, keys: &'a [Key], stores: &'a [Store]) -> Self::Guard<'a> {
+    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
         (
-            C1::lock(&state.0, keys, stores),
-            C2::lock(&state.1, keys, stores),
+            R1::item(&state.0, context.own()),
+            R2::item(&state.1, context.own()),
         )
     }
-
     #[inline]
-    fn item<'a: 'b, 'b>(guard: &'b mut Self::Guard<'a>, index: usize) -> Self::Item<'b> {
-        (C1::item(&mut guard.0, index), C2::item(&mut guard.1, index))
+    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
+        (
+            R1::chunk(&state.0, context.own()),
+            R2::chunk(&state.1, context.own()),
+        )
     }
 }

@@ -12,7 +12,7 @@ pub trait Condition {
 pub struct Not<C: Condition>(C);
 pub struct Has<D: Datum>(PhantomData<D>);
 
-impl<F: Condition> Condition for Not<F> {
+impl<C: Condition> Condition for Not<C> {
     fn filter(&self, table: &Table) -> bool {
         !self.0.filter(table)
     }
@@ -40,10 +40,16 @@ impl<'d, Q: Query<'d>, C: Condition> Query<'d> for Filter<Q, C> {
     type Item<'a> = Q::Item<'a>;
     type Read = Filter<Q::Read, C>;
 
-    fn initialize(&mut self, table: &'d Table) {
+    fn initialize(&mut self, table: &'d Table) -> Result<(), Error> {
         if self.1.filter(table) {
-            self.0.initialize(table);
+            self.0.initialize(table)
+        } else {
+            Ok(())
         }
+    }
+
+    fn read(self) -> Self::Read {
+        Filter(self.0.read(), self.1)
     }
 
     #[inline]
@@ -94,9 +100,5 @@ impl<'d, Q: Query<'d>, C: Condition> Query<'d> for Filter<Q, C> {
     #[inline]
     fn each<F: FnMut(Self::Item<'_>)>(&mut self, context: Context<'d>, each: F) {
         self.0.each(context, each)
-    }
-
-    fn read(self) -> Self::Read {
-        Filter(self.0.read(), self.1)
     }
 }
