@@ -1,4 +1,4 @@
-use crate::{core::FullIterator, database::Database, key::Key, Datum, Error, Meta};
+use crate::{core::FullIterator, key::Key, Datum, Error, Meta};
 use parking_lot::{
     MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard,
     RwLockUpgradableReadGuard, RwLockWriteGuard,
@@ -7,7 +7,6 @@ use std::{
     any::TypeId,
     cell::UnsafeCell,
     collections::HashMap,
-    mem::ManuallyDrop,
     ptr::NonNull,
     slice::{from_raw_parts, from_raw_parts_mut, SliceIndex},
     sync::{
@@ -48,16 +47,6 @@ pub struct Tables {
     lock: RwLock<()>,
     tables: UnsafeCell<Vec<Arc<Table>>>,
 }
-
-pub struct TableRead<'d>(&'d Database, &'d Table, Option<RwLockReadGuard<'d, Inner>>);
-
-pub struct TableUpgrade<'d>(
-    &'d Database,
-    &'d Table,
-    Option<RwLockUpgradableReadGuard<'d, Inner>>,
-);
-
-pub struct TableWrite<'d>(&'d Database, &'d Table, Option<RwLockWriteGuard<'d, Inner>>);
 
 impl Store {
     pub fn new(meta: &'static Meta, capacity: usize) -> Self {
@@ -401,12 +390,6 @@ impl Inner {
         &self.stores
     }
 
-    #[inline]
-    pub fn ensure(&mut self) {
-        let (begun, _) = Database::decompose_pending(*self.pending.get_mut());
-        self.grow(begun as _)
-    }
-
     pub fn grow(&mut self, capacity: usize) {
         let keys = self.keys.get_mut();
         if keys.len() < capacity {
@@ -432,240 +415,3 @@ impl Drop for Inner {
         }
     }
 }
-
-impl<'d> TableRead<'d> {
-    #[inline]
-    pub(crate) fn new(
-        database: &'d Database,
-        table: &'d Table,
-        guard: RwLockReadGuard<'d, Inner>,
-    ) -> Self {
-        Self(database, table, Some(guard))
-    }
-
-    #[inline]
-    pub const fn database(&self) -> &'d Database {
-        self.0
-    }
-
-    #[inline]
-    pub const fn table(&self) -> &'d Table {
-        self.1
-    }
-
-    #[inline]
-    pub fn count(&self) -> u32 {
-        self.inner().count()
-    }
-
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.inner().capacity()
-    }
-
-    #[inline]
-    pub fn keys(&self) -> &[Key] {
-        self.inner().keys()
-    }
-
-    #[inline]
-    pub fn stores(&self) -> &[Store] {
-        self.inner().stores()
-    }
-
-    #[inline]
-    pub(crate) fn guard(self) -> RwLockReadGuard<'d, Inner> {
-        let mut guard = ManuallyDrop::new(self);
-        unsafe { guard.2.take().unwrap_unchecked() }
-    }
-
-    #[inline]
-    pub(crate) fn inner(&self) -> &Inner {
-        unsafe { self.2.as_deref().unwrap_unchecked() }
-    }
-}
-
-// impl<'d> Drop for TableRead<'d> {
-//     #[inline]
-//     fn drop(&mut self) {
-//         if match self.table().defer.try_read() {
-//             Some(defer) if defer.len() > 0 => true,
-//             None => true,
-//             _ => false,
-//         } {
-//             drop(self.2.take());
-//             self.0.table_try_write(self.1);
-//         }
-//     }
-// }
-
-impl<'d> TableUpgrade<'d> {
-    #[inline]
-    pub(crate) fn new(
-        database: &'d Database,
-        table: &'d Table,
-        guard: RwLockUpgradableReadGuard<'d, Inner>,
-    ) -> Self {
-        Self(database, table, Some(guard))
-    }
-
-    #[inline]
-    pub const fn database(&self) -> &'d Database {
-        self.0
-    }
-
-    #[inline]
-    pub const fn table(&self) -> &'d Table {
-        self.1
-    }
-
-    #[inline]
-    pub fn count(&self) -> u32 {
-        self.inner().count()
-    }
-
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.inner().capacity()
-    }
-
-    #[inline]
-    pub fn keys(&self) -> &[Key] {
-        self.inner().keys()
-    }
-
-    #[inline]
-    pub fn stores(&self) -> &[Store] {
-        self.inner().stores()
-    }
-
-    #[inline]
-    pub(crate) fn guard(self) -> RwLockUpgradableReadGuard<'d, Inner> {
-        let mut guard = ManuallyDrop::new(self);
-        unsafe { guard.2.take().unwrap_unchecked() }
-    }
-
-    #[inline]
-    pub(crate) fn inner(&self) -> &Inner {
-        unsafe { self.2.as_deref().unwrap_unchecked() }
-    }
-
-    #[inline]
-    pub fn upgrade(self) -> TableWrite<'d> {
-        TableWrite::new(
-            self.0,
-            self.1,
-            RwLockUpgradableReadGuard::upgrade(self.guard()),
-        )
-    }
-
-    #[inline]
-    pub fn try_upgrade(self) -> Result<TableWrite<'d>, Self> {
-        let databse = self.0;
-        let table = self.1;
-        match RwLockUpgradableReadGuard::try_upgrade(self.guard()) {
-            Ok(write) => Ok(TableWrite::new(databse, table, write)),
-            Err(upgrade) => Err(Self::new(databse, table, upgrade)),
-        }
-    }
-
-    #[inline]
-    pub fn downgrade(self) -> TableRead<'d> {
-        TableRead::new(
-            self.0,
-            self.1,
-            RwLockUpgradableReadGuard::downgrade(self.guard()),
-        )
-    }
-}
-
-// impl Drop for TableUpgrade<'_> {
-//     #[inline]
-//     fn drop(&mut self) {
-//         if match self.table().defer.try_read() {
-//             Some(defer) if defer.len() > 0 => true,
-//             None => true,
-//             _ => false,
-//         } {
-//             if let Some(upgrade) = self.2.take() {
-//                 if let Ok(write) = RwLockUpgradableReadGuard::try_upgrade(upgrade) {
-//                     TableWrite::new(self.0, self.1, write);
-//                 }
-//             }
-//         }
-//     }
-// }
-
-impl<'d> TableWrite<'d> {
-    #[inline]
-    pub(crate) fn new(
-        database: &'d Database,
-        table: &'d Table,
-        guard: RwLockWriteGuard<'d, Inner>,
-    ) -> Self {
-        Self(database, table, Some(guard))
-    }
-
-    #[inline]
-    pub const fn database(&self) -> &'d Database {
-        self.0
-    }
-
-    #[inline]
-    pub const fn table(&self) -> &'d Table {
-        self.1
-    }
-
-    #[inline]
-    pub fn count(&self) -> u32 {
-        self.inner().count()
-    }
-
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.inner().capacity()
-    }
-
-    #[inline]
-    pub fn keys(&self) -> &[Key] {
-        self.inner().keys()
-    }
-
-    #[inline]
-    pub fn stores(&self) -> &[Store] {
-        self.inner().stores()
-    }
-
-    #[inline]
-    pub(crate) fn guard(self) -> RwLockWriteGuard<'d, Inner> {
-        let mut guard = ManuallyDrop::new(self);
-        unsafe { guard.2.take().unwrap_unchecked() }
-    }
-
-    #[inline]
-    pub(crate) fn inner(&self) -> &Inner {
-        unsafe { self.2.as_deref().unwrap_unchecked() }
-    }
-
-    #[inline]
-    pub(crate) fn inner_mut(&mut self) -> &mut Inner {
-        unsafe { self.2.as_deref_mut().unwrap_unchecked() }
-    }
-
-    #[inline]
-    pub fn downgrade(self) -> TableRead<'d> {
-        TableRead::new(self.0, self.1, RwLockWriteGuard::downgrade(self.guard()))
-    }
-
-    // #[inline]
-    // pub(crate) fn resolve(&mut self) {
-    //     self.database().resolve_table(self);
-    // }
-}
-
-// impl Drop for TableWrite<'_> {
-//     #[inline]
-//     fn drop(&mut self) {
-//         self.resolve();
-//     }
-// }

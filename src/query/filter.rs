@@ -24,6 +24,12 @@ impl<D: Datum> Condition for Has<D> {
     }
 }
 
+impl Condition for bool {
+    fn filter(&self, _: &Table) -> bool {
+        *self
+    }
+}
+
 impl<F: Fn(&Table) -> bool> Condition for F {
     fn filter(&self, table: &Table) -> bool {
         self(table)
@@ -50,6 +56,16 @@ impl<'d, Q: Query<'d>, C: Condition> Query<'d> for Filter<Q, C> {
 
     fn read(self) -> Self::Read {
         Filter(self.0.read(), self.1)
+    }
+
+    #[inline]
+    fn has(&mut self, key: Key, context: Context<'d>) -> bool {
+        self.0.has(key, context)
+    }
+
+    #[inline]
+    fn count(&mut self, context: Context<'d>) -> usize {
+        self.0.count(context)
     }
 
     #[inline]

@@ -324,6 +324,23 @@ impl<'d, R: Row> Query<'d> for Rows<'d, R> {
         }
     }
 
+    #[inline]
+    fn has(&mut self, key: Key, context: Context<'d>) -> bool {
+        if let Ok(slot) = context.database.keys().get(key) {
+            self.indices.get(&slot.table()).is_some()
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    fn count(&mut self, _: Context<'d>) -> usize {
+        self.states
+            .iter()
+            .map(|(_, table, _)| table.inner.read().count() as usize)
+            .sum()
+    }
+
     fn try_find<T, F: FnOnce(Result<Self::Item<'_>, Error>) -> T>(
         &mut self,
         key: Key,
@@ -666,6 +683,46 @@ unsafe impl<R1: Row, R2: Row> Row for (R1, R2) {
         (
             R1::chunk(&state.0, context.own()),
             R2::chunk(&state.1, context.own()),
+        )
+    }
+}
+
+unsafe impl<R1: Row, R2: Row, R3: Row> Row for (R1, R2, R3) {
+    type State = (R1::State, R2::State, R3::State);
+    type Read = (R1::Read, R2::Read, R3::Read);
+    type Item<'a> = (R1::Item<'a>, R2::Item<'a>, R3::Item<'a>);
+    type Chunk<'a> = (R1::Chunk<'a>, R2::Chunk<'a>, R3::Chunk<'a>);
+
+    fn declare(mut context: DeclareContext) -> Result<(), Error> {
+        R1::declare(context.own())?;
+        R2::declare(context.own())?;
+        R3::declare(context.own())?;
+        Ok(())
+    }
+    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
+        Ok((
+            R1::initialize(context.own())?,
+            R2::initialize(context.own())?,
+            R3::initialize(context.own())?,
+        ))
+    }
+    fn read(state: Self::State) -> <Self::Read as Row>::State {
+        (R1::read(state.0), R2::read(state.1), R3::read(state.2))
+    }
+    #[inline]
+    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
+        (
+            R1::item(&state.0, context.own()),
+            R2::item(&state.1, context.own()),
+            R3::item(&state.2, context.own()),
+        )
+    }
+    #[inline]
+    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
+        (
+            R1::chunk(&state.0, context.own()),
+            R2::chunk(&state.1, context.own()),
+            R3::chunk(&state.2, context.own()),
         )
     }
 }

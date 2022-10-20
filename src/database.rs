@@ -3,7 +3,7 @@ use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use crate::{
     key::{Key, Keys},
     resources::Resources,
-    table::{self, Store, Table, TableRead, TableWrite, Tables},
+    table::{self, Store, Table, Tables},
 };
 use std::{ops::Range, sync::atomic::Ordering::*};
 
@@ -168,44 +168,6 @@ impl Database {
         Self::add_to_commit(1, &target_read);
         drop(source_write);
         Some(())
-    }
-
-    pub(crate) fn table_read<'a>(&'a self, table: &'a Table) -> TableRead<'a> {
-        TableRead::new(self, table, table.inner.read())
-    }
-
-    pub(crate) fn table_read_with<'a>(
-        &'a self,
-        table: &'a Table,
-        valid: impl FnOnce(&table::Inner) -> bool,
-    ) -> Option<TableRead<'a>> {
-        let read = table.inner.read();
-        if valid(&read) {
-            Some(TableRead::new(self, table, read))
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn table_try_read<'a>(&'a self, table: &'a Table) -> Option<TableRead<'a>> {
-        Some(TableRead::new(self, table, table.inner.try_read()?))
-    }
-
-    pub(crate) fn table_write<'a>(&'a self, table: &'a Table) -> TableWrite<'a> {
-        TableWrite::new(self, table, table.inner.write())
-    }
-
-    pub(crate) fn table_write_with<'a>(
-        &'a self,
-        table: &'a Table,
-        valid: impl FnOnce(&mut table::Inner) -> bool,
-    ) -> Option<TableWrite<'a>> {
-        let mut write = table.inner.write();
-        if valid(&mut write) {
-            Some(TableWrite::new(self, table, write))
-        } else {
-            None
-        }
     }
 
     fn add_to_reserve<'d>(

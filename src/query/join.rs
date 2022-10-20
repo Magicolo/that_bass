@@ -14,26 +14,27 @@ use std::collections::VecDeque;
 /// Since this join only returns the items from the right query, it requires less synchronization than a `FullJoin` at the cost
 /// of some coherence. It is possible that a key that was used to join the left query to the right query may have changed
 /// while an item is in use. To ensure strict coherence, use a `FullJoin`.
-pub struct Join<'d, L, R, K, B> {
+pub struct Join<'d, L, R, K: JoinKey, B> {
     left: L,
     right: R,
     by: B,
-    keys: VecDeque<K>,
-    slots: Vec<Vec<(K, &'d Slot)>>,
+    pairs: VecDeque<(Key, K::Value)>,
+    slots: Vec<Vec<(Key, K::Value, &'d Slot)>>,
 }
 
 pub trait JoinKey {
-    fn key(&self) -> Key;
+    type Value;
+    fn split(self) -> Option<(Key, Self::Value)>;
 }
 
-impl<L, R, K, B> Join<'_, L, R, K, B> {
+impl<L, R, K: JoinKey, B> Join<'_, L, R, K, B> {
     #[inline]
     pub fn new(left: L, right: R, by: B) -> Self {
         Self {
             left,
             right,
             by,
-            keys: VecDeque::new(),
+            pairs: VecDeque::new(),
             slots: Vec::new(),
         }
     }
@@ -42,7 +43,7 @@ impl<L, R, K, B> Join<'_, L, R, K, B> {
 impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
     for Join<'d, L, Rows<'d, R>, K, B>
 {
-    type Item<'a> = (K, Result<R::Item<'a>, Error>);
+    type Item<'a> = (K::Value, Result<R::Item<'a>, Error>);
     type Read = Join<'d, L, <Rows<'d, R> as Query<'d>>::Read, K, B>;
 
     fn initialize(&mut self, table: &'d Table) -> Result<(), Error> {
@@ -57,8 +58,18 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
             right: self.right.read(),
             by: self.by,
             slots: self.slots,
-            keys: self.keys,
+            pairs: self.pairs,
         }
+    }
+
+    #[inline]
+    fn has(&mut self, key: Key, context: Context<'d>) -> bool {
+        self.left.has(key, context)
+    }
+
+    #[inline]
+    fn count(&mut self, context: Context<'d>) -> usize {
+        self.left.count(context)
     }
 
     #[inline]
@@ -72,9 +83,12 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
             .left
             .try_find(key, context.own(), |item| item.map(&mut self.by))
         {
-            Ok(by) => self
-                .right
-                .try_find(key.key(), context, |item| find(Ok((by, item)))),
+            Ok(by) => match by.split() {
+                Some((key, value)) => self
+                    .right
+                    .try_find(key, context, |item| find(Ok((value, item)))),
+                None => find(Err(Error::MissingJoinKey)),
+            },
             Err(error) => find(Err(error)),
         }
     }
@@ -87,9 +101,10 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
         find: F,
     ) -> Result<T, Error> {
         let by = self.left.find(key, context.own(), &mut self.by)?;
+        let (key, value) = by.split().ok_or(Error::MissingJoinKey)?;
         Ok(self
             .right
-            .try_find(by.key(), context, |item| find((by, item))))
+            .try_find(key, context, |item| find((value, item))))
     }
 
     #[inline]
@@ -103,57 +118,63 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
             left,
             right,
             by,
-            keys,
+            pairs,
             slots,
             ..
         } = self;
         let mut fold = |mut state: S| -> Result<S, S> {
             // Collect all join keys and release all locks as fast as possible. This is important to reduce contention but also
             // to ensure that no deadlock occurs.
-            left.each(context.own(), |item| keys.push_back(by(item)));
+            left.each(context.own(), |item| {
+                if let Some(pair) = by(item).split() {
+                    pairs.push_back(pair);
+                }
+            });
             // States with no joined keys will be skipped.
             right.pending.clear();
-            // Ensure that `states` has the same length as `right.states`.
+            // Ensure that `slots` has the same length as `right.states`.
             slots.resize_with(right.states.len(), Vec::new);
 
             // Sort keys by state such that table locks can be used for (hopefully) more than one key at a time.
-            for join in keys.drain(..) {
-                let key = join.key();
-                match context.database.keys().get(key) {
+            for pair in pairs.drain(..) {
+                match context.database.keys().get(pair.0) {
                     Ok(slot) => match right.indices.get(&slot.table()) {
-                        Some(&state_index) => {
-                            let slots = unsafe { slots.get_unchecked_mut(state_index as usize) };
+                        Some(&index) => {
+                            let slots = unsafe { slots.get_unchecked_mut(index as usize) };
                             if slots.len() == 0 {
-                                right.pending.push_back(state_index);
+                                right.pending.push_back(index);
                             }
-                            slots.push((join, slot));
+                            slots.push((pair.0, pair.1, slot));
                             continue;
                         }
-                        None => state = fold(state, (join, Err(Error::KeyNotInQuery(key))))?,
+                        None => state = fold(state, (pair.1, Err(Error::KeyNotInQuery(pair.0))))?,
                     },
-                    Err(error) => state = fold(state, (join, Err(error)))?,
+                    Err(error) => state = fold(state, (pair.1, Err(error)))?,
                 }
             }
 
             state = right.try_guards(state, |mut state, index, row, pointers, table, inner| {
                 let context = ItemContext(inner.keys(), pointers, 0);
                 let slots = unsafe { slots.get_unchecked_mut(index as usize) };
-                for (key, slot) in slots.drain(..) {
+                for (key, value, slot) in slots.drain(..) {
                     let (table_index, row_index) = slot.indices();
                     // The key is allowed to move within its table (such as with a swap as part of a remove).
                     if table.index() == table_index {
-                        state = fold(state, (key, Ok(R::item(row, context.with(row_index as _)))))?;
+                        state = fold(
+                            state,
+                            (value, Ok(R::item(row, context.with(row_index as _)))),
+                        )?;
                     } else {
                         // The key has moved to another table between the last moment the slot indices were read and now.
-                        keys.push_back(key);
+                        pairs.push_back((key, value));
                     }
                 }
                 Ok(state)
             });
 
-            for key in keys.drain(..) {
+            for (key, value) in pairs.drain(..) {
                 let old = state;
-                state = right.try_find(key.key(), context.own(), |item| fold(old, (key, item)))?;
+                state = right.try_find(key, context.own(), |item| fold(old, (value, item)))?;
             }
 
             Ok(state)
@@ -163,7 +184,7 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
             Ok(value) => value,
             Err(value) => {
                 // Fold was interrupted.
-                keys.clear();
+                pairs.clear();
                 for slots in slots.iter_mut() {
                     slots.clear();
                 }
@@ -182,87 +203,125 @@ impl<'d, L: Query<'d>, R: Row, K: JoinKey, B: FnMut(L::Item<'_>) -> K> Query<'d>
             left,
             right,
             by,
-            keys,
+            pairs,
             slots,
             ..
         } = self;
         // Collect all join keys and release all locks as fast as possible. This is important to reduce contention but also
         // to ensure that no deadlock occurs.
-        left.each(context.own(), |item| keys.push_back(by(item)));
+        left.each(context.own(), |item| {
+            if let Some(pair) = by(item).split() {
+                pairs.push_back(pair);
+            }
+        });
         // States with no joined keys will be skipped.
         right.pending.clear();
-        // Ensure that `states` has the same length as `right.states`.
+        // Ensure that `slots` has the same length as `right.states`.
         slots.resize_with(right.states.len(), Vec::new);
 
         // Sort keys by state such that table locks can be used for (hopefully) more than one key at a time.
-        for join in keys.drain(..) {
-            let key = join.key();
-            match context.database.keys().get(key) {
+        for pair in pairs.drain(..) {
+            match context.database.keys().get(pair.0) {
                 Ok(slot) => match right.indices.get(&slot.table()) {
-                    Some(&state_index) => {
-                        let slots = unsafe { slots.get_unchecked_mut(state_index as usize) };
+                    Some(&index) => {
+                        let slots = unsafe { slots.get_unchecked_mut(index as usize) };
                         if slots.len() == 0 {
-                            right.pending.push_back(state_index);
+                            right.pending.push_back(index);
                         }
-                        slots.push((join, slot));
+                        slots.push((pair.0, pair.1, slot));
                         continue;
                     }
-                    None => state = fold(state, (join, Err(Error::KeyNotInQuery(key)))),
+                    None => state = fold(state, (pair.1, Err(Error::KeyNotInQuery(pair.0)))),
                 },
-                Err(error) => state = fold(state, (join, Err(error))),
+                Err(error) => state = fold(state, (pair.1, Err(error))),
             }
         }
 
         state = right.guards(state, |mut state, index, row, pointers, table, inner| {
             let context = ItemContext(inner.keys(), pointers, 0);
             let slots = unsafe { slots.get_unchecked_mut(index as usize) };
-            for (key, slot) in slots.drain(..) {
+            for (key, value, slot) in slots.drain(..) {
                 let (table_index, row_index) = slot.indices();
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
                 if table.index() == table_index {
                     let item = R::item(row, context.with(row_index as usize));
-                    state = fold(state, (key, Ok(item)));
+                    state = fold(state, (value, Ok(item)));
                 } else {
                     // The key has moved to another table between the last moment the slot indices were read and now.
-                    keys.push_back(key);
+                    pairs.push_back((key, value));
                 }
             }
             state
         });
 
-        for key in keys.drain(..) {
+        for (key, value) in pairs.drain(..) {
             let old = state;
-            state = right.try_find(key.key(), context.own(), |item| fold(old, (key, item)));
+            state = right.try_find(key, context.own(), |item| fold(old, (value, item)));
         }
 
         state
     }
 }
 
-impl JoinKey for Key {
+impl<K: JoinKey> JoinKey for Option<K> {
+    type Value = K::Value;
+
     #[inline]
-    fn key(&self) -> Key {
-        *self
+    fn split(self) -> Option<(Key, Self::Value)> {
+        self?.split()
+    }
+}
+
+impl<K: JoinKey, E> JoinKey for Result<K, E> {
+    type Value = K::Value;
+
+    #[inline]
+    fn split(self) -> Option<(Key, Self::Value)> {
+        self.ok()?.split()
+    }
+}
+
+impl JoinKey for Key {
+    type Value = ();
+
+    #[inline]
+    fn split(self) -> Option<(Key, Self::Value)> {
+        Some((self, ()))
     }
 }
 
 impl JoinKey for (Key,) {
+    type Value = ();
+
     #[inline]
-    fn key(&self) -> Key {
-        self.0
+    fn split(self) -> Option<(Key, Self::Value)> {
+        Some((self.0, ()))
     }
 }
 
 impl<T> JoinKey for (Key, T) {
+    type Value = T;
+
     #[inline]
-    fn key(&self) -> Key {
-        self.0
+    fn split(self) -> Option<(Key, Self::Value)> {
+        Some((self.0, self.1))
     }
 }
 
 impl<T1, T2> JoinKey for (Key, T1, T2) {
+    type Value = (T1, T2);
+
     #[inline]
-    fn key(&self) -> Key {
-        self.0
+    fn split(self) -> Option<(Key, Self::Value)> {
+        Some((self.0, (self.1, self.2)))
+    }
+}
+
+impl<T1, T2, T3> JoinKey for (Key, T1, T2, T3) {
+    type Value = (T1, T2, T3);
+
+    #[inline]
+    fn split(self) -> Option<(Key, Self::Value)> {
+        Some((self.0, (self.1, self.2, self.3)))
     }
 }

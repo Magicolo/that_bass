@@ -10,6 +10,7 @@ pub mod join;
 pub mod row;
 
 /*
+    TODO: Implement `Chunk`.
     TODO: Try to implement a `FullJoin` that returns both `L::Item` and `R::Item`.
         - This join would force coherence between `L` and `R`, meaning that the join key retrieved from `L::Item` would still be
         the same when both items are yielded.
@@ -42,9 +43,21 @@ pub mod row;
 pub trait Query<'d>: Sized {
     type Item<'a>;
     type Read: Query<'d>;
+    // type Chunk: Query<'d>;
 
     fn initialize(&mut self, table: &'d Table) -> Result<(), Error>;
     fn read(self) -> Self::Read;
+    // fn chunk(self) -> Self::Chunk;
+
+    #[inline]
+    fn has(&mut self, key: Key, context: Context<'d>) -> bool {
+        self.try_find(key, context, |result| result.is_ok())
+    }
+
+    #[inline]
+    fn count(&mut self, context: Context<'d>) -> usize {
+        self.fold(context, 0, |count, _| count + 1)
+    }
 
     fn try_find<T, F: FnOnce(Result<Self::Item<'_>, Error>) -> T>(
         &mut self,
@@ -116,7 +129,7 @@ pub struct Context<'d> {
 }
 
 impl Database {
-    pub fn query2<R: Row>(&self) -> Result<Root<Rows<R>>, Error> {
+    pub fn query<R: Row>(&self) -> Result<Root<Rows<R>>, Error> {
         Ok(Root {
             index: 0,
             database: self,
@@ -126,6 +139,18 @@ impl Database {
 }
 
 impl<'d, Q: Query<'d>> Root<'d, Q> {
+    #[inline]
+    pub fn has(&mut self, key: Key) -> bool {
+        self.update();
+        self.query.has(key, Context::new(self.database))
+    }
+
+    #[inline]
+    pub fn count(&mut self) -> usize {
+        self.update();
+        self.query.count(Context::new(self.database))
+    }
+
     #[inline]
     pub fn try_find<T, F: FnOnce(Result<Q::Item<'_>, Error>) -> T>(
         &mut self,
@@ -179,7 +204,14 @@ impl<'d, Q: Query<'d>> Root<'d, Q> {
         }
     }
 
-    #[inline]
+    pub fn filter<C: Condition>(self, filter: C) -> Root<'d, Filter<Q, C>> {
+        Root {
+            index: self.index,
+            database: self.database,
+            query: self.query.filter(filter),
+        }
+    }
+
     pub fn join<R: Row, K: JoinKey, B: FnMut(<Q::Read as Query<'d>>::Item<'_>) -> K>(
         self,
         by: B,
@@ -230,8 +262,8 @@ mod tests {
             .create()?
             .one((Target(key2, "fett"), Position([2.; 3])));
         let mut query = database
-            .query2::<(Key, &Target)>()?
-            .join::<&mut Position, _, _>(|(key, target)| (target.0, key, target.1))?;
+            .query::<(Key, &Target)>()?
+            .join::<&mut Position, _, _>(|(key, target)| (target.0, target.0, key, target.1))?;
 
         query
             .find(key2, |(by, item)| {

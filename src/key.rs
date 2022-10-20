@@ -1,14 +1,7 @@
+use crate::{core::FullIterator, Error};
 use parking_lot::RwLock;
-
-use crate::{
-    core::FullIterator,
-    query::{Context, Item, Lock},
-    table::{Store, Table},
-    Error,
-};
 use std::{
     cell::UnsafeCell,
-    slice::from_raw_parts,
     sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering::*},
 };
 
@@ -70,54 +63,6 @@ impl Key {
     pub(crate) fn increment(&mut self) -> u32 {
         self.generation = self.generation.saturating_add(1);
         self.generation
-    }
-}
-
-unsafe impl Item for Key {
-    type State = State;
-
-    fn declare(_: Context) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn initialize(_: &Table) -> Result<Self::State, Error> {
-        Ok(State)
-    }
-}
-
-impl<'a> Lock<'a> for State {
-    type Guard = &'a [Key];
-    type Chunk = &'a [Key];
-    type Item = Key;
-
-    #[inline]
-    fn try_lock(&self, keys: &[Key], stores: &[Store]) -> Option<Self::Guard> {
-        Some(self.lock(keys, stores))
-    }
-
-    #[inline]
-    fn lock(&self, keys: &[Key], stores: &[Store]) -> Self::Guard {
-        unsafe { self.chunk_unlocked(keys, stores) }
-    }
-
-    #[inline]
-    unsafe fn chunk(guard: &mut Self::Guard) -> Self::Chunk {
-        guard
-    }
-
-    #[inline]
-    unsafe fn chunk_unlocked(&self, keys: &[Key], _: &[Store]) -> Self::Chunk {
-        from_raw_parts(keys.as_ptr(), keys.len())
-    }
-
-    #[inline]
-    unsafe fn item(guard: &mut Self::Guard, index: usize) -> Self::Item {
-        *guard.get_unchecked(index)
-    }
-
-    #[inline]
-    unsafe fn item_unlocked(&self, keys: &[Key], _: &[Store], index: usize) -> Self::Item {
-        *keys.as_ptr().add(index)
     }
 }
 
