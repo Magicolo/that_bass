@@ -1,24 +1,55 @@
 use self::{
-    filter::{Condition, Filter},
-    join::{Join, JoinKey},
-    row::{Row, Rows},
+    join::{By, Join},
+    row::{Filter, Row, Rows},
 };
-use crate::{database::Database, key::Key, table::Table, Error};
+use crate::{database::Database, key::Key, Error};
 
-pub mod filter;
 pub mod join;
 pub mod row;
 
 /*
-    TODO: Implement `Chunk`.
+    TODO: Implement `Chunk`:
+
+    TODO: Implement `Nest`:
+        - Forces the outer query to take additionnal locks in case the inner query needs to produce the same item as the outer query:
+            - An outer read that conflicts with an inner write becomes an upgradable read.
+            - An inner read that is missing in outer becomes a read if its index is lower than the last outer store.
+            - An inner write that is missing in outer becomes an upgradable read if its index is lower than the last outer store.
+        - Always skip the current outer key in the inner query.
+        - When inner takes store locks from a table:
+            - GREATER than outer => hard lock the stores directly as usual
+            - EQUAL to outer => add/upgrade the missing locks
+            - LESS than outer => first try to lock the stores and on failure, drop the stores
+                locks (while keeping the table locks) from the outer query and hard lock all the store locks in order.
+            - FIX: this strategy may allow an outer immutable reference to be modified elsewhere while holding on to it...
+
+        database
+            .query::<(&mut A, &CopyFrom)>()
+            .nest::<&A>()
+            .each(|((a1, copy), nest)| nest.find(copy.0, |a2| a1.0 = a2.0));
+        database
+            .query::<&A>()
+            .nest::<&mut A>()
+            .each(|(a1, nest)| nest.each(|a2| a2.0 = a1.0));
+
     TODO: Try to implement a `FullJoin` that returns both `L::Item` and `R::Item`.
-        - This join would force coherence between `L` and `R`, meaning that the join key retrieved from `L::Item` would still be
-        the same when both items are yielded.
+        1. For each left table 'T', lock it stores that are the strictest intersection of the left and right queries.
+            - A variation on this might take only upgradable locks on a `left read/ right write` conflict.
+        2. For each item `I` in `T`, run the `by` function to retrieve the join key/value.
+            - If the join key is the same as the left item key, skip.
+            - If the join key is in table `T`, fold right away since the locks are already taken (upgrade locks if required).
+            - If the join key is in another table, enqueue (left key, (right key/value)) sorted*.
+                - The sorting must allow to lock tables in `index` order.
+                - Some fancy merging of left and right table locks may be accomplished here.
+        3. Complete the iterations.
+        4. Resolve the queued keys. Note that at this point, the left and right keys will not be in the same table since
+        those are already resolved.
+            - Since the keys are sorted in such a way that tables can be locked in `index` order, no deadlock can occur at
+            the table level and as long as stores are also locked in order, no deadlock can occur at the store level.
+            -
+
         - A `FullJoin` will require very careful synchronization between locks to prevent the `symmetric join` problem
         (i.e. `FullJoin<A, B>` running concurrently with `FullJoin<B, A>` must not deadlock).
-    TODO: Implement `Filter`.
-        - Static filtering using types (or a function pointer?).
-        - Should be possible to filter at any depth of a query since it adds nothing to the items.
     TODO: Implement `Permute`.
         - Returns all permutations (with repetitions) of two queries.
         - Order of items matters, so (A, B) is considered different than (B, A), thus both will be returned.
@@ -29,52 +60,18 @@ pub mod row;
         - Use a filter similar to `A.key() < B.key()` to eliminate duplicates.
     TODO: `Query::Item` should implement `Item`?
     TODO: Implement compile-time checking of `Columns`, if possible.
-    TODO: Fix the lifetime problem with `Query::Item`.
-        - `trait Items {
-            type Item<'a>;
-            fn next(&mut self) -> Option<Self::Item<'_>>;
-        }`
-        - `Query::Item<'b>: Item<'b>;`
-        - `Query::Items<'b>: for<'c> Items<Item<'c> = Self::Item<'c>>`
 */
 
-// pub type Item<'d, 'a, 'b, Q> = <<Q as Query<'d>>::Items<'a> as Iterate>::Item<'b>;
+pub struct Query<'d, Q> {
+    index: usize,
+    database: &'d Database,
+    query: Q,
+}
 
-pub trait Query<'d>: Sized {
+pub trait TableQuery<'d>: Sized {
     type Item<'a>;
-    type Read: Query<'d>;
-    // type Chunk: Query<'d>;
 
-    fn initialize(&mut self, table: &'d Table) -> Result<(), Error>;
-    fn read(self) -> Self::Read;
-    // fn chunk(self) -> Self::Chunk;
-
-    #[inline]
-    fn has(&mut self, key: Key, context: Context<'d>) -> bool {
-        self.try_find(key, context, |result| result.is_ok())
-    }
-
-    #[inline]
-    fn count(&mut self, context: Context<'d>) -> usize {
-        self.fold(context, 0, |count, _| count + 1)
-    }
-
-    fn try_find<T, F: FnOnce(Result<Self::Item<'_>, Error>) -> T>(
-        &mut self,
-        key: Key,
-        context: Context<'d>,
-        find: F,
-    ) -> T;
-
-    #[inline]
-    fn find<T, F: FnOnce(Self::Item<'_>) -> T>(
-        &mut self,
-        key: Key,
-        context: Context<'d>,
-        find: F,
-    ) -> Result<T, Error> {
-        self.try_find(key, context, |item| item.map(find))
-    }
+    fn count(&mut self, context: Context<'d>) -> usize;
 
     fn try_fold<S, F: FnMut(S, Self::Item<'_>) -> Result<S, S>>(
         &mut self,
@@ -102,26 +99,54 @@ pub trait Query<'d>: Sized {
     fn each<F: FnMut(Self::Item<'_>)>(&mut self, context: Context<'d>, mut each: F) {
         self.fold(context, (), |_, item| each(item))
     }
+}
+
+pub trait ReadQuery<'d>: TableQuery<'d> {
+    type Read: TableQuery<'d>;
+    fn read(self) -> Self::Read;
+}
+
+pub trait ChunkQuery<'d>: TableQuery<'d> {
+    type Chunk: TableQuery<'d>;
+    fn chunk(self) -> Self::Chunk;
+}
+
+pub trait FilterQuery<'d>: TableQuery<'d> {
+    type Filter<F: Filter>: TableQuery<'d>;
+    fn filter<F: Filter>(self, filter: F) -> Self::Filter<F>;
+}
+
+pub trait KeyQuery<'d>: TableQuery<'d> {
+    #[inline]
+    fn has(&mut self, key: Key, context: Context<'d>) -> bool {
+        self.try_find(key, context, |result| result.is_ok())
+    }
+
+    fn try_find<T, F: FnOnce(Result<Self::Item<'_>, Error>) -> T>(
+        &mut self,
+        key: Key,
+        context: Context<'d>,
+        find: F,
+    ) -> T;
 
     #[inline]
-    fn join<Q: Query<'d>, B: FnMut(Self::Item<'_>) -> K, K: JoinKey>(
+    fn find<T, F: FnOnce(Self::Item<'_>) -> T>(
+        &mut self,
+        key: Key,
+        context: Context<'d>,
+        find: F,
+    ) -> Result<T, Error> {
+        self.try_find(key, context, |item| item.map(find))
+    }
+
+    #[inline]
+    fn join<Q: KeyQuery<'d>, V, B: FnMut(By<V>, Self::Item<'_>)>(
         self,
         query: Q,
         by: B,
-    ) -> Join<'d, Self, Q, K, B> {
+    ) -> Join<'d, Self, Q, V, B> {
         Join::new(self, query, by)
     }
-
-    #[inline]
-    fn filter<F: Condition>(self, filter: F) -> Filter<Self, F> {
-        Filter::new(self, filter)
-    }
-}
-
-pub struct Root<'d, Q> {
-    index: usize,
-    database: &'d Database,
-    query: Q,
 }
 
 pub struct Context<'d> {
@@ -129,42 +154,19 @@ pub struct Context<'d> {
 }
 
 impl Database {
-    pub fn query<R: Row>(&self) -> Result<Root<Rows<R>>, Error> {
-        Ok(Root {
+    pub fn query<R: Row>(&self) -> Result<Query<Rows<R, ()>>, Error> {
+        Ok(Query {
             index: 0,
             database: self,
-            query: Rows::new()?,
+            query: Rows::new(())?,
         })
     }
 }
 
-impl<'d, Q: Query<'d>> Root<'d, Q> {
-    #[inline]
-    pub fn has(&mut self, key: Key) -> bool {
-        self.update();
-        self.query.has(key, Context::new(self.database))
-    }
-
+impl<'d, Q: TableQuery<'d>> Query<'d, Q> {
     #[inline]
     pub fn count(&mut self) -> usize {
-        self.update();
         self.query.count(Context::new(self.database))
-    }
-
-    #[inline]
-    pub fn try_find<T, F: FnOnce(Result<Q::Item<'_>, Error>) -> T>(
-        &mut self,
-        key: Key,
-        find: F,
-    ) -> T {
-        self.update();
-        self.query.try_find(key, Context::new(self.database), find)
-    }
-
-    #[inline]
-    pub fn find<T, F: FnOnce(Q::Item<'_>) -> T>(&mut self, key: Key, find: F) -> Result<T, Error> {
-        self.update();
-        self.query.find(key, Context::new(self.database), find)
     }
 
     #[inline]
@@ -173,62 +175,85 @@ impl<'d, Q: Query<'d>> Root<'d, Q> {
         state: S,
         fold: F,
     ) -> S {
-        self.update();
         self.query
             .try_fold(Context::new(self.database), state, fold)
     }
 
     #[inline]
     pub fn fold<S, F: FnMut(S, Q::Item<'_>) -> S>(&mut self, state: S, fold: F) -> S {
-        self.update();
         self.query.fold(Context::new(self.database), state, fold)
     }
 
     #[inline]
     pub fn try_each<F: FnMut(Q::Item<'_>) -> bool>(&mut self, each: F) {
-        self.update();
         self.query.try_each(Context::new(self.database), each)
     }
 
     #[inline]
     pub fn each<F: FnMut(Q::Item<'_>)>(&mut self, each: F) {
-        self.update();
         self.query.each(Context::new(self.database), each)
     }
+}
 
-    pub fn read(self) -> Root<'d, Q::Read> {
-        Root {
+impl<'d, Q: ReadQuery<'d>> Query<'d, Q> {
+    pub fn read(self) -> Query<'d, Q::Read> {
+        Query {
             index: self.index,
             database: self.database,
             query: self.query.read(),
         }
     }
+}
 
-    pub fn filter<C: Condition>(self, filter: C) -> Root<'d, Filter<Q, C>> {
-        Root {
+impl<'d, Q: ChunkQuery<'d>> Query<'d, Q> {
+    pub fn chunk(self) -> Query<'d, Q::Chunk> {
+        Query {
+            index: self.index,
+            database: self.database,
+            query: self.query.chunk(),
+        }
+    }
+}
+
+impl<'d, Q: FilterQuery<'d>> Query<'d, Q> {
+    pub fn filter<F: Filter>(self, filter: F) -> Query<'d, Q::Filter<F>> {
+        Query {
             index: self.index,
             database: self.database,
             query: self.query.filter(filter),
         }
     }
+}
 
-    pub fn join<R: Row, K: JoinKey, B: FnMut(<Q::Read as Query<'d>>::Item<'_>) -> K>(
-        self,
-        by: B,
-    ) -> Result<Root<'d, Join<'d, Q::Read, Rows<'d, R>, K, B>>, Error> {
-        Ok(Root {
-            index: self.index,
-            database: self.database,
-            query: self.query.read().join(Rows::new()?, by),
-        })
+impl<'d, Q: KeyQuery<'d>> Query<'d, Q> {
+    #[inline]
+    pub fn has(&mut self, key: Key) -> bool {
+        self.query.has(key, Context::new(self.database))
     }
 
     #[inline]
-    fn update(&mut self) {
-        while let Some(table) = self.database.tables().get(self.index) {
-            self.index += 1;
-            let _ = self.query.initialize(table);
-        }
+    pub fn try_find<T, F: FnOnce(Result<Q::Item<'_>, Error>) -> T>(
+        &mut self,
+        key: Key,
+        find: F,
+    ) -> T {
+        self.query.try_find(key, Context::new(self.database), find)
+    }
+
+    #[inline]
+    pub fn find<T, F: FnOnce(Q::Item<'_>) -> T>(&mut self, key: Key, find: F) -> Result<T, Error> {
+        self.query.find(key, Context::new(self.database), find)
+    }
+
+    pub fn join<R: Row, V, B: FnMut(By<V>, Q::Item<'_>)>(
+        self,
+        by: B,
+    ) -> Result<Query<'d, Join<'d, Q, Rows<'d, R, ()>, V, B>>, Error> {
+        Ok(Query {
+            index: self.index,
+            database: self.database,
+            query: self.query.join(Rows::new(())?, by),
+        })
     }
 }
 
@@ -263,7 +288,9 @@ mod tests {
             .one((Target(key2, "fett"), Position([2.; 3])));
         let mut query = database
             .query::<(Key, &Target)>()?
-            .join::<&mut Position, _, _>(|(key, target)| (target.0, target.0, key, target.1))?;
+            .join::<&mut Position, _, _>(|by, (key, target)| {
+                by.pair(target.0, (target.0, key, target.1))
+            })?;
 
         query
             .find(key2, |(by, item)| {

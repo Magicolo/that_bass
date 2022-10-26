@@ -4,7 +4,7 @@ use crate::{
     table::{Store, Table},
     Datum, Error, Meta,
 };
-use std::{any::TypeId, collections::HashSet, marker::PhantomData, sync::Arc};
+use std::{any::TypeId, collections::HashSet, sync::Arc};
 
 pub unsafe trait Template: 'static {
     type State: Send + Sync;
@@ -28,7 +28,7 @@ pub struct Context<'a> {
 
 impl Database {
     pub fn create<T: Template>(&self) -> Result<Create<T>, Error> {
-        struct Shared<T: Template>(Arc<T::State>, Arc<Table>, PhantomData<fn(T)>);
+        struct Shared<T: Template>(Arc<T::State>, Arc<Table>);
 
         let shared = self.resources().try_global(|| {
             let mut metas = Vec::new();
@@ -42,12 +42,12 @@ impl Database {
                 metas.sort_unstable_by_key(|meta| meta.identifier());
                 let table = self.tables().find_or_add(metas, 0);
                 let state = Arc::new(T::initialize(&table)?);
-                Ok(Shared::<T>(state, table, PhantomData))
+                Ok(Shared::<T>(state, table))
             } else {
                 Err(Error::DuplicateMeta)
             }
         })?;
-        let Shared(state, table, _) = &*shared.read();
+        let Shared(state, table) = &*shared.read();
         Ok(Create {
             database: self,
             state: state.clone(),
@@ -128,7 +128,8 @@ impl<'d, T: Template> Create<'d, T> {
 
     /// Resolves the accumulated create operations.
     ///
-    /// In order to prevent deadlocks, **do not call this method while using a query**.
+    /// In order to prevent deadlocks, **do not call this method while using a `Query`** unless you can
+    /// guarantee that there are no overlaps in table usage between this `Create` and the `Query`.
     #[inline]
     pub fn resolve(&mut self) {
         apply(
@@ -185,7 +186,7 @@ unsafe impl<D: Datum> Template for D {
 
     #[inline]
     unsafe fn apply(self, &state: &Self::State, row: usize, stores: &[Store]) {
-        unsafe { stores.get_unchecked(state).set_unlocked_at(row, self) };
+        unsafe { stores.get_unchecked(state).set(row, self) };
     }
 }
 

@@ -1,14 +1,11 @@
 use crate::{core::FullIterator, key::Key, Datum, Error, Meta};
-use parking_lot::{
-    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard,
-    RwLockUpgradableReadGuard, RwLockWriteGuard,
-};
+use parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
     any::TypeId,
     cell::UnsafeCell,
     collections::HashMap,
+    num::NonZeroUsize,
     ptr::NonNull,
-    slice::{from_raw_parts, from_raw_parts_mut, SliceIndex},
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
@@ -29,12 +26,6 @@ pub(crate) struct Inner {
     pub(crate) stores: Box<[Store]>,
 }
 
-#[derive(Clone, Copy)]
-pub enum Flag {
-    None = 0,
-    Grow = 1 << 0,
-}
-
 pub struct Store {
     meta: &'static Meta,
     data: RwLock<NonNull<()>>,
@@ -50,14 +41,9 @@ pub struct Tables {
 
 impl Store {
     pub fn new(meta: &'static Meta, capacity: usize) -> Self {
-        let data = if capacity == 0 {
-            NonNull::dangling()
-        } else {
-            (meta.allocate)(capacity)
-        };
         Self {
+            data: RwLock::new(unsafe { (meta.new)(capacity) }),
             meta,
-            data: RwLock::new(data),
         }
     }
 
@@ -72,7 +58,7 @@ impl Store {
     }
 
     #[inline]
-    pub unsafe fn copy(source: (&mut Self, usize), target: (&Self, usize), count: usize) {
+    pub unsafe fn copy(source: (&mut Self, usize), target: (&Self, usize), count: NonZeroUsize) {
         debug_assert_eq!(source.0.meta().identifier(), target.0.meta().identifier());
         let &Meta { copy, .. } = source.0.meta();
         copy(
@@ -82,25 +68,17 @@ impl Store {
         );
     }
 
-    #[inline]
-    pub unsafe fn swap(&mut self, source: usize, target: usize, count: usize) {
-        debug_assert!(source.abs_diff(target) >= count);
-        let &Meta { swap, .. } = self.meta();
-        swap(*self.data.get_mut(), source, target, count);
-    }
-
     pub unsafe fn grow(&mut self, old_capacity: usize, new_capacity: usize) {
         debug_assert!(old_capacity < new_capacity);
         let &Meta {
-            allocate,
-            free,
-            copy,
-            ..
+            new, free, copy, ..
         } = self.meta();
         let data = self.data.get_mut();
         let old_data = *data;
-        let new_data = allocate(new_capacity);
-        copy((old_data, 0), (new_data, 0), old_capacity);
+        let new_data = new(new_capacity);
+        if let Some(old_capacity) = NonZeroUsize::new(old_capacity) {
+            copy((old_data, 0), (new_data, 0), old_capacity);
+        }
         free(old_data, 0, old_capacity);
         *data = new_data;
     }
@@ -108,7 +86,7 @@ impl Store {
     /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the store.
     /// The ranges 'source_index..source_index + count' and 'target_index..target_index + count' must not overlap.
     #[inline]
-    pub unsafe fn squash(&mut self, source_index: usize, target_index: usize, count: usize) {
+    pub unsafe fn squash(&mut self, source_index: usize, target_index: usize, count: NonZeroUsize) {
         let &Meta { copy, drop, .. } = self.meta();
         let data = *self.data.get_mut();
         drop(data, target_index, count);
@@ -116,7 +94,7 @@ impl Store {
     }
 
     #[inline]
-    pub unsafe fn drop(&mut self, index: usize, count: usize) {
+    pub unsafe fn drop(&mut self, index: usize, count: NonZeroUsize) {
         let &Meta { drop, .. } = self.meta();
         let data = *self.data.get_mut();
         drop(data, index, count);
@@ -130,83 +108,7 @@ impl Store {
     }
 
     #[inline]
-    pub unsafe fn read<T: 'static, I: SliceIndex<[T]>>(
-        &self,
-        index: I,
-        count: usize,
-    ) -> MappedRwLockReadGuard<I::Output> {
-        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
-        RwLockReadGuard::map(self.data.read(), |data| unsafe {
-            from_raw_parts(data.as_ptr().cast::<T>(), count).get_unchecked(index)
-        })
-    }
-
-    #[inline]
-    pub unsafe fn try_read<T: 'static, I: SliceIndex<[T]>>(
-        &self,
-        index: I,
-        count: usize,
-    ) -> Option<MappedRwLockReadGuard<I::Output>> {
-        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
-        let data = self.data.try_read()?;
-        Some(RwLockReadGuard::map(data, |data| unsafe {
-            from_raw_parts(data.as_ptr().cast::<T>(), count).get_unchecked(index)
-        }))
-    }
-
-    #[inline]
-    pub unsafe fn get_unlocked_at<T: 'static>(&self, index: usize) -> &mut T {
-        self.get_unlocked(index, index + 1)
-    }
-
-    #[inline]
-    pub unsafe fn get_unlocked<T: 'static, I: SliceIndex<[T]>>(
-        &self,
-        index: I,
-        count: usize,
-    ) -> &mut I::Output {
-        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
-        let data = *self.data.data_ptr();
-        from_raw_parts_mut(data.as_ptr().cast::<T>(), count).get_unchecked_mut(index)
-    }
-
-    #[inline]
-    pub unsafe fn write<T: 'static, I: SliceIndex<[T]>>(
-        &self,
-        index: I,
-        count: usize,
-    ) -> MappedRwLockWriteGuard<I::Output> {
-        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
-        RwLockWriteGuard::map(self.data.write(), |data| unsafe {
-            from_raw_parts_mut(data.as_ptr().cast::<T>(), count).get_unchecked_mut(index)
-        })
-    }
-
-    #[inline]
-    pub unsafe fn write_at<T: 'static>(&self, index: usize) -> MappedRwLockWriteGuard<T> {
-        self.write(index, index + 1)
-    }
-
-    #[inline]
-    pub unsafe fn write_all<T: 'static>(&self, count: usize) -> MappedRwLockWriteGuard<[T]> {
-        self.write(.., count)
-    }
-
-    #[inline]
-    pub unsafe fn try_write<T: 'static, I: SliceIndex<[T]>>(
-        &self,
-        index: I,
-        count: usize,
-    ) -> Option<MappedRwLockWriteGuard<I::Output>> {
-        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
-        let data = self.data.try_write()?;
-        Some(RwLockWriteGuard::map(data, |data| unsafe {
-            from_raw_parts_mut(data.as_ptr().cast::<T>(), count).get_unchecked_mut(index)
-        }))
-    }
-
-    #[inline]
-    pub unsafe fn set_unlocked_at<T: 'static>(&self, index: usize, value: T) {
+    pub unsafe fn set<T: 'static>(&self, index: usize, value: T) {
         let data = *self.data.data_ptr();
         data.as_ptr().cast::<T>().add(index).write(value);
     }

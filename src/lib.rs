@@ -59,7 +59,8 @@ Scheduler library:
 use std::{
     any::{type_name, TypeId},
     mem::{forget, needs_drop, size_of},
-    ptr::{copy, drop_in_place, slice_from_raw_parts_mut, swap_nonoverlapping, NonNull},
+    num::NonZeroUsize,
+    ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -86,17 +87,17 @@ pub enum Error {
     MissingStore,
     MissingIndex,
     MissingJoinKey,
+    InvalidTable,
 }
 
 pub struct Meta {
     identifier: fn() -> TypeId,
     name: fn() -> &'static str,
     size: usize,
-    allocate: fn(usize) -> NonNull<()>,
+    new: unsafe fn(usize) -> NonNull<()>,
     free: unsafe fn(NonNull<()>, usize, usize),
-    copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), usize),
-    swap: unsafe fn(NonNull<()>, usize, usize, usize),
-    drop: unsafe fn(NonNull<()>, usize, usize),
+    copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), NonZeroUsize),
+    drop: unsafe fn(NonNull<()>, usize, NonZeroUsize),
 }
 
 pub trait Datum: Sized + 'static {
@@ -106,9 +107,9 @@ pub trait Datum: Sized + 'static {
             identifier: TypeId::of::<Self>,
             name: type_name::<Self>,
             size: size_of::<Self>(),
-            allocate: |capacity| {
+            new: |capacity| unsafe {
                 let mut items = Vec::<Self>::with_capacity(capacity);
-                let data = unsafe { NonNull::new_unchecked(items.as_mut_ptr().cast()) };
+                let data = NonNull::new_unchecked(items.as_mut_ptr().cast());
                 forget(items);
                 data
             },
@@ -116,22 +117,16 @@ pub trait Datum: Sized + 'static {
                 Vec::from_raw_parts(data.as_ptr().cast::<Self>(), count, capacity);
             },
             copy: |source, target, count| unsafe {
-                if size_of::<Self>() > 0 && count > 0 {
+                if size_of::<Self>() > 0 {
                     let source = source.0.as_ptr().cast::<Self>().add(source.1);
                     let target = target.0.as_ptr().cast::<Self>().add(target.1);
-                    copy(source, target, count);
-                }
-            },
-            swap: |data, source, target, count| unsafe {
-                if size_of::<Self>() > 0 && count > 0 {
-                    let data = data.as_ptr().cast::<Self>();
-                    swap_nonoverlapping(data.add(source), data.add(target), count)
+                    copy(source, target, count.get());
                 }
             },
             drop: |data, index, count| unsafe {
-                if needs_drop::<Self>() && count > 0 {
+                if needs_drop::<Self>() {
                     let data = data.as_ptr().cast::<Self>().add(index);
-                    drop_in_place(slice_from_raw_parts_mut(data, count));
+                    drop_in_place(slice_from_raw_parts_mut(data, count.get()));
                 }
             },
         }
@@ -536,47 +531,111 @@ mod tests {
     // }
 
     #[test]
-    fn copy_from() -> Result<(), Error> {
-        struct Position([f64; 3]);
-        struct CopyPosition(Key, Key);
-        impl Datum for Position {}
-        impl Datum for CopyPosition {}
+    fn multi_join() -> Result<(), Error> {
+        struct A(Vec<Key>);
+        impl Datum for A {}
+
+        let dabatase = Database::new();
+        let mut create = dabatase.create()?;
+        let a = create.one(A(vec![]));
+        let b = create.one(A(vec![Key::NULL, Key::NULL, Key::NULL]));
+        let c = create.one(A(vec![Key::NULL, Key::NULL, a, b]));
+        create.resolve();
+
+        let mut query = dabatase
+            .query::<&A>()?
+            .join::<(), _, _>(|by, a| by.keys(a.0.iter().cloned()));
+        Ok(())
+    }
+
+    #[test]
+    fn copy_to() -> Result<(), Error> {
+        struct A(usize);
+        struct CopyTo(Key);
+        impl Datum for A {}
+        impl Datum for CopyTo {}
 
         let database = Database::new();
-        let mut a = database.create()?.one(Position([1., 2., 3.]));
-        let mut b = database.create()?.one(Position([4., 5., 6.]));
+        let mut a = database.create()?.one(A(1));
         let mut create = database.create()?;
         for i in 0..100 {
-            let c = create.one((Position([i as _; 3]), CopyPosition(a, b)));
+            a = create.one((A(i), CopyTo(a)));
+        }
+        create.resolve();
+        database
+            .query::<(&A, &CopyTo)>()?
+            .join::<&mut A, _, _>(|by, (a, copy)| by.pair(copy.0, a.0))?
+            .each(|(value, item)| {
+                if let Ok(item) = item {
+                    item.0 = value
+                }
+            });
+        Ok(())
+    }
+
+    #[test]
+    fn copy_from() -> Result<(), Error> {
+        struct A(usize);
+        struct CopyFrom(Key);
+        impl Datum for A {}
+        impl Datum for CopyFrom {}
+
+        let database = Database::new();
+        let mut a = database.create()?.one(A(1));
+        let mut create = database.create()?;
+        for i in 0..100 {
+            a = create.one((A(i), CopyFrom(a)));
+        }
+
+        create.resolve();
+        database
+            .query::<(Key, &CopyFrom)>()?
+            .join::<&A, _, _>(|by, (key, copy)| by.pair(copy.0, key))?
+            .join::<&mut A, _, _>(|by, (key, item)| {
+                if let Ok(item) = item {
+                    by.pair(key, item.0);
+                }
+            })?
+            .each(|(value, item)| {
+                if let Ok(item) = item {
+                    item.0 = value
+                }
+            });
+        Ok(())
+    }
+
+    #[test]
+    fn swap() -> Result<(), Error> {
+        struct A(usize);
+        struct Swap(Key, Key);
+        impl Datum for A {}
+        impl Datum for Swap {}
+
+        let database = Database::new();
+        let mut a = database.create()?.one(A(1));
+        let mut b = database.create()?.one(A(2));
+        let mut create = database.create()?;
+        for i in 0..100 {
+            let c = create.one((A(i), Swap(a, b)));
             a = b;
             b = c;
         }
         create.resolve();
-
-        // TODO: Is there a better way?
         database
-            .query::<&CopyPosition>()?
-            .join::<&Position, _, _>(|copy| (copy.0, copy.1))?
-            .join::<&mut Position, _, _>(|(copy, position)| Some((copy, position.ok()?.0)))?
-            .each(|(position, item)| {
+            .query::<(&A, &Swap)>()?
+            .join::<&mut A, _, _>(|by, (a, copy)| by.pair(copy.0, (copy.1, a.0)))?
+            .join::<&mut A, _, _>(|by, ((key, value), item)| {
+                if let Ok(a) = item {
+                    by.pair(key, a.0);
+                    a.0 = value;
+                }
+            })?
+            .each(|(value, item)| {
                 if let Ok(item) = item {
-                    item.0 = position
+                    item.0 = value
                 }
             });
-        // let mut query1 = database.query::<(Key, &mut Position, &CopyPosition)>()?;
-        // let mut query2 = database.query::<&Position>()?;
 
-        // for (key, position, copy) in query1.items() {
-        //     if key == copy.0 {
-        //         continue;
-        //     } else {
-        //         position.0 = unsafe { query2.item_unchecked(copy.0)? }.0;
-        //     }
-        // }
-        // assert_eq!(query1.items().count(), 100);
-        // assert!(query1.items().all(|(_, item, _)| item.0 == [1., 2., 3.]));
-        // assert_eq!(query2.items().count(), 101);
-        // assert!(query2.items().all(|item| item.0 == [1., 2., 3.]));
         Ok(())
     }
 }

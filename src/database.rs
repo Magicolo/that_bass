@@ -5,7 +5,7 @@ use crate::{
     resources::Resources,
     table::{self, Store, Table, Tables},
 };
-use std::{ops::Range, sync::atomic::Ordering::*};
+use std::{num::NonZeroUsize, ops::Range, sync::atomic::Ordering::*};
 
 pub struct Database {
     keys: Keys,
@@ -103,9 +103,9 @@ impl Database {
 
         fn drop_or_squash(source: u32, target: u32, store: &mut Store) {
             if source == target {
-                unsafe { store.drop(target as _, 1) };
+                unsafe { store.drop(target as _, NonZeroUsize::new_unchecked(1)) };
             } else {
-                unsafe { store.squash(source as _, target as _, 1) };
+                unsafe { store.squash(source as _, target as _, NonZeroUsize::new_unchecked(1)) };
             }
         }
 
@@ -122,7 +122,11 @@ impl Database {
                         store_indices.0 += 1;
                         store_indices.1 += 1;
                         unsafe {
-                            Store::copy((source_store, indices.1 as _), (target_store, start), 1);
+                            Store::copy(
+                                (source_store, indices.1 as _),
+                                (target_store, start),
+                                NonZeroUsize::new_unchecked(1),
+                            );
                         };
                         drop_or_squash(last_index, indices.1, source_store);
                     } else if source_identifier < target_identifier {
@@ -228,8 +232,8 @@ impl Database {
 
         // Sanity checks. If this is not the case, there is a bug in the locking logic.
         debug_assert_eq!(begun, ended);
-        debug_assert!(begun > 0);
         debug_assert_eq!(begun, *table_count);
+        debug_assert!(*table_count >= count);
         *table_count -= count;
         *table_pending = Self::recompose_pending(begun - 1, ended - 1);
         *table_count
@@ -253,22 +257,22 @@ impl Database {
             // The destroy range is contiguous.
             let over = high.saturating_sub(head);
             let end = rows.len() - over;
-            if end > 0 {
-                // Squash the range at the end of the table on the begining of the removed range.
+            if let Some(end) = NonZeroUsize::new(end) {
+                // Squash the range at the end of the table on the beginning of the removed range.
                 let start = head + over;
                 for store in inner.stores.iter_mut() {
                     unsafe { store.squash(start, low, end) };
                 }
 
                 // Update the keys.
-                keys.copy_within(start..start + end, low);
-                for i in low..low + end {
+                keys.copy_within(start..start + end.get(), low);
+                for i in low..low + end.get() {
                     unsafe { self.keys().get_unchecked(*keys.get_unchecked(i)) }
                         .update(table.index(), i as _);
                 }
             }
 
-            if over > 0 {
+            if let Some(over) = NonZeroUsize::new(over) {
                 for store in inner.stores.iter_mut() {
                     unsafe { store.drop(head, over) };
                 }
@@ -304,13 +308,13 @@ impl Database {
                                 }
                             }
 
-                            let count = index - start;
+                            let count = unsafe { NonZeroUsize::new_unchecked(index - start) };
                             for store in inner.stores.iter_mut() {
                                 unsafe { store.squash(last, row, count) };
                             }
+                            keys.copy_within(last..last + count.get(), row);
 
-                            keys.copy_within(last..last + count, row);
-                            for row in row..row + count {
+                            for row in row..row + count.get() {
                                 unsafe { self.keys().get_unchecked(*keys.get_unchecked(row)) }
                                     .update(table.index(), row as _);
                             }
@@ -326,7 +330,7 @@ impl Database {
                                 }
                             }
 
-                            let count = index - start;
+                            let count = unsafe { NonZeroUsize::new_unchecked(index - start) };
                             for store in inner.stores.iter_mut() {
                                 unsafe { store.drop(row, count) };
                             }
@@ -356,7 +360,7 @@ impl Database {
                     debug_assert!(last >= head);
 
                     for store in inner.stores.iter_mut() {
-                        unsafe { store.squash(last, row, 1) };
+                        unsafe { store.squash(last, row, NonZeroUsize::new_unchecked(1)) };
                     }
 
                     unsafe {
@@ -380,7 +384,7 @@ impl Database {
                         }
                     }
 
-                    let count = index - start;
+                    let count = unsafe { NonZeroUsize::new_unchecked(index - start) };
                     for store in inner.stores.iter_mut() {
                         unsafe { store.drop(row, count) };
                     }
