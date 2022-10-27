@@ -1,6 +1,7 @@
-use super::*;
 use crate::{
-    key::Key,
+    database::Database,
+    filter::Filter,
+    key::{Key, Slot},
     table::{self, Table},
     Datum, Error,
 };
@@ -13,21 +14,38 @@ use std::{
     slice::{from_raw_parts, from_raw_parts_mut},
 };
 
-pub struct Read<D>(usize, PhantomData<D>);
-pub struct Write<D>(usize, PhantomData<D>);
-pub struct DeclareContext<'a>(&'a mut HashSet<Access>);
-pub struct InitializeContext<'a>(&'a HashMap<Access, usize>);
-pub struct ItemContext<'a, 'b>(
-    pub(crate) &'a [Key],
-    pub(crate) &'b [NonNull<()>],
-    pub(crate) usize,
-);
-pub struct ChunkContext<'a, 'b>(&'a [Key], &'b [NonNull<()>]);
+pub struct Query<'d, R: Row, F = (), I = Item> {
+    database: &'d Database,
+    index: usize,
+    indices: HashMap<u32, u32>, // From table index to state index.
+    done: VecDeque<u32>,
+    pending: VecDeque<u32>,
+    states: Vec<(R::State, &'d Table, Vec<(usize, Access)>)>,
+    accesses: Vec<Access>,
+    pointers: Vec<NonNull<()>>,
+    filter: F,
+    _marker: PhantomData<fn(I)>,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Access {
     Read(TypeId),
     Write(TypeId),
+}
+
+pub struct Read<D>(usize, PhantomData<D>);
+pub struct Write<D>(usize, PhantomData<D>);
+pub struct Item;
+pub struct Chunk;
+
+pub struct DeclareContext<'a>(&'a mut HashSet<Access>);
+pub struct InitializeContext<'a>(&'a HashMap<Access, usize>);
+pub struct ItemContext<'a, 'b>(&'a [Key], &'b [NonNull<()>], usize);
+pub struct ChunkContext<'a, 'b>(&'a [Key], &'b [NonNull<()>]);
+
+pub struct By<'d, V> {
+    pairs: VecDeque<(Key, V)>,
+    slots: Vec<Vec<(Key, V, &'d Slot)>>,
 }
 
 pub unsafe trait Row {
@@ -43,54 +61,110 @@ pub unsafe trait Row {
     fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a>;
 }
 
-pub trait Filter {
-    fn filter(&self, table: &Table) -> bool;
-}
-
-pub struct Not<F>(F);
-pub struct Has<D: Datum>(PhantomData<D>);
-
-// TODO: { states, accesses, index } could be shared globally (how to initialize new tables?)
-// - { indices, done, pending, pointers, filter } are sufficient as local state.
-// - `states` would not consider the filter (more sharing) and it will be the responsibility of `Rows` to add or not the state index to
-// its `indices` and `pending` local state.
-pub struct Rows<'d, R: Row, F> {
-    pub(crate) indices: HashMap<u32, u32>, // From table index to state index.
-    pub(crate) done: VecDeque<u32>,
-    pub(crate) pending: VecDeque<u32>,
-    pub(crate) states: Vec<(R::State, &'d Table, Vec<(usize, Access)>)>,
-    accesses: HashSet<Access>,
-    pointers: Vec<NonNull<()>>,
-    index: usize,
-    filter: F,
-}
-
-impl<'d, R: Row, F: Filter> Rows<'d, R, F> {
-    pub fn new(filter: F) -> Result<Self, Error> {
+impl Database {
+    pub fn query<R: Row>(&self) -> Result<Query<'_, R>, Error> {
         // Detects violations of rust's invariants.
         let mut accesses = HashSet::new();
         R::declare(DeclareContext(&mut accesses))?;
-        Ok(Self {
+        Ok(Query {
+            database: self,
             indices: HashMap::new(),
             states: Vec::new(),
             done: VecDeque::new(),
             pending: VecDeque::new(),
-            accesses,
+            accesses: accesses.into_iter().collect(),
             pointers: Vec::new(),
             index: 0,
-            filter,
+            filter: (),
+            _marker: PhantomData,
         })
     }
+}
 
-    pub(crate) fn update(&mut self, database: &'d Database) {
-        let tables = database.tables();
+impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
+    pub fn chunk(self) -> Query<'d, R, F, Chunk> {
+        Query {
+            database: self.database,
+            indices: self.indices,
+            done: self.done,
+            pending: self.pending,
+            states: self.states,
+            accesses: self.accesses,
+            pointers: self.pointers,
+            index: self.index,
+            filter: self.filter,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn read(mut self) -> Query<'d, R::Read, F, I> {
+        debug_assert!(self.done.is_empty());
+        debug_assert!(self.pointers.is_empty());
+
+        let states = self
+            .states
+            .into_iter()
+            .map(|(state, table, mut indices)| {
+                for (_, access) in indices.iter_mut() {
+                    *access = access.read();
+                }
+                (R::read(state), table, indices)
+            })
+            .collect();
+        for access in self.accesses.iter_mut() {
+            *access = access.read();
+        }
+        Query {
+            database: self.database,
+            indices: self.indices,
+            states,
+            done: self.done,
+            pending: self.pending,
+            accesses: self.accesses,
+            pointers: self.pointers,
+            index: self.index,
+            filter: self.filter,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn filter<G: Filter>(mut self, filter: G) -> Query<'d, R, (F, G), I> {
+        debug_assert!(self.done.is_empty());
+        debug_assert!(self.pointers.is_empty());
+
+        let indices = self.states.iter().filter_map(|(_, table, _)| {
+            if filter.filter(table) {
+                self.indices.get(&table.index()).copied()
+            } else {
+                self.indices.remove(&table.index());
+                None
+            }
+        });
+        self.pending.clear();
+        self.pending.extend(indices);
+
+        Query {
+            database: self.database,
+            indices: self.indices,
+            states: self.states,
+            done: self.done,
+            pending: self.pending,
+            accesses: self.accesses,
+            pointers: self.pointers,
+            index: self.index,
+            filter: (self.filter, filter),
+            _marker: PhantomData,
+        }
+    }
+
+    pub(crate) fn update(&mut self) {
+        let tables = self.database.tables();
         while let Some(table) = tables.get(self.index) {
             self.index += 1;
             let _ = self.try_add(table);
         }
     }
 
-    #[inline]
     pub(crate) fn try_guards<S>(
         &mut self,
         state: S,
@@ -113,10 +187,10 @@ impl<'d, R: Row, F: Filter> Rows<'d, R, F> {
                 };
             }
 
-            while let Some(state_index) = self.pending.pop_front() {
-                self.done.push_back(state_index);
-                state = self.lock(state_index, |row, pointers, table, inner| {
-                    fold(state, state_index, row, pointers, table, inner)
+            while let Some(index) = self.pending.pop_front() {
+                self.done.push_back(index);
+                state = self.lock(index, |row, pointers, table, inner| {
+                    fold(state, index, row, pointers, table, inner)
                 })?;
             }
             Ok(state)
@@ -165,10 +239,10 @@ impl<'d, R: Row, F: Filter> Rows<'d, R, F> {
             };
         }
 
-        while let Some(state_index) = self.pending.pop_front() {
-            self.done.push_back(state_index);
-            state = self.lock(state_index, |row, pointers, table, inner| {
-                fold(state, state_index, row, pointers, table, inner)
+        while let Some(index) = self.pending.pop_front() {
+            self.done.push_back(index);
+            state = self.lock(index, |row, pointers, table, inner| {
+                fold(state, index, row, pointers, table, inner)
             });
         }
 
@@ -176,6 +250,7 @@ impl<'d, R: Row, F: Filter> Rows<'d, R, F> {
         state
     }
 
+    #[inline]
     fn try_lock<S, T>(
         &mut self,
         state: S,
@@ -243,6 +318,7 @@ impl<'d, R: Row, F: Filter> Rows<'d, R, F> {
         )
     }
 
+    #[inline]
     fn lock<T>(
         &mut self,
         index: u32,
@@ -324,12 +400,10 @@ impl<'d, R: Row, F: Filter> Rows<'d, R, F> {
     }
 }
 
-impl<'d, R: Row, F: Filter> TableQuery<'d> for Rows<'d, R, F> {
-    type Item<'a> = R::Item<'a>;
-
+impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     #[inline]
-    fn count(&mut self, context: Context<'d>) -> usize {
-        self.update(context.database);
+    pub fn count(&mut self) -> usize {
+        self.update();
         self.indices
             .values()
             .map(|&index| {
@@ -343,13 +417,21 @@ impl<'d, R: Row, F: Filter> TableQuery<'d> for Rows<'d, R, F> {
     }
 
     #[inline]
-    fn try_fold<S, G: FnMut(S, Self::Item<'_>) -> Result<S, S>>(
+    pub fn count_by<V>(&mut self, by: &By<V>) -> usize {
+        self.update();
+        by.pairs
+            .iter()
+            .filter(|&&(key, _)| self.has_key(key))
+            .count()
+    }
+
+    #[inline]
+    pub fn try_fold<S, G: FnMut(S, R::Item<'_>) -> Result<S, S>>(
         &mut self,
-        context: Context<'d>,
         state: S,
         mut fold: G,
     ) -> S {
-        self.update(context.database);
+        self.update();
         self.try_guards(state, |mut state, _, row, pointers, _, inner| {
             let context = ItemContext(inner.keys(), pointers, 0);
             for i in 0..inner.count() {
@@ -360,13 +442,62 @@ impl<'d, R: Row, F: Filter> TableQuery<'d> for Rows<'d, R, F> {
     }
 
     #[inline]
-    fn fold<S, G: FnMut(S, Self::Item<'_>) -> S>(
+    pub fn try_fold_by<V, S, G: FnMut(S, V, Result<R::Item<'_>, Error>) -> Result<S, S>>(
         &mut self,
-        context: Context<'d>,
+        by: &mut By<'d, V>,
         state: S,
         mut fold: G,
     ) -> S {
-        self.update(context.database);
+        let pending = self.pending.len();
+        let mut fold = |mut state: S| -> Result<S, S> {
+            for (value, error) in self.process(by) {
+                state = fold(state, value, Err(error))?;
+            }
+
+            state = self.try_guards(state, |mut state, index, row, pointers, table, inner| {
+                let context = ItemContext(inner.keys(), pointers, 0);
+                let slots = unsafe { by.slots.get_unchecked_mut(index as usize) };
+                for (key, value, slot) in slots.drain(..) {
+                    let (table_index, row_index) = slot.indices();
+                    // The key is allowed to move within its table (such as with a swap as part of a remove).
+                    if table.index() == table_index {
+                        state = fold(state, value, Ok(R::item(row, context.with(row_index as _))))?;
+                    } else {
+                        // The key has moved to another table between the last moment the slot indices were read and now.
+                        by.pairs.push_back((key, value));
+                    }
+                }
+                Ok(state)
+            });
+
+            for (key, value) in by.pairs.drain(..) {
+                let old = state;
+                state = self.try_find(key, |item| fold(old, value, item))?;
+            }
+
+            Ok(state)
+        };
+
+        match fold(state) {
+            Ok(state) => {
+                debug_assert!(by.pairs.is_empty());
+                self.pending.drain(pending..);
+                state
+            }
+            Err(state) => {
+                // Fold was interrupted.
+                by.pairs.clear();
+                for index in self.pending.drain(pending..) {
+                    unsafe { by.slots.get_unchecked_mut(index as usize) }.clear();
+                }
+                state
+            }
+        }
+    }
+
+    #[inline]
+    pub fn fold<S, G: FnMut(S, R::Item<'_>) -> S>(&mut self, state: S, mut fold: G) -> S {
+        self.update();
         self.guards(state, |mut state, _, row, pointers, _, inner| {
             let context = ItemContext(inner.keys(), pointers, 0);
             for i in 0..inner.count() {
@@ -375,27 +506,98 @@ impl<'d, R: Row, F: Filter> TableQuery<'d> for Rows<'d, R, F> {
             state
         })
     }
-}
 
-impl<'d, R: Row, F: Filter> KeyQuery<'d> for Rows<'d, R, F> {
-    #[inline]
-    fn has(&mut self, key: Key, context: Context<'d>) -> bool {
-        self.update(context.database);
-        if let Ok(slot) = context.database.keys().get(key) {
-            self.indices.get(&slot.table()).is_some()
-        } else {
-            false
+    pub fn fold_by<V, S, G: FnMut(S, V, Result<R::Item<'_>, Error>) -> S>(
+        &mut self,
+        by: &mut By<'d, V>,
+        mut state: S,
+        mut fold: G,
+    ) -> S {
+        let pending = self.pending.len();
+        for (value, error) in self.process(by) {
+            state = fold(state, value, Err(error));
         }
+
+        state = self.guards(state, |mut state, index, row, pointers, table, inner| {
+            let context = ItemContext(inner.keys(), pointers, 0);
+            let slots = unsafe { by.slots.get_unchecked_mut(index as usize) };
+            for (key, value, slot) in slots.drain(..) {
+                let (table_index, row_index) = slot.indices();
+                // The key is allowed to move within its table (such as with a swap as part of a remove).
+                if table.index() == table_index {
+                    let item = R::item(row, context.with(row_index as usize));
+                    state = fold(state, value, Ok(item));
+                } else {
+                    // The key has moved to another table between the last moment the slot indices were read and now.
+                    by.pairs.push_back((key, value));
+                }
+            }
+            state
+        });
+
+        for (key, value) in by.pairs.drain(..) {
+            let old = state;
+            state = self.try_find(key, |item| fold(old, value, item));
+        }
+
+        self.pending.drain(pending..);
+        state
     }
 
-    fn try_find<T, G: FnOnce(Result<Self::Item<'_>, Error>) -> T>(
+    #[inline]
+    pub fn fold_by_ok<V, S, G: FnMut(S, V, R::Item<'_>) -> S>(
+        &mut self,
+        by: &mut By<'d, V>,
+        state: S,
+        mut fold: G,
+    ) -> S {
+        self.fold_by(by, state, |state, value, item| match item {
+            Ok(item) => fold(state, value, item),
+            Err(_) => state,
+        })
+    }
+
+    #[inline]
+    pub fn try_each<G: FnMut(R::Item<'_>) -> bool>(&mut self, mut each: G) {
+        self.try_fold((), |_, item| each(item).then_some(()).ok_or(()))
+    }
+
+    #[inline]
+    pub fn each<G: FnMut(R::Item<'_>)>(&mut self, mut each: G) {
+        self.fold((), |_, item| each(item))
+    }
+
+    #[inline]
+    pub fn each_by<V, G: FnMut(V, Result<R::Item<'_>, Error>)>(
+        &mut self,
+        by: &mut By<'d, V>,
+        mut each: G,
+    ) {
+        self.fold_by(by, (), |_, value, item| each(value, item))
+    }
+
+    #[inline]
+    pub fn each_by_ok<V, G: FnMut(V, R::Item<'_>)>(&mut self, by: &mut By<'d, V>, mut each: G) {
+        self.fold_by(by, (), |_, value, item| {
+            if let Ok(item) = item {
+                each(value, item);
+            }
+        })
+    }
+
+    #[inline]
+    pub fn has(&mut self, key: Key) -> bool {
+        self.update();
+        self.has_key(key)
+    }
+
+    pub fn try_find<T, G: FnOnce(Result<R::Item<'_>, Error>) -> T>(
         &mut self,
         key: Key,
-        context: super::Context<'d>,
         mut find: G,
     ) -> T {
-        self.update(context.database);
-        let keys = context.database.keys();
+        self.update();
+        let keys = self.database.keys();
         loop {
             let slot = match keys.get(key) {
                 Ok(slot) => slot,
@@ -421,69 +623,94 @@ impl<'d, R: Row, F: Filter> KeyQuery<'d> for Rows<'d, R, F> {
             };
         }
     }
-}
 
-impl<'d, R: Row, F: Filter> ReadQuery<'d> for Rows<'d, R, F> {
-    type Read = Rows<'d, R::Read, F>;
+    #[inline]
+    pub fn find<T, G: FnOnce(R::Item<'_>) -> T>(&mut self, key: Key, find: G) -> Result<T, Error> {
+        self.try_find(key, |item| item.map(find))
+    }
 
-    fn read(self) -> Self::Read {
-        debug_assert!(self.done.is_empty());
-        debug_assert!(self.pointers.is_empty());
+    #[inline]
+    fn has_key(&self, key: Key) -> bool {
+        match self.database.keys().get(key) {
+            Ok(slot) => self.indices.contains_key(&slot.table()),
+            Err(_) => false,
+        }
+    }
 
-        Rows {
-            indices: self.indices,
-            states: self
-                .states
-                .into_iter()
-                .map(|(state, table, mut indices)| {
-                    for (_, access) in indices.iter_mut() {
-                        *access = access.read();
-                    }
-                    (R::read(state), table, indices)
-                })
-                .collect(),
-            done: self.done,
-            pending: self.pending,
-            accesses: self
-                .accesses
-                .into_iter()
-                .map(|access| access.read())
-                .collect(),
-            pointers: self.pointers,
-            index: self.index,
-            filter: self.filter,
+    /// Sorts keys by state index such that table locks can be used for (hopefully) more than one key at a time.
+    #[inline]
+    fn process<'a, V>(&'a mut self, by: &'a mut By<'d, V>) -> Errors<'d, 'a, V> {
+        self.update();
+        by.ensure(self.states.len());
+        swap(&mut self.done, &mut self.pending);
+
+        // Sort keys by state such that table locks can be used for (hopefully) more than one key at a time.
+        Errors {
+            database: self.database,
+            indices: &self.indices,
+            pending: &mut self.pending,
+            pairs: &mut by.pairs,
+            slots: &mut by.slots,
         }
     }
 }
 
-impl<'d, R: Row, F: Filter> FilterQuery<'d> for Rows<'d, R, F> {
-    type Filter<G: Filter> = Rows<'d, R, (F, G)>;
+struct Errors<'d, 'a, V> {
+    database: &'d Database,
+    indices: &'a HashMap<u32, u32>,
+    pending: &'a mut VecDeque<u32>,
+    pairs: &'a mut VecDeque<(Key, V)>,
+    slots: &'a mut [Vec<(Key, V, &'d Slot)>],
+}
 
-    fn filter<G: Filter>(mut self, filter: G) -> Self::Filter<G> {
-        debug_assert!(self.done.is_empty());
-        debug_assert!(self.pointers.is_empty());
+impl<V> Iterator for Errors<'_, '_, V> {
+    type Item = (V, Error);
 
-        let indices = self.states.iter().filter_map(|(_, table, _)| {
-            if filter.filter(table) {
-                self.indices.get(&table.index()).copied()
-            } else {
-                self.indices.remove(&table.index());
-                None
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((key, value)) = self.pairs.pop_front() {
+            match self.database.keys().get(key) {
+                Ok(slot) => match self.indices.get(&slot.table()) {
+                    Some(&index) => {
+                        let slots = unsafe { self.slots.get_unchecked_mut(index as usize) };
+                        if slots.len() == 0 {
+                            self.pending.push_back(index);
+                        }
+                        slots.push((key, value, slot));
+                    }
+                    None => return Some((value, Error::KeyNotInQuery(key))),
+                },
+                Err(error) => return Some((value, error)),
             }
-        });
-        self.pending.clear();
-        self.pending.extend(indices);
-
-        Rows {
-            indices: self.indices,
-            states: self.states,
-            done: self.done,
-            pending: self.pending,
-            accesses: self.accesses,
-            pointers: self.pointers,
-            index: self.index,
-            filter: (self.filter, filter),
         }
+        None
+    }
+}
+
+impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
+    #[inline]
+    pub fn count(&mut self) -> usize {
+        self.update();
+        self.indices.len()
+    }
+
+    #[inline]
+    pub fn try_fold<S, G: FnMut(S, R::Chunk<'_>) -> Result<S, S>>(
+        &mut self,
+        state: S,
+        mut fold: G,
+    ) -> S {
+        self.update();
+        self.try_guards(state, |state, _, row, pointers, _, inner| {
+            fold(state, R::chunk(row, ChunkContext(inner.keys(), pointers)))
+        })
+    }
+
+    #[inline]
+    pub fn fold<S, G: FnMut(S, R::Chunk<'_>) -> S>(&mut self, state: S, mut fold: G) -> S {
+        self.update();
+        self.guards(state, |state, _, row, pointers, _, inner| {
+            fold(state, R::chunk(row, ChunkContext(inner.keys(), pointers)))
+        })
     }
 }
 
@@ -807,44 +1034,50 @@ unsafe impl<R1: Row, R2: Row, R3: Row> Row for (R1, R2, R3) {
     }
 }
 
-impl<F: Filter> Filter for Not<F> {
-    fn filter(&self, table: &Table) -> bool {
-        !self.0.filter(table)
+impl By<'_, ()> {
+    #[inline]
+    pub fn key(&mut self, key: Key) {
+        self.pair(key, ())
+    }
+
+    #[inline]
+    pub fn keys<I: IntoIterator<Item = Key>>(&mut self, keys: I) {
+        self.pairs(keys.into_iter().map(|key| (key, ())))
     }
 }
 
-impl<D: Datum> Filter for Has<D> {
-    fn filter(&self, table: &Table) -> bool {
-        table.has::<D>()
+impl<V> By<'_, V> {
+    pub fn new() -> Self {
+        Self {
+            pairs: VecDeque::new(),
+            slots: Vec::new(),
+        }
     }
-}
 
-impl Filter for bool {
-    fn filter(&self, _: &Table) -> bool {
-        *self
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.pairs.len()
     }
-}
 
-impl<F: Fn(&Table) -> bool> Filter for F {
-    fn filter(&self, table: &Table) -> bool {
-        self(table)
+    #[inline]
+    pub fn pair(&mut self, key: Key, value: V) {
+        self.pairs.push_back((key, value));
     }
-}
 
-impl Filter for () {
-    fn filter(&self, _: &Table) -> bool {
-        true
+    #[inline]
+    pub fn pairs<I: IntoIterator<Item = (Key, V)>>(&mut self, pairs: I) {
+        self.pairs.extend(pairs);
     }
-}
 
-impl<F1: Filter> Filter for (F1,) {
-    fn filter(&self, table: &Table) -> bool {
-        self.0.filter(table)
+    #[inline]
+    pub fn clear(&mut self) {
+        self.pairs.clear();
     }
-}
 
-impl<F1: Filter, F2: Filter> Filter for (F1, F2) {
-    fn filter(&self, table: &Table) -> bool {
-        self.0.filter(table) && self.1.filter(table)
+    #[inline]
+    fn ensure(&mut self, capacity: usize) {
+        while self.slots.len() < capacity {
+            self.slots.push(Vec::new());
+        }
     }
 }

@@ -11,10 +11,64 @@ pub mod core;
 pub mod create;
 pub mod database;
 pub mod destroy;
+pub mod filter;
 pub mod key;
 pub mod query;
 pub mod resources;
 pub mod table;
+
+/*
+    TODO: Implement `Nest`:
+        - Forces the outer query to take additionnal locks in case the inner query needs to produce the same item as the outer query:
+            - An outer read that conflicts with an inner write becomes an upgradable read.
+            - An inner read that is missing in outer becomes a read if its index is lower than the last outer store.
+            - An inner write that is missing in outer becomes an upgradable read if its index is lower than the last outer store.
+        - Always skip the current outer key in the inner query.
+        - When inner takes store locks from a table:
+            - GREATER than outer => hard lock the stores directly as usual
+            - EQUAL to outer => add/upgrade the missing locks
+            - LESS than outer => first try to lock the stores and on failure, drop the stores
+                locks (while keeping the table locks) from the outer query and hard lock all the store locks in order.
+            - FIX: this strategy may allow an outer immutable reference to be modified elsewhere while holding on to it...
+
+        database
+            .query::<(&mut A, &CopyFrom)>()
+            .nest::<&A>()
+            .each(|((a1, copy), nest)| nest.find(copy.0, |a2| a1.0 = a2.0));
+        database
+            .query::<&A>()
+            .nest::<&mut A>()
+            .each(|(a1, nest)| nest.each(|a2| a2.0 = a1.0));
+
+    TODO: Try to implement a `FullJoin` that returns both `L::Item` and `R::Item`.
+        1. For each left table 'T', lock it stores that are the strictest intersection of the left and right queries.
+            - A variation on this might take only upgradable locks on a `left read/ right write` conflict.
+        2. For each item `I` in `T`, run the `by` function to retrieve the join key/value.
+            - If the join key is the same as the left item key, skip.
+            - If the join key is in table `T`, fold right away since the locks are already taken (upgrade locks if required).
+            - If the join key is in another table, enqueue (left key, (right key/value)) sorted*.
+                - The sorting must allow to lock tables in `index` order.
+                - Some fancy merging of left and right table locks may be accomplished here.
+        3. Complete the iterations.
+        4. Resolve the queued keys. Note that at this point, the left and right keys will not be in the same table since
+        those are already resolved.
+            - Since the keys are sorted in such a way that tables can be locked in `index` order, no deadlock can occur at
+            the table level and as long as stores are also locked in order, no deadlock can occur at the store level.
+            -
+
+        - A `FullJoin` will require very careful synchronization between locks to prevent the `symmetric join` problem
+        (i.e. `FullJoin<A, B>` running concurrently with `FullJoin<B, A>` must not deadlock).
+    TODO: Implement `Permute`.
+        - Returns all permutations (with repetitions) of two queries.
+        - Order of items matters, so (A, B) is considered different than (B, A), thus both will be returned.
+        - May be unified with `Combine`.
+    TODO: Implement `Combine`.
+        - Returns all combinations (no repetitions) of two queries.
+        - Order of items does not matter, so (A, B) is the same as (B, A), thus only one of those will be returned.
+        - Use a filter similar to `A.key() < B.key()` to eliminate duplicates.
+    TODO: `Query::Item` should implement `Item`?
+    TODO: Implement compile-time checking of `Columns`, if possible.
+*/
 
 /*
 TODO: There is no need to take a `Table` lock when querying as long as the store locks are always taken from left to right.
@@ -152,7 +206,7 @@ pub fn identify() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use crate::{database::Database, key::Key, Datum, Error};
+    use crate::{database::Database, key::Key, query::By, Datum, Error};
     use std::collections::HashSet;
 
     struct A;
@@ -535,16 +589,30 @@ mod tests {
         struct A(Vec<Key>);
         impl Datum for A {}
 
-        let dabatase = Database::new();
-        let mut create = dabatase.create()?;
+        let database = Database::new();
+        let mut create = database.create()?;
         let a = create.one(A(vec![]));
-        let b = create.one(A(vec![Key::NULL, Key::NULL, Key::NULL]));
-        let c = create.one(A(vec![Key::NULL, Key::NULL, a, b]));
+        let b = create.one(A(vec![a, a, Key::NULL]));
+        create.one(A(vec![Key::NULL, Key::NULL, a, b]));
         create.resolve();
 
-        let mut query = dabatase
-            .query::<&A>()?
-            .join::<(), _, _>(|by, a| by.keys(a.0.iter().cloned()));
+        let mut query = database.query::<&A>()?;
+        assert_eq!(query.count(), 3);
+        let mut by = By::new();
+        assert_eq!(by.len(), 0);
+        query.each(|a| by.keys(a.0.iter().cloned()));
+        assert_eq!(query.count_by(&by), 4);
+        assert_eq!(by.len(), 7);
+
+        let mut query = database.query::<Key>()?;
+        assert_eq!(query.count(), 3);
+        let sum = query.fold_by(&mut by, 0, |sum, _, item| match item {
+            Ok(key) if key == a || key == b => sum + 1,
+            _ => sum,
+        });
+        assert_eq!(by.len(), 0);
+        assert_eq!(sum, 4);
+
         Ok(())
     }
 
@@ -562,14 +630,13 @@ mod tests {
             a = create.one((A(i), CopyTo(a)));
         }
         create.resolve();
-        database
-            .query::<(&A, &CopyTo)>()?
-            .join::<&mut A, _, _>(|by, (a, copy)| by.pair(copy.0, a.0))?
-            .each(|(value, item)| {
-                if let Ok(item) = item {
-                    item.0 = value
-                }
-            });
+
+        let mut sources = database.query::<(&A, &CopyTo)>()?;
+        let mut targets = database.query::<&mut A>()?;
+        let mut by = By::new();
+        sources.each(|(a, copy)| by.pair(copy.0, a.0));
+        targets.each_by_ok(&mut by, |value, a| a.0 = value);
+        // TODO: Add assertions.
         Ok(())
     }
 
@@ -581,26 +648,22 @@ mod tests {
         impl Datum for CopyFrom {}
 
         let database = Database::new();
-        let mut a = database.create()?.one(A(1));
+        let a = database.create()?.one(A(1));
         let mut create = database.create()?;
         for i in 0..100 {
-            a = create.one((A(i), CopyFrom(a)));
+            create.one((A(i), CopyFrom(a)));
         }
-
         create.resolve();
-        database
-            .query::<(Key, &CopyFrom)>()?
-            .join::<&A, _, _>(|by, (key, copy)| by.pair(copy.0, key))?
-            .join::<&mut A, _, _>(|by, (key, item)| {
-                if let Ok(item) = item {
-                    by.pair(key, item.0);
-                }
-            })?
-            .each(|(value, item)| {
-                if let Ok(item) = item {
-                    item.0 = value
-                }
-            });
+
+        let mut copies = database.query::<(Key, &CopyFrom)>()?;
+        let mut sources = database.query::<&A>()?;
+        let mut targets = database.query::<&mut A>()?;
+        let mut by_source = By::new();
+        let mut by_target = By::new();
+        copies.each(|(key, copy)| by_source.pair(copy.0, key));
+        sources.each_by_ok(&mut by_source, |target, a| by_target.pair(target, a.0));
+        targets.each_by_ok(&mut by_target, |value, a| a.0 = value);
+        // TODO: Add assertions.
         Ok(())
     }
 
@@ -621,21 +684,16 @@ mod tests {
             b = c;
         }
         create.resolve();
-        database
-            .query::<(&A, &Swap)>()?
-            .join::<&mut A, _, _>(|by, (a, copy)| by.pair(copy.0, (copy.1, a.0)))?
-            .join::<&mut A, _, _>(|by, ((key, value), item)| {
-                if let Ok(a) = item {
-                    by.pair(key, a.0);
-                    a.0 = value;
-                }
-            })?
-            .each(|(value, item)| {
-                if let Ok(item) = item {
-                    item.0 = value
-                }
-            });
 
+        let mut swaps = database.query::<&Swap>()?;
+        let mut sources = database.query::<&A>()?;
+        let mut targets = database.query::<&mut A>()?;
+        let mut by_source = By::new();
+        let mut by_target = By::new();
+        swaps.each(|swap| by_source.pairs([(swap.0, swap.1), (swap.1, swap.0)]));
+        sources.each_by_ok(&mut by_source, |target, a| by_target.pair(target, a.0));
+        targets.each_by_ok(&mut by_target, |value, a| a.0 = value);
+        // TODO: Add assertions.
         Ok(())
     }
 }
