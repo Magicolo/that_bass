@@ -1,11 +1,9 @@
-use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
-
 use crate::{
     key::{Key, Keys},
     resources::Resources,
-    table::{self, Store, Table, Tables},
+    table::{self, Table, Tables},
 };
-use std::{num::NonZeroUsize, ops::Range, sync::atomic::Ordering::*};
+use std::{num::NonZeroUsize, ops::Range};
 
 pub struct Database {
     keys: Keys,
@@ -37,26 +35,16 @@ impl Database {
         &self.resources
     }
 
-    #[inline]
-    pub(crate) const fn decompose_pending(pending: u64) -> (u32, u32) {
-        ((pending >> 32) as u32, pending as u32)
-    }
-
-    #[inline]
-    pub(crate) const fn recompose_pending(begun: u32, ended: u32) -> u64 {
-        ((begun as u64) << 32) | (ended as u64)
-    }
-
-    pub(crate) fn add_to_table(
-        &self,
-        keys: &[Key],
-        table: &Table,
-        initialize: impl FnOnce(Range<usize>, &[Store]),
-    ) {
-        let inner = table.inner.upgradable_read();
-        let (index, inner) = Self::add_to_reserve(keys.len() as _, inner);
-        self.add_to_resolve(keys, index, table, &inner, initialize);
-    }
+    // pub(crate) fn add_to_table(
+    //     &self,
+    //     keys: &[Key],
+    //     table: &Table,
+    //     initialize: impl FnOnce(Range<usize>, &table::Inner),
+    // ) {
+    //     let inner = table.inner.upgradable_read();
+    //     let (index, inner) = Self::add_to_reserve(keys.len() as _, inner);
+    //     self.add_to_resolve(keys, index, table, &inner, initialize);
+    // }
 
     pub(crate) fn remove_from_table(&self, table: &Table, rows: &[u32], range: Range<u32>) {
         let mut inner = table.inner.write();
@@ -64,178 +52,181 @@ impl Database {
     }
 
     /// Can be used to add or remove data associated with a key.
-    pub(crate) fn move_to_table(
-        &self,
-        key: Key,
-        target_index: u32,
-        mut initialize: impl FnMut(usize, &Store),
-    ) -> Option<()> {
-        let target_table = self.tables.get(target_index as usize)?;
-        let (slot, indices, mut source_write, target_upgrade) = loop {
-            let slot = self.keys.get(key).ok()?;
-            let indices = slot.indices();
-            let source_table = self.tables.get(indices.0 as usize)?;
+    // pub(crate) fn move_to_table(
+    //     &self,
+    //     keys: &[Key],
+    //     source: (&Table, &mut table::Inner),
+    //     target: &Table,
+    //     mut initialize: impl FnOnce(Range<usize>, &[NonNull<()>]),
+    // ) -> Option<()> {
+    //     let (slot, indices, mut source_write, target_upgrade) = loop {
+    //         let slot = self.keys.get(keys).ok()?;
+    //         let indices = slot.indices();
+    //         let source_table = self.tables.get(indices.0 as usize)?;
 
-            // If locks are always taken in order (lower index first), there can not be a deadlock between move operations.
-            // TODO: Defer the operation if a local deadlock is detected...
-            let (source_write, target_upgrade) = if source_table.index() < target_table.index() {
-                let left = source_table.inner.write();
-                let right = target_table.inner.upgradable_read();
-                (left, right)
-            } else if source_table.index() > target_table.index() {
-                let right = target_table.inner.upgradable_read();
-                let left = source_table.inner.write();
-                (left, right)
-            } else {
-                // No move is needed.
-                return Some(());
-            };
+    //         // If locks are always taken in order (lower index first), there can not be a deadlock between move operations.
+    //         // TODO: Defer the operation if a local deadlock is detected...
+    //         let (source_write, target_upgrade) = if source_table.index() < target.index() {
+    //             let left = source_table.inner.write();
+    //             let right = target.inner.upgradable_read();
+    //             (left, right)
+    //         } else if source_table.index() > target.index() {
+    //             let right = target.inner.upgradable_read();
+    //             let left = source_table.inner.write();
+    //             (left, right)
+    //         } else {
+    //             // No move is needed.
+    //             return Some(());
+    //         };
 
-            // Check the indices while holding the source table lock to ensure that the key wasn't moved.
-            if indices == slot.indices() {
-                break (slot, indices, source_write, target_upgrade);
-            }
-        };
+    //         // Check the indices while holding the source table lock to ensure that the key wasn't moved.
+    //         if indices == slot.indices() {
+    //             break (slot, indices, source_write, target_upgrade);
+    //         }
+    //     };
 
-        let last_index = Self::remove_from_reserve(&mut source_write, 1);
-        let (index, target_read) = Self::add_to_reserve(1, target_upgrade);
-        let start = index as usize;
+    //     let last_index = Self::remove_from_reserve(&mut source_write, 1);
+    //     let (index, target_read) = Self::add_to_reserve(1, target_upgrade);
+    //     let start = index as usize;
 
-        fn drop_or_squash(source: u32, target: u32, store: &mut Store) {
-            if source == target {
-                unsafe { store.drop(target as _, NonZeroUsize::new_unchecked(1)) };
-            } else {
-                unsafe { store.squash(source as _, target as _, NonZeroUsize::new_unchecked(1)) };
-            }
-        }
+    //     fn drop_or_squash(source: u32, target: u32, store: &mut Store) {
+    //         if source == target {
+    //             unsafe { store.drop(target as _, NonZeroUsize::new_unchecked(1)) };
+    //         } else {
+    //             // TODO: Update the `source` slot.
+    //             unsafe { store.squash(source as _, target as _, NonZeroUsize::new_unchecked(1)) };
+    //         }
+    //     }
 
-        let mut store_indices = (0, 0);
-        loop {
-            match (
-                source_write.stores.get_mut(store_indices.0),
-                target_read.stores.get(store_indices.1),
-            ) {
-                (Some(source_store), Some(target_store)) => {
-                    let source_identifier = source_store.meta().identifier();
-                    let target_identifier = target_store.meta().identifier();
-                    if source_identifier == target_identifier {
-                        store_indices.0 += 1;
-                        store_indices.1 += 1;
-                        unsafe {
-                            Store::copy(
-                                (source_store, indices.1 as _),
-                                (target_store, start),
-                                NonZeroUsize::new_unchecked(1),
-                            );
-                        };
-                        drop_or_squash(last_index, indices.1, source_store);
-                    } else if source_identifier < target_identifier {
-                        store_indices.0 += 1;
-                        drop_or_squash(last_index, indices.1, source_store);
-                    } else {
-                        store_indices.1 += 1;
-                        initialize(start, target_store);
-                    }
-                }
-                (Some(source_store), None) => {
-                    store_indices.0 += 1;
-                    drop_or_squash(last_index, indices.1, source_store);
-                }
-                (None, Some(target_store)) => {
-                    store_indices.1 += 1;
-                    initialize(start, target_store);
-                }
-                (None, None) => break,
-            }
-        }
+    //     let mut store_indices = (0, 0);
+    //     let source_stores = &mut source_write.stores;
+    //     let target_stores = &target_read.stores;
+    //     loop {
+    //         match (
+    //             source_stores.get_mut(store_indices.0),
+    //             target_stores.get(store_indices.1),
+    //         ) {
+    //             (Some(source_store), Some(target_store)) => {
+    //                 let source_identifier = source_store.meta().identifier();
+    //                 let target_identifier = target_store.meta().identifier();
+    //                 if source_identifier == target_identifier {
+    //                     store_indices.0 += 1;
+    //                     store_indices.1 += 1;
+    //                     unsafe {
+    //                         Store::copy(
+    //                             (source_store, indices.1 as _),
+    //                             (target_store, start),
+    //                             NonZeroUsize::new_unchecked(1),
+    //                         );
+    //                     };
+    //                     // TODO: Update the `last_index` slot.
+    //                     drop_or_squash(last_index, indices.1, source_store);
+    //                 } else if source_identifier < target_identifier {
+    //                     store_indices.0 += 1;
+    //                     // TODO: Update the `last_index` slot.
+    //                     drop_or_squash(last_index, indices.1, source_store);
+    //                 } else {
+    //                     store_indices.1 += 1;
+    //                 }
+    //             }
+    //             (Some(source_store), None) => {
+    //                 store_indices.0 += 1;
+    //                 drop_or_squash(last_index, indices.1, source_store);
+    //             }
+    //             (None, Some(_)) => store_indices.1 += 1,
+    //             (None, None) => break,
+    //         }
+    //     }
 
-        if last_index == indices.1 {
-            unsafe {
-                let keys = &mut *target_read.keys.get();
-                *keys.get_unchecked_mut(start) = key;
-                slot.update(target_index, start as _);
-            }
-        } else {
-            let source_keys = source_write.keys.get_mut();
-            unsafe {
-                let target_keys = &mut *target_read.keys.get();
-                let last_key = *source_keys.get_unchecked(last_index as usize);
-                *source_keys.get_unchecked_mut(indices.1 as usize) = last_key;
-                *target_keys.get_unchecked_mut(start) = key;
-                slot.update(target_index, start as _);
-                self.keys
-                    .get_unchecked(last_key)
-                    .update(indices.0, indices.1);
-            }
-        }
+    //     initialize(start..start + 1, target_stores);
 
-        Self::add_to_commit(1, &target_read);
-        drop(source_write);
-        Some(())
-    }
+    //     if last_index == indices.1 {
+    //         unsafe {
+    //             let keys = &mut *target_read.keys.get();
+    //             *keys.get_unchecked_mut(start) = keys;
+    //             slot.update(target.index(), start as _);
+    //         }
+    //     } else {
+    //         let source_keys = source_write.keys.get_mut();
+    //         unsafe {
+    //             let target_keys = &mut *target_read.keys.get();
+    //             let last_key = *source_keys.get_unchecked(last_index as usize);
+    //             *source_keys.get_unchecked_mut(indices.1 as usize) = last_key;
+    //             *target_keys.get_unchecked_mut(start) = keys;
+    //             slot.update(target.index(), start as _);
+    //             self.keys
+    //                 .get_unchecked(last_key)
+    //                 .update(indices.0, indices.1);
+    //         }
+    //     }
 
-    fn add_to_reserve<'d>(
-        reserve: u32,
-        inner: RwLockUpgradableReadGuard<'d, table::Inner>,
-    ) -> (u32, RwLockReadGuard<'d, table::Inner>) {
-        let (index, _) = {
-            let add = Self::recompose_pending(reserve, 0);
-            let pending = inner.pending.fetch_add(add, AcqRel);
-            Self::decompose_pending(pending)
-        };
-        // There can not be more than `u32::MAX` keys at a given time.
-        assert!(index < u32::MAX - reserve);
+    //     Self::add_to_commit(1, &target_read);
+    //     drop(source_write);
+    //     Some(())
+    // }
 
-        let capacity = index as usize + reserve as usize;
-        if capacity <= inner.capacity() {
-            (index, RwLockUpgradableReadGuard::downgrade(inner))
-        } else {
-            let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
-            inner.grow(capacity);
-            (index, RwLockWriteGuard::downgrade(inner))
-        }
-    }
+    // fn add_to_reserve<'d>(
+    //     reserve: u32,
+    //     inner: RwLockUpgradableReadGuard<'d, table::Inner>,
+    // ) -> (u32, RwLockReadGuard<'d, table::Inner>) {
+    //     let (index, _) = {
+    //         let add = Self::recompose_pending(reserve, 0);
+    //         let pending = inner.pending.fetch_add(add, AcqRel);
+    //         Self::decompose_pending(pending)
+    //     };
+    //     // There can not be more than `u32::MAX` keys at a given time.
+    //     assert!(index < u32::MAX - reserve);
 
-    fn add_to_resolve(
-        &self,
-        keys: &[Key],
-        index: u32,
-        table: &Table,
-        inner: &table::Inner,
-        initialize: impl FnOnce(Range<usize>, &[Store]),
-    ) {
-        let start = index as usize;
-        let end = start + keys.len();
-        unsafe { (&mut **inner.keys.get()).get_unchecked_mut(start..end) }.copy_from_slice(keys);
-        initialize(start..end, inner.stores());
-        for (i, &key) in keys.iter().enumerate() {
-            let slot = unsafe { self.keys.get_unchecked(key) };
-            slot.initialize(key.generation(), table.index(), index + i as u32);
-        }
-        Self::add_to_commit(keys.len() as _, inner);
-    }
+    //     let capacity = index as usize + reserve as usize;
+    //     if capacity <= inner.capacity() {
+    //         (index, RwLockUpgradableReadGuard::downgrade(inner))
+    //     } else {
+    //         let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+    //         inner.grow(capacity);
+    //         (index, RwLockWriteGuard::downgrade(inner))
+    //     }
+    // }
 
-    fn add_to_commit(reserve: u32, inner: &table::Inner) {
-        let add = Self::recompose_pending(0, reserve);
-        let pending = inner.pending.fetch_add(add, AcqRel);
-        let (begun, ended) = Self::decompose_pending(pending);
-        debug_assert!(begun >= ended);
-        if begun == ended + reserve {
-            inner.count.fetch_max(begun, Relaxed);
-        }
-    }
+    // fn add_to_resolve(
+    //     &self,
+    //     keys: &[Key],
+    //     index: u32,
+    //     table: &Table,
+    //     inner: &table::Inner,
+    //     initialize: impl FnOnce(Range<usize>, &table::Inner),
+    // ) {
+    //     let start = index as usize;
+    //     let end = start + keys.len();
+    //     unsafe { (&mut **inner.keys.get()).get_unchecked_mut(start..end) }.copy_from_slice(keys);
+    //     initialize(start..end, inner);
+    //     for (i, &key) in keys.iter().enumerate() {
+    //         let slot = unsafe { self.keys.get_unchecked(key) };
+    //         slot.initialize(key.generation(), table.index(), index + i as u32);
+    //     }
+    //     Self::add_to_commit(keys.len() as _, inner);
+    // }
+
+    // fn add_to_commit(reserve: u32, inner: &table::Inner) {
+    //     let add = Self::recompose_pending(0, reserve);
+    //     let pending = inner.pending.fetch_add(add, AcqRel);
+    //     let (begun, ended) = Self::decompose_pending(pending);
+    //     debug_assert!(begun >= ended);
+    //     if begun == ended + reserve {
+    //         inner.count.fetch_max(begun, Relaxed);
+    //     }
+    // }
 
     fn remove_from_reserve(inner: &mut table::Inner, count: u32) -> u32 {
         let table_count = inner.count.get_mut();
         let table_pending = inner.pending.get_mut();
-        let (begun, ended) = Self::decompose_pending(*table_pending);
+        let (begun, ended) = Table::decompose_pending(*table_pending);
 
         // Sanity checks. If this is not the case, there is a bug in the locking logic.
         debug_assert_eq!(begun, ended);
         debug_assert_eq!(begun, *table_count);
         debug_assert!(*table_count >= count);
         *table_count -= count;
-        *table_pending = Self::recompose_pending(begun - 1, ended - 1);
+        *table_pending = Table::recompose_pending(begun - 1, ended - 1);
         *table_count
     }
 

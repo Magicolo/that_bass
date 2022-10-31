@@ -1,17 +1,16 @@
 use crate::{
     database::Database,
     key::Key,
-    table::{Store, Table},
-    Datum, Error, Meta,
+    resources::Global,
+    table::Table,
+    template::{ApplyContext, DeclareContext, InitializeContext, Template},
+    Error,
 };
-use std::{any::TypeId, collections::HashSet, sync::Arc};
-
-pub unsafe trait Template: 'static {
-    type State: Send + Sync;
-    fn declare(context: Context) -> Result<(), Error>;
-    fn initialize(table: &Table) -> Result<Self::State, Error>;
-    unsafe fn apply(self, state: &Self::State, row: usize, stores: &[Store]);
-}
+use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
+use std::{
+    ptr::NonNull,
+    sync::{atomic::Ordering::*, Arc},
+};
 
 pub struct Create<'d, T: Template> {
     database: &'d Database,
@@ -19,41 +18,39 @@ pub struct Create<'d, T: Template> {
     table: Arc<Table>,
     keys: Vec<Key>,
     templates: Vec<T>,
+    pointers: Vec<NonNull<()>>,
 }
 
-pub struct Context<'a> {
-    types: &'a mut HashSet<TypeId>,
-    metas: &'a mut Vec<&'static Meta>,
+struct Share<T: Template>(Arc<T::State>, Arc<Table>);
+
+impl<T: Template> Share<T> {
+    pub fn from(database: &Database) -> Result<Global<Share<T>>, Error> {
+        database.resources().try_global(|| {
+            let metas = DeclareContext::metas::<T>()?;
+            let table = database.tables().find_or_add(metas, 0);
+            let indices = table
+                .types()
+                .enumerate()
+                .map(|pair| (pair.1, pair.0))
+                .collect();
+            let context = InitializeContext(&indices);
+            let state = Arc::new(T::initialize(context)?);
+            Ok(Share::<T>(state, table))
+        })
+    }
 }
 
 impl Database {
     pub fn create<T: Template>(&self) -> Result<Create<T>, Error> {
-        struct Shared<T: Template>(Arc<T::State>, Arc<Table>);
-
-        let shared = self.resources().try_global(|| {
-            let mut metas = Vec::new();
-            let context = Context {
-                types: &mut HashSet::new(),
-                metas: &mut metas,
-            };
-            T::declare(context)?;
-            let mut types = HashSet::new();
-            if metas.iter().all(|meta| types.insert(meta.identifier())) {
-                metas.sort_unstable_by_key(|meta| meta.identifier());
-                let table = self.tables().find_or_add(metas, 0);
-                let state = Arc::new(T::initialize(&table)?);
-                Ok(Shared::<T>(state, table))
-            } else {
-                Err(Error::DuplicateMeta)
-            }
-        })?;
-        let Shared(state, table) = &*shared.read();
+        let share = Share::<T>::from(self)?;
+        let share = share.read();
         Ok(Create {
             database: self,
-            state: state.clone(),
-            table: table.clone(),
+            state: share.0.clone(),
+            table: share.1.clone(),
             keys: Vec::new(),
             templates: Vec::new(),
+            pointers: Vec::new(),
         })
     }
 }
@@ -74,11 +71,10 @@ impl<'d, T: Template> Create<'d, T> {
     }
 
     #[inline]
-    pub fn clones(&mut self, count: usize, template: T) -> &[Key]
+    pub fn clones(&mut self, count: usize, template: &T) -> &[Key]
     where
         T: Clone,
     {
-        // TODO: Do not clone the last template.
         self.with(count, || template.clone())
     }
 
@@ -105,16 +101,31 @@ impl<'d, T: Template> Create<'d, T> {
     }
 
     #[inline]
+    pub fn clone(&mut self, template: &T) -> Key
+    where
+        T: Clone,
+    {
+        self.one(template.clone())
+    }
+
+    #[inline]
+    pub fn default(&mut self) -> Key
+    where
+        T: Default,
+    {
+        self.one(T::default())
+    }
+
+    #[inline]
     pub fn with_n<const N: usize>(&mut self, mut with: impl FnMut() -> T) -> [Key; N] {
         self.all_n([(); N].map(|_| with()))
     }
 
     #[inline]
-    pub fn clones_n<const N: usize>(&mut self, template: T) -> [Key; N]
+    pub fn clones_n<const N: usize>(&mut self, template: &T) -> [Key; N]
     where
         T: Clone,
     {
-        // TODO: Do not clone the last template.
         self.with_n(|| template.clone())
     }
 
@@ -130,15 +141,68 @@ impl<'d, T: Template> Create<'d, T> {
     ///
     /// In order to prevent deadlocks, **do not call this method while using a `Query`** unless you can
     /// guarantee that there are no overlaps in table usage between this `Create` and the `Query`.
-    #[inline]
     pub fn resolve(&mut self) {
-        apply(
-            self.database,
-            &self.table,
-            &*self.state,
-            &self.keys[..self.templates.len()],
-            self.templates.drain(..),
-        )
+        let count = self.templates.len();
+        if count == 0 {
+            return;
+        }
+
+        let inner = self.table.inner.upgradable_read();
+        // Ensure that the table's capacity.
+        let (start, inner) = {
+            let (index, _) = {
+                let add = Table::recompose_pending(count as _, 0);
+                let pending = inner.pending.fetch_add(add, AcqRel);
+                Table::decompose_pending(pending)
+            };
+            // There can not be more than `u32::MAX` keys at a given time.
+            assert!(index < u32::MAX - count as u32);
+
+            let capacity = index as usize + count;
+            if capacity <= inner.capacity() {
+                (index as usize, RwLockUpgradableReadGuard::downgrade(inner))
+            } else {
+                let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+                inner.grow(capacity);
+                (index as usize, RwLockWriteGuard::downgrade(inner))
+            }
+        };
+        let end = start + count;
+
+        // Initialize table keys.
+        unsafe { (&mut **inner.keys.get()).get_unchecked_mut(start..end) }
+            .copy_from_slice(&self.keys[..count]);
+
+        // Initialize table rows.
+        self.pointers.extend(
+            inner
+                .stores()
+                .iter()
+                // SAFETY: Since this row is not yet observable by any thread but this one, no need to take locks.
+                .map(|store| unsafe { *store.data().data_ptr() }),
+        );
+        let context = ApplyContext(&self.pointers, 0);
+        for (i, template) in self.templates.drain(..).enumerate() {
+            unsafe { template.apply(&self.state, context.with(start + i)) };
+
+            let key = unsafe { *self.keys.get_unchecked(i) };
+            let slot = unsafe { self.database.keys().get_unchecked(key) };
+            slot.initialize(key.generation(), self.table.index(), (start + i) as u32);
+        }
+        self.pointers.clear();
+
+        // Try to commit the table count.
+        let add = Table::recompose_pending(0, count as _);
+        let pending = inner.pending.fetch_add(add, AcqRel);
+        let (begun, ended) = Table::decompose_pending(pending);
+        debug_assert!(begun >= ended);
+        if begun == ended + count as u32 {
+            inner.count.fetch_max(begun, Relaxed);
+        }
+
+        // Sanity checks.
+        debug_assert!(self.templates.is_empty());
+        debug_assert!(self.pointers.is_empty());
     }
 
     #[inline]
@@ -155,91 +219,20 @@ impl<T: Template> Drop for Create<'_, T> {
     }
 }
 
-impl Context<'_> {
-    pub fn declare(&mut self, meta: &'static Meta) -> Result<(), Error> {
-        if self.types.insert(meta.identifier()) {
-            self.metas.push(meta);
-            Ok(())
-        } else {
-            Err(Error::DuplicateMeta)
-        }
-    }
-
-    pub fn own(&mut self) -> Context {
-        Context {
-            types: self.types,
-            metas: self.metas,
-        }
+pub(crate) fn is<T: Template>(table: &Table, database: &Database) -> bool {
+    match Share::<T>::from(database) {
+        Ok(share) => share.read().1.index() == table.index(),
+        Err(_) => false,
     }
 }
 
-unsafe impl<D: Datum> Template for D {
-    type State = usize;
-
-    fn declare(mut context: Context) -> Result<(), Error> {
-        context.declare(D::meta())
+pub(crate) fn has<T: Template>(table: &Table, database: &Database) -> bool {
+    match Share::<T>::from(database) {
+        Ok(shared) => shared
+            .read()
+            .1
+            .types()
+            .all(|identifier| table.has_with(identifier)),
+        Err(_) => false,
     }
-
-    fn initialize(table: &Table) -> Result<Self::State, Error> {
-        table.store::<D>()
-    }
-
-    #[inline]
-    unsafe fn apply(self, &state: &Self::State, row: usize, stores: &[Store]) {
-        unsafe { stores.get_unchecked(state).set(row, self) };
-    }
-}
-
-unsafe impl Template for () {
-    type State = ();
-    fn declare(_: Context) -> Result<(), Error> {
-        Ok(())
-    }
-    fn initialize(_: &Table) -> Result<Self::State, Error> {
-        Ok(())
-    }
-    #[inline]
-    unsafe fn apply(self, _: &Self::State, _: usize, _: &[Store]) {}
-}
-
-unsafe impl<T1: Template, T2: Template> Template for (T1, T2) {
-    type State = (T1::State, T2::State);
-
-    fn declare(mut context: Context) -> Result<(), Error> {
-        T1::declare(context.own())?;
-        T2::declare(context)
-    }
-
-    fn initialize(table: &Table) -> Result<Self::State, Error> {
-        Ok((T1::initialize(table)?, T2::initialize(table)?))
-    }
-
-    #[inline]
-    unsafe fn apply(self, state: &Self::State, row: usize, stores: &[Store]) {
-        self.0.apply(&state.0, row, stores);
-        self.1.apply(&state.1, row, stores);
-    }
-}
-
-fn apply<T: Template, I: ExactSizeIterator<Item = T>>(
-    database: &Database,
-    table: &Table,
-    state: &T::State,
-    keys: &[Key],
-    mut templates: I,
-) {
-    if keys.len() == 0 {
-        return;
-    }
-
-    debug_assert_eq!(templates.len(), keys.len());
-    database.add_to_table(keys, table, |range, stores| {
-        for index in range {
-            match templates.next() {
-                Some(template) => unsafe { template.apply(state, index, stores) },
-                None => unreachable!(),
-            }
-        }
-    });
-    debug_assert!(templates.next().is_none());
 }

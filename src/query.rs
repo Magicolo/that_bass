@@ -2,6 +2,7 @@ use crate::{
     database::Database,
     filter::Filter,
     key::{Key, Slot},
+    row::{Access, ChunkContext, DeclareContext, InitializeContext, ItemContext, Row},
     table::{self, Table},
     Datum, Error,
 };
@@ -10,55 +11,37 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     marker::PhantomData,
     mem::swap,
+    ops::ControlFlow::{self, *},
     ptr::NonNull,
-    slice::{from_raw_parts, from_raw_parts_mut},
 };
 
+// TODO: Share some state... But how to `update` without locking when accessing `states`?
 pub struct Query<'d, R: Row, F = (), I = Item> {
     database: &'d Database,
     index: usize,
     indices: HashMap<u32, u32>, // From table index to state index.
-    done: VecDeque<u32>,
-    pending: VecDeque<u32>,
     states: Vec<(R::State, &'d Table, Vec<(usize, Access)>)>,
     accesses: Vec<Access>,
+    done: VecDeque<u32>,
+    pending: VecDeque<u32>,
     pointers: Vec<NonNull<()>>,
-    filter: F,
-    _marker: PhantomData<fn(I)>,
+    _marker: PhantomData<fn(F, I)>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Access {
-    Read(TypeId),
-    Write(TypeId),
-}
-
-pub struct Read<D>(usize, PhantomData<D>);
-pub struct Write<D>(usize, PhantomData<D>);
 pub struct Item;
 pub struct Chunk;
-
-pub struct DeclareContext<'a>(&'a mut HashSet<Access>);
-pub struct InitializeContext<'a>(&'a HashMap<Access, usize>);
-pub struct ItemContext<'a, 'b>(&'a [Key], &'b [NonNull<()>], usize);
-pub struct ChunkContext<'a, 'b>(&'a [Key], &'b [NonNull<()>]);
 
 pub struct By<'d, V> {
     pairs: VecDeque<(Key, V)>,
     slots: Vec<Vec<(Key, V, &'d Slot)>>,
 }
 
-pub unsafe trait Row {
-    type State;
-    type Read: Row;
-    type Item<'a>;
-    type Chunk<'a>;
-
-    fn declare(context: DeclareContext) -> Result<(), Error>;
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error>;
-    fn read(state: Self::State) -> <Self::Read as Row>::State;
-    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a>;
-    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a>;
+struct Errors<'d, 'a, V> {
+    database: &'d Database,
+    indices: &'a HashMap<u32, u32>,
+    pending: &'a mut VecDeque<u32>,
+    pairs: &'a mut VecDeque<(Key, V)>,
+    slots: &'a mut [Vec<(Key, V, &'d Slot)>],
 }
 
 impl Database {
@@ -75,7 +58,6 @@ impl Database {
             accesses: accesses.into_iter().collect(),
             pointers: Vec::new(),
             index: 0,
-            filter: (),
             _marker: PhantomData,
         })
     }
@@ -92,7 +74,6 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             accesses: self.accesses,
             pointers: self.pointers,
             index: self.index,
-            filter: self.filter,
             _marker: PhantomData,
         }
     }
@@ -123,17 +104,16 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             accesses: self.accesses,
             pointers: self.pointers,
             index: self.index,
-            filter: self.filter,
             _marker: PhantomData,
         }
     }
 
-    pub fn filter<G: Filter>(mut self, filter: G) -> Query<'d, R, (F, G), I> {
+    pub fn filter<G: Filter>(mut self) -> Query<'d, R, (F, G), I> {
         debug_assert!(self.done.is_empty());
         debug_assert!(self.pointers.is_empty());
 
         let indices = self.states.iter().filter_map(|(_, table, _)| {
-            if filter.filter(table) {
+            if G::filter(table, self.database) {
                 self.indices.get(&table.index()).copied()
             } else {
                 self.indices.remove(&table.index());
@@ -152,14 +132,13 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             accesses: self.accesses,
             pointers: self.pointers,
             index: self.index,
-            filter: (self.filter, filter),
             _marker: PhantomData,
         }
     }
 
     pub(crate) fn update(&mut self) {
         let tables = self.database.tables();
-        while let Some(table) = tables.get(self.index) {
+        while let Ok(table) = tables.get(self.index) {
             self.index += 1;
             let _ = self.try_add(table);
         }
@@ -168,9 +147,16 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
     pub(crate) fn try_guards<S>(
         &mut self,
         state: S,
-        mut fold: impl FnMut(S, u32, &R::State, &[NonNull<()>], &Table, &table::Inner) -> Result<S, S>,
+        mut fold: impl FnMut(
+            S,
+            u32,
+            &R::State,
+            &[NonNull<()>],
+            &Table,
+            &table::Inner,
+        ) -> ControlFlow<S, S>,
     ) -> S {
-        let mut fold = |mut state: S| -> Result<S, S> {
+        let mut fold = |mut state: S| -> ControlFlow<S, S> {
             for _ in 0..self.pending.len() {
                 let index = unsafe { self.pending.pop_front().unwrap_unchecked() };
                 state = match self.try_lock(state, index, |state, row, pointers, table, inner| {
@@ -193,15 +179,15 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     fold(state, index, row, pointers, table, inner)
                 })?;
             }
-            Ok(state)
+            Continue(state)
         };
 
         match fold(state) {
-            Ok(state) => {
+            Continue(state) => {
                 swap(&mut self.done, &mut self.pending);
                 state
             }
-            Err(state) => {
+            Break(state) => {
                 // Fold was interrupted, so move remaining indices in `pending` while preserving the order of the indices in `done`.
                 if self.done.len() < self.pending.len() {
                     while let Some(index) = self.done.pop_back() {
@@ -373,7 +359,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
     }
 
     fn try_add(&mut self, table: &'d Table) -> Result<(), Error> {
-        if self.filter.filter(table) {
+        if F::filter(table, self.database) {
             let mut indices = Vec::with_capacity(self.accesses.len());
             for &access in self.accesses.iter() {
                 indices.push((table.store_with(access.identifier())?, access));
@@ -387,7 +373,6 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 .enumerate()
                 .map(|(i, &(_, access))| (access, i))
                 .collect();
-
             let state = R::initialize(InitializeContext(&map))?;
             let index = self.states.len() as _;
             self.pending.push_back(index);
@@ -426,7 +411,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     }
 
     #[inline]
-    pub fn try_fold<S, G: FnMut(S, R::Item<'_>) -> Result<S, S>>(
+    pub fn try_fold<S, G: FnMut(S, R::Item<'_>) -> ControlFlow<S, S>>(
         &mut self,
         state: S,
         mut fold: G,
@@ -437,19 +422,19 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             for i in 0..inner.count() {
                 state = fold(state, R::item(row, context.with(i as _)))?;
             }
-            Ok(state)
+            Continue(state)
         })
     }
 
     #[inline]
-    pub fn try_fold_by<V, S, G: FnMut(S, V, Result<R::Item<'_>, Error>) -> Result<S, S>>(
+    pub fn try_fold_by<V, S, G: FnMut(S, V, Result<R::Item<'_>, Error>) -> ControlFlow<S, S>>(
         &mut self,
         by: &mut By<'d, V>,
         state: S,
         mut fold: G,
     ) -> S {
         let pending = self.pending.len();
-        let mut fold = |mut state: S| -> Result<S, S> {
+        let mut fold = |mut state: S| -> ControlFlow<S, S> {
             for (value, error) in self.process(by) {
                 state = fold(state, value, Err(error))?;
             }
@@ -467,7 +452,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                         by.pairs.push_back((key, value));
                     }
                 }
-                Ok(state)
+                Continue(state)
             });
 
             for (key, value) in by.pairs.drain(..) {
@@ -475,16 +460,16 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 state = self.try_find(key, |item| fold(old, value, item))?;
             }
 
-            Ok(state)
+            Continue(state)
         };
 
         match fold(state) {
-            Ok(state) => {
+            Continue(state) => {
                 debug_assert!(by.pairs.is_empty());
                 self.pending.drain(pending..);
                 state
             }
-            Err(state) => {
+            Break(state) => {
                 // Fold was interrupted.
                 by.pairs.clear();
                 for index in self.pending.drain(pending..) {
@@ -559,7 +544,10 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
 
     #[inline]
     pub fn try_each<G: FnMut(R::Item<'_>) -> bool>(&mut self, mut each: G) {
-        self.try_fold((), |_, item| each(item).then_some(()).ok_or(()))
+        self.try_fold(
+            (),
+            |_, item| if each(item) { Continue(()) } else { Break(()) },
+        )
     }
 
     #[inline]
@@ -655,37 +643,6 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     }
 }
 
-struct Errors<'d, 'a, V> {
-    database: &'d Database,
-    indices: &'a HashMap<u32, u32>,
-    pending: &'a mut VecDeque<u32>,
-    pairs: &'a mut VecDeque<(Key, V)>,
-    slots: &'a mut [Vec<(Key, V, &'d Slot)>],
-}
-
-impl<V> Iterator for Errors<'_, '_, V> {
-    type Item = (V, Error);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while let Some((key, value)) = self.pairs.pop_front() {
-            match self.database.keys().get(key) {
-                Ok(slot) => match self.indices.get(&slot.table()) {
-                    Some(&index) => {
-                        let slots = unsafe { self.slots.get_unchecked_mut(index as usize) };
-                        if slots.len() == 0 {
-                            self.pending.push_back(index);
-                        }
-                        slots.push((key, value, slot));
-                    }
-                    None => return Some((value, Error::KeyNotInQuery(key))),
-                },
-                Err(error) => return Some((value, error)),
-            }
-        }
-        None
-    }
-}
-
 impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
     #[inline]
     pub fn count(&mut self) -> usize {
@@ -694,7 +651,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
     }
 
     #[inline]
-    pub fn try_fold<S, G: FnMut(S, R::Chunk<'_>) -> Result<S, S>>(
+    pub fn try_fold<S, G: FnMut(S, R::Chunk<'_>) -> ControlFlow<S, S>>(
         &mut self,
         state: S,
         mut fold: G,
@@ -712,6 +669,19 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
             fold(state, R::chunk(row, ChunkContext(inner.keys(), pointers)))
         })
     }
+
+    #[inline]
+    pub fn try_each<G: FnMut(R::Chunk<'_>) -> bool>(&mut self, mut each: G) {
+        self.try_fold(
+            (),
+            |_, item| if each(item) { Continue(()) } else { Break(()) },
+        )
+    }
+
+    #[inline]
+    pub fn each<G: FnMut(R::Chunk<'_>)>(&mut self, mut each: G) {
+        self.fold((), |_, item| each(item))
+    }
 }
 
 impl Access {
@@ -728,6 +698,7 @@ impl Access {
         Self::Read(self.identifier())
     }
 }
+
 impl DeclareContext<'_> {
     pub fn own(&mut self) -> DeclareContext<'_> {
         DeclareContext(self.0)
@@ -752,285 +723,6 @@ impl DeclareContext<'_> {
         } else {
             Err(Error::WriteWriteConflict)
         }
-    }
-}
-
-impl InitializeContext<'_> {
-    pub fn own(&self) -> Self {
-        Self(self.0)
-    }
-
-    pub fn read<D: Datum>(&self) -> Result<Read<D>, Error> {
-        let index = self.index(Access::Read(TypeId::of::<D>()))?;
-        Ok(Read(index, PhantomData))
-    }
-
-    pub fn write<D: Datum>(&self) -> Result<Write<D>, Error> {
-        let index = self.index(Access::Write(TypeId::of::<D>()))?;
-        Ok(Write(index, PhantomData))
-    }
-
-    fn index(&self, access: Access) -> Result<usize, Error> {
-        self.0.get(&access).copied().ok_or(Error::MissingStore)
-    }
-}
-
-impl<D> Write<D> {
-    pub fn read(self) -> Read<D> {
-        Read(self.0, PhantomData)
-    }
-}
-
-impl<'a> ItemContext<'a, '_> {
-    #[inline]
-    pub const fn own(&self) -> Self {
-        Self(self.0, self.1, self.2)
-    }
-
-    #[inline]
-    pub const fn with(&self, index: usize) -> Self {
-        Self(self.0, self.1, index)
-    }
-
-    #[inline]
-    pub fn key(&self) -> Key {
-        unsafe { *self.0.get_unchecked(self.2) }
-    }
-
-    #[inline]
-    pub fn read<D: Datum>(&self, state: &Read<D>) -> &'a D {
-        let data = unsafe { *self.1.get_unchecked(state.0) };
-        unsafe { &*data.as_ptr().cast::<D>().add(self.2) }
-    }
-
-    #[inline]
-    pub fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut D {
-        let data = unsafe { *self.1.get_unchecked(state.0) };
-        unsafe { &mut *data.as_ptr().cast::<D>().add(self.2) }
-    }
-}
-
-impl<'a> ChunkContext<'a, '_> {
-    #[inline]
-    pub const fn own(&self) -> Self {
-        Self(self.0, self.1)
-    }
-
-    #[inline]
-    pub const fn key(&self) -> &'a [Key] {
-        self.0
-    }
-
-    #[inline]
-    pub fn read<D: Datum>(&self, state: &Read<D>) -> &'a [D] {
-        let data = unsafe { *self.1.get_unchecked(state.0) };
-        unsafe { from_raw_parts(data.as_ptr().cast::<D>(), self.0.len()) }
-    }
-
-    #[inline]
-    pub fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut [D] {
-        let data = unsafe { *self.1.get_unchecked(state.0) };
-        unsafe { from_raw_parts_mut(data.as_ptr().cast::<D>(), self.0.len()) }
-    }
-}
-
-unsafe impl Row for Key {
-    type State = ();
-    type Read = Self;
-    type Item<'a> = Key;
-    type Chunk<'a> = &'a [Key];
-
-    fn declare(_: DeclareContext) -> Result<(), Error> {
-        Ok(())
-    }
-    fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
-        Ok(())
-    }
-    fn read(state: Self::State) -> <Self::Read as Row>::State {
-        state
-    }
-    fn item<'a>(_: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
-        context.key()
-    }
-    fn chunk<'a>(_: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
-        context.key()
-    }
-}
-
-unsafe impl<D: Datum> Row for &D {
-    type State = Read<D>;
-    type Read = Self;
-    type Item<'a> = &'a D;
-    type Chunk<'a> = &'a [D];
-
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
-        context.read::<D>()
-    }
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
-        context.read::<D>()
-    }
-    fn read(state: Self::State) -> <Self::Read as Row>::State {
-        state
-    }
-    #[inline]
-    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
-        context.read(state)
-    }
-    #[inline]
-    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
-        context.read(state)
-    }
-}
-
-unsafe impl<'b, D: Datum> Row for &'b mut D {
-    type State = Write<D>;
-    type Read = &'b D;
-    type Item<'a> = &'a mut D;
-    type Chunk<'a> = &'a mut [D];
-
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
-        context.write::<D>()
-    }
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
-        context.write::<D>()
-    }
-    fn read(state: Self::State) -> <Self::Read as Row>::State {
-        state.read()
-    }
-    #[inline]
-    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
-        context.write(state)
-    }
-    #[inline]
-    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
-        context.write(state)
-    }
-}
-
-unsafe impl Row for () {
-    type State = ();
-    type Read = ();
-    type Item<'a> = ();
-    type Chunk<'a> = ();
-
-    fn declare(_: DeclareContext) -> Result<(), Error> {
-        Ok(())
-    }
-    fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
-        Ok(())
-    }
-    fn read(_: Self::State) -> <Self::Read as Row>::State {
-        ()
-    }
-    #[inline]
-    fn item<'a>(_: &Self::State, _: ItemContext<'a, '_>) -> Self::Item<'a> {
-        ()
-    }
-    #[inline]
-    fn chunk<'a>(_: &Self::State, _: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
-        ()
-    }
-}
-
-unsafe impl<R1: Row> Row for (R1,) {
-    type State = (R1::State,);
-    type Read = (R1::Read,);
-    type Item<'a> = (R1::Item<'a>,);
-    type Chunk<'a> = (R1::Chunk<'a>,);
-
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
-        R1::declare(context.own())?;
-        Ok(())
-    }
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
-        Ok((R1::initialize(context.own())?,))
-    }
-    fn read(state: Self::State) -> <Self::Read as Row>::State {
-        (R1::read(state.0),)
-    }
-    #[inline]
-    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
-        (R1::item(&state.0, context.own()),)
-    }
-    #[inline]
-    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
-        (R1::chunk(&state.0, context.own()),)
-    }
-}
-
-unsafe impl<R1: Row, R2: Row> Row for (R1, R2) {
-    type State = (R1::State, R2::State);
-    type Read = (R1::Read, R2::Read);
-    type Item<'a> = (R1::Item<'a>, R2::Item<'a>);
-    type Chunk<'a> = (R1::Chunk<'a>, R2::Chunk<'a>);
-
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
-        R1::declare(context.own())?;
-        R2::declare(context.own())?;
-        Ok(())
-    }
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
-        Ok((
-            R1::initialize(context.own())?,
-            R2::initialize(context.own())?,
-        ))
-    }
-    fn read(state: Self::State) -> <Self::Read as Row>::State {
-        (R1::read(state.0), R2::read(state.1))
-    }
-    #[inline]
-    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
-        (
-            R1::item(&state.0, context.own()),
-            R2::item(&state.1, context.own()),
-        )
-    }
-    #[inline]
-    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
-        (
-            R1::chunk(&state.0, context.own()),
-            R2::chunk(&state.1, context.own()),
-        )
-    }
-}
-
-unsafe impl<R1: Row, R2: Row, R3: Row> Row for (R1, R2, R3) {
-    type State = (R1::State, R2::State, R3::State);
-    type Read = (R1::Read, R2::Read, R3::Read);
-    type Item<'a> = (R1::Item<'a>, R2::Item<'a>, R3::Item<'a>);
-    type Chunk<'a> = (R1::Chunk<'a>, R2::Chunk<'a>, R3::Chunk<'a>);
-
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
-        R1::declare(context.own())?;
-        R2::declare(context.own())?;
-        R3::declare(context.own())?;
-        Ok(())
-    }
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
-        Ok((
-            R1::initialize(context.own())?,
-            R2::initialize(context.own())?,
-            R3::initialize(context.own())?,
-        ))
-    }
-    fn read(state: Self::State) -> <Self::Read as Row>::State {
-        (R1::read(state.0), R2::read(state.1), R3::read(state.2))
-    }
-    #[inline]
-    fn item<'a>(state: &Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
-        (
-            R1::item(&state.0, context.own()),
-            R2::item(&state.1, context.own()),
-            R3::item(&state.2, context.own()),
-        )
-    }
-    #[inline]
-    fn chunk<'a>(state: &Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
-        (
-            R1::chunk(&state.0, context.own()),
-            R2::chunk(&state.1, context.own()),
-            R3::chunk(&state.2, context.own()),
-        )
     }
 }
 
@@ -1079,5 +771,28 @@ impl<V> By<'_, V> {
         while self.slots.len() < capacity {
             self.slots.push(Vec::new());
         }
+    }
+}
+
+impl<V> Iterator for Errors<'_, '_, V> {
+    type Item = (V, Error);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((key, value)) = self.pairs.pop_front() {
+            match self.database.keys().get(key) {
+                Ok(slot) => match self.indices.get(&slot.table()) {
+                    Some(&index) => {
+                        let slots = unsafe { self.slots.get_unchecked_mut(index as usize) };
+                        if slots.len() == 0 {
+                            self.pending.push_back(index);
+                        }
+                        slots.push((key, value, slot));
+                    }
+                    None => return Some((value, Error::KeyNotInQuery(key))),
+                },
+                Err(error) => return Some((value, error)),
+            }
+        }
+        None
     }
 }

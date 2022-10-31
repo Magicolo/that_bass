@@ -1,4 +1,4 @@
-use crate::{core::FullIterator, Error};
+use crate::Error;
 use parking_lot::RwLock;
 use std::{
     cell::UnsafeCell,
@@ -152,7 +152,7 @@ impl Keys {
     }
 
     /// Assumes that the keys have had their `Slot` released.
-    pub(crate) fn release(&self, keys: impl FullIterator<Item = Key>) {
+    pub(crate) fn release(&self, keys: impl IntoIterator<Item = Key>) {
         let mut free_write = self.free.write();
         let (free_keys, free_count) = &mut *free_write;
         free_keys.truncate((*free_count.get_mut()).max(0) as _);

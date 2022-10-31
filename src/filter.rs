@@ -1,74 +1,60 @@
-use crate::{table::Table, Datum};
+use crate::{create, database::Database, table::Table, template::Template};
 use std::marker::PhantomData;
 
 pub trait Filter: Sized {
-    fn filter(&self, table: &Table) -> bool;
-    fn not(self) -> Not<Self> {
-        Not(self)
-    }
-    fn and<F: Filter>(self, filter: F) -> (Self, F) {
-        (self, filter)
-    }
-    fn and_has<D: Datum>(self) -> (Self, Has<D>) {
-        self.and(Has(PhantomData))
+    fn filter(table: &Table, database: &Database) -> bool;
+}
+
+pub struct True;
+pub struct False;
+pub struct Not<F>(PhantomData<F>);
+pub struct Is<T>(PhantomData<T>);
+pub struct Has<T>(PhantomData<T>);
+
+impl Filter for True {
+    fn filter(_: &Table, _: &Database) -> bool {
+        true
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Not<F>(F);
-#[derive(Debug)]
-pub struct Has<D: Datum>(PhantomData<D>);
-
-impl<D: Datum> Has<D> {
-    pub const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<D: Datum> Default for Has<D> {
-    fn default() -> Self {
-        Self::new()
+impl Filter for False {
+    fn filter(_: &Table, _: &Database) -> bool {
+        false
     }
 }
 
 impl<F: Filter> Filter for Not<F> {
-    fn filter(&self, table: &Table) -> bool {
-        !self.0.filter(table)
+    fn filter(table: &Table, database: &Database) -> bool {
+        !F::filter(table, database)
     }
 }
 
-impl<D: Datum> Filter for Has<D> {
-    fn filter(&self, table: &Table) -> bool {
-        table.has::<D>()
+impl<T: Template> Filter for Is<T> {
+    fn filter(table: &Table, database: &Database) -> bool {
+        create::is::<T>(table, database)
     }
 }
 
-impl Filter for bool {
-    fn filter(&self, _: &Table) -> bool {
-        *self
-    }
-}
-
-impl<F: Fn(&Table) -> bool> Filter for F {
-    fn filter(&self, table: &Table) -> bool {
-        self(table)
+impl<T: Template> Filter for Has<T> {
+    fn filter(table: &Table, database: &Database) -> bool {
+        create::has::<T>(table, database)
     }
 }
 
 impl Filter for () {
-    fn filter(&self, _: &Table) -> bool {
+    fn filter(_: &Table, _: &Database) -> bool {
         true
     }
 }
 
 impl<F1: Filter> Filter for (F1,) {
-    fn filter(&self, table: &Table) -> bool {
-        self.0.filter(table)
+    fn filter(table: &Table, database: &Database) -> bool {
+        F1::filter(table, database)
     }
 }
 
 impl<F1: Filter, F2: Filter> Filter for (F1, F2) {
-    fn filter(&self, table: &Table) -> bool {
-        self.0.filter(table) && self.1.filter(table)
+    fn filter(table: &Table, database: &Database) -> bool {
+        F1::filter(table, database) && F2::filter(table, database)
     }
 }

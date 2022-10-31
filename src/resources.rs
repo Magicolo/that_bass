@@ -13,7 +13,6 @@ use std::{
 use crate::Error;
 
 pub struct Resources {
-    // TODO: These mutexes could be replaced with a `RwLock` since most accesses to resources are expected to only require a read.
     locals: Mutex<Locals>,
     globals: Mutex<Globals>,
 }

@@ -6,7 +6,10 @@
 #![feature(iter_from_generator)]
 #![feature(generator_trait)]
 #![feature(associated_type_defaults)]
+#![feature(portable_simd)]
+#![feature(array_windows)]
 
+pub mod add;
 pub mod core;
 pub mod create;
 pub mod database;
@@ -15,9 +18,12 @@ pub mod filter;
 pub mod key;
 pub mod query;
 pub mod resources;
+pub mod row;
 pub mod table;
+pub mod template;
 
 /*
+    TODO: Complete `Database::move_to_table` and add `Add<T: Template>/Remove<T: Template>` operations.
     TODO: Implement `Nest`:
         - Forces the outer query to take additionnal locks in case the inner query needs to produce the same item as the outer query:
             - An outer read that conflicts with an inner write becomes an upgradable read.
@@ -39,6 +45,8 @@ pub mod table;
             .query::<&A>()
             .nest::<&mut A>()
             .each(|(a1, nest)| nest.each(|a2| a2.0 = a1.0));
+
+    TODO: Implement traits for many tuple.
 
     TODO: Try to implement a `FullJoin` that returns both `L::Item` and `R::Item`.
         1. For each left table 'T', lock it stores that are the strictest intersection of the left and right queries.
@@ -66,7 +74,6 @@ pub mod table;
         - Returns all combinations (no repetitions) of two queries.
         - Order of items does not matter, so (A, B) is the same as (B, A), thus only one of those will be returned.
         - Use a filter similar to `A.key() < B.key()` to eliminate duplicates.
-    TODO: `Query::Item` should implement `Item`?
     TODO: Implement compile-time checking of `Columns`, if possible.
 */
 
@@ -81,17 +88,15 @@ TODO: There is no need to take a `Table` lock when querying as long as the store
         `fn write_chunk() -> Self::WriteChunk`
         `fn write_item() -> Self::WriteItem`
 TODO: Allow creating with a struct with a `#[derive(Template)]`. All members will need to implement `Template`.
-TODO: Allow querying with a struct or enum with a `#[derive(Item)]`. All members will need to implement `Item`.
+TODO: Allow querying with a struct or enum with a `#[derive(Row)]`. All members will need to implement `Item`.
 TODO: Allow filtering with a struct or enum with a `#[derive(Filter)]`. All members will need to implement `Filter`.
-
-- `Defer<Create>` can do most of the work of `Create` without making the changes observable.
-    - Only initializing the slots and resolving the table count need to be deferred.
-    - The table then must go into a state where any `Destroy` operations must consider the `reserved` count of the table when doing
-    the swap and the resolution of `Create` must consider that it may have been moved or destroyed (maybe `slot.generation` can help?).
-
 
 
 Scheduler library:
+    - Can be completely independent from this library.
+    - A `Run<I, O>` holds an `fn(I) -> O` where `I: Depend`.
+    - With depend, the scheduler will be able to parallelize efficiently and maintain a chosen level of coherence.
+
     let database = Database::new();
     // Scheduler::new(): Scheduler<()>
     // Scheduler::with(&database): Scheduler<&Database>
@@ -142,6 +147,7 @@ pub enum Error {
     MissingIndex,
     MissingJoinKey,
     InvalidTable,
+    MissingTable,
 }
 
 pub struct Meta {
@@ -206,8 +212,11 @@ pub fn identify() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use crate::{database::Database, key::Key, query::By, Datum, Error};
-    use std::collections::HashSet;
+    use crate::{database::Database, filter::False, key::Key, query::By, Datum, Error};
+    use std::{
+        collections::HashSet,
+        simd::{f32x16, f32x2, f32x4, f32x8},
+    };
 
     struct A;
     struct B;
@@ -434,7 +443,7 @@ mod tests {
     #[test]
     fn query_with_false_is_always_empty() -> Result<(), Error> {
         let database = Database::new();
-        let mut query = database.query::<()>()?.filter(false);
+        let mut query = database.query::<()>()?.filter::<False>();
         assert_eq!(query.count(), 0);
         let key = database.create()?.one(());
         assert_eq!(query.count(), 0);
@@ -612,7 +621,6 @@ mod tests {
         });
         assert_eq!(by.len(), 0);
         assert_eq!(sum, 4);
-
         Ok(())
     }
 
@@ -646,11 +654,12 @@ mod tests {
         struct CopyFrom(Key);
         impl Datum for A {}
         impl Datum for CopyFrom {}
+        const COUNT: usize = 10;
 
         let database = Database::new();
         let a = database.create()?.one(A(1));
         let mut create = database.create()?;
-        for i in 0..100 {
+        for i in 0..COUNT {
             create.one((A(i), CopyFrom(a)));
         }
         create.resolve();
@@ -660,10 +669,18 @@ mod tests {
         let mut targets = database.query::<&mut A>()?;
         let mut by_source = By::new();
         let mut by_target = By::new();
+
         copies.each(|(key, copy)| by_source.pair(copy.0, key));
         sources.each_by_ok(&mut by_source, |target, a| by_target.pair(target, a.0));
         targets.each_by_ok(&mut by_target, |value, a| a.0 = value);
-        // TODO: Add assertions.
+
+        assert_eq!(copies.count(), COUNT);
+        assert_eq!(sources.count(), COUNT + 1);
+        assert_eq!(targets.count(), COUNT + 1);
+        assert_eq!(by_source.len(), 0);
+        assert_eq!(by_target.len(), 0);
+        sources.each(|a| assert_eq!(a.0, 1));
+        targets.each(|a| assert_eq!(a.0, 1));
         Ok(())
     }
 
@@ -694,6 +711,117 @@ mod tests {
         sources.each_by_ok(&mut by_source, |target, a| by_target.pair(target, a.0));
         targets.each_by_ok(&mut by_target, |value, a| a.0 = value);
         // TODO: Add assertions.
+        Ok(())
+    }
+
+    #[test]
+    fn simd_add() -> Result<(), Error> {
+        #[repr(transparent)]
+        #[derive(Clone, Copy)]
+        struct A(f32);
+        #[repr(transparent)]
+        #[derive(Clone, Copy)]
+        struct B(f32);
+        impl Datum for A {}
+        impl Datum for B {}
+
+        let database = Database::new();
+        database.create()?.all_n([(A(0.0), B(1.0)); 100]);
+        database.query::<(&mut A, &B)>()?.chunk().each(|(a, b)| {
+            debug_assert_eq!(a.len(), b.len());
+
+            #[inline]
+            unsafe fn add16(source: *const f32, target: *mut f32) {
+                *(target as *mut f32x16) += *(source as *mut f32x16);
+            }
+            #[inline]
+            unsafe fn add8(source: *const f32, target: *mut f32) {
+                *(target as *mut f32x8) += *(source as *mut f32x8);
+            }
+            #[inline]
+            unsafe fn add4(source: *const f32, target: *mut f32) {
+                *(target as *mut f32x4) += *(source as *mut f32x4);
+            }
+            #[inline]
+            unsafe fn add2(source: *const f32, target: *mut f32) {
+                *(target as *mut f32x2) += *(source as *mut f32x2);
+            }
+            #[inline]
+            unsafe fn add1(source: *const f32, target: *mut f32) {
+                *target += *source
+            }
+            unsafe fn add(source: *const f32, target: *mut f32, count: usize) {
+                match count {
+                    0 => {}
+                    1 => add1(source, target),
+                    2 => add2(source, target),
+                    3 => {
+                        add2(source, target);
+                        add1(source.add(2), target.add(2));
+                    }
+                    4 => add4(source, target),
+                    5 => {
+                        add4(source, target);
+                        add1(source.add(4), target.add(4));
+                    }
+                    6 => {
+                        add4(source, target);
+                        add2(source.add(4), target.add(4));
+                    }
+                    7 => {
+                        add4(source, target);
+                        add2(source.add(4), target.add(4));
+                        add1(source.add(6), target.add(6));
+                    }
+                    8 => add8(source, target),
+                    9 => {
+                        add8(source, target);
+                        add1(source.add(8), target.add(8));
+                    }
+                    10 => {
+                        add8(source, target);
+                        add2(source.add(8), target.add(8));
+                    }
+                    11 => {
+                        add8(source, target);
+                        add2(source.add(8), target.add(8));
+                        add1(source.add(10), target.add(10));
+                    }
+                    12 => {
+                        add8(source, target);
+                        add4(source.add(8), target.add(8));
+                    }
+                    13 => {
+                        add8(source, target);
+                        add4(source.add(8), target.add(8));
+                        add1(source.add(12), target.add(12));
+                    }
+                    14 => {
+                        add8(source, target);
+                        add4(source.add(8), target.add(8));
+                        add2(source.add(12), target.add(12));
+                    }
+                    15 => {
+                        add8(source, target);
+                        add4(source.add(8), target.add(8));
+                        add2(source.add(12), target.add(12));
+                        add1(source.add(14), target.add(14));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+
+            let count = a.len();
+            let mut source = b.as_ptr() as _;
+            let mut target = a.as_mut_ptr() as _;
+            for _ in 0..count / 16 {
+                unsafe { add16(source, target) };
+                unsafe { source = source.add(16) };
+                unsafe { target = target.add(16) };
+            }
+            unsafe { add(source, target, count % 16) };
+        });
+
         Ok(())
     }
 }

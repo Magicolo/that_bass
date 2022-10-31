@@ -132,11 +132,13 @@ impl Tables {
     }
 
     #[inline]
-    pub fn get(&self, index: usize) -> Option<&Table> {
+    pub fn get(&self, index: usize) -> Result<&Table, Error> {
         let read = self.lock.read();
-        let table = &**unsafe { &**self.tables.get() }.get(index)?;
+        let table = &**unsafe { &**self.tables.get() }
+            .get(index)
+            .ok_or(Error::MissingTable)?;
         drop(read);
-        Some(table)
+        Ok(table)
     }
 
     #[inline]
@@ -150,11 +152,14 @@ impl Tables {
     }
 
     #[inline]
-    pub fn get_shared(&self, index: usize) -> Option<Arc<Table>> {
+    pub fn get_shared(&self, index: usize) -> Result<Arc<Table>, Error> {
         let read = self.lock.read();
-        let table = unsafe { &**self.tables.get() }.get(index)?.clone();
+        let table = unsafe { &**self.tables.get() }
+            .get(index)
+            .ok_or(Error::MissingTable)?
+            .clone();
         drop(read);
-        Some(table)
+        Ok(table)
     }
 
     #[inline]
@@ -168,21 +173,20 @@ impl Tables {
     }
 
     #[inline]
-    pub(crate) fn find_or_add(&self, metas: Vec<&'static Meta>, capacity: usize) -> Arc<Table> {
+    pub(crate) fn find_or_add(&self, mut metas: Vec<&'static Meta>, capacity: usize) -> Arc<Table> {
         let upgrade = self.lock.upgradable_read();
         // SAFETY: `tables` can be read since an upgrade lock is held. The lock will need to be upgraded
         // before any mutation to `tables`.
         let tables = unsafe { &mut *self.tables.get() };
         for table in tables.iter() {
             if table.indices.len() == metas.len()
-                && metas
-                    .iter()
-                    .all(|meta| table.indices.contains_key(&meta.identifier()))
+                && metas.iter().all(|meta| table.has_with(meta.identifier()))
             {
                 return table.clone();
             }
         }
 
+        metas.sort_unstable_by_key(|meta| meta.identifier());
         let stores: Box<[Store]> = metas
             .into_iter()
             .map(|meta| Store::new(meta, capacity))
@@ -241,7 +245,17 @@ impl Table {
 
     #[inline]
     pub fn has<D: Datum>(&self) -> bool {
-        self.indices.contains_key(&TypeId::of::<D>())
+        self.has_with(TypeId::of::<D>())
+    }
+
+    #[inline]
+    pub fn has_with(&self, identifier: TypeId) -> bool {
+        self.indices.contains_key(&identifier)
+    }
+
+    #[inline]
+    pub fn types(&self) -> impl ExactSizeIterator<Item = TypeId> + '_ {
+        self.indices.keys().copied()
     }
 
     #[inline]
@@ -258,8 +272,13 @@ impl Table {
     }
 
     #[inline]
-    pub fn stores(&self) -> usize {
-        self.indices.len()
+    pub(crate) const fn decompose_pending(pending: u64) -> (u32, u32) {
+        ((pending >> 32) as u32, pending as u32)
+    }
+
+    #[inline]
+    pub(crate) const fn recompose_pending(begun: u32, ended: u32) -> u64 {
+        ((begun as u64) << 32) | (ended as u64)
     }
 }
 
