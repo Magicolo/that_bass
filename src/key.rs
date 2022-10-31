@@ -194,6 +194,7 @@ impl Slot {
 
     #[inline]
     pub fn update(&self, table: u32, store: u32) {
+        debug_assert!(self.generation() < u32::MAX);
         let indices = Self::recompose_indices(table, store);
         debug_assert!(indices < u64::MAX);
         self.indices.store(indices, Release);

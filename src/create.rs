@@ -1,16 +1,11 @@
 use crate::{
-    database::Database,
     key::Key,
     resources::Global,
-    table::Table,
+    table::{self, Table},
     template::{ApplyContext, DeclareContext, InitializeContext, Template},
-    Error,
+    Database, Error,
 };
-use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
-use std::{
-    ptr::NonNull,
-    sync::{atomic::Ordering::*, Arc},
-};
+use std::{ptr::NonNull, sync::Arc};
 
 pub struct Create<'d, T: Template> {
     database: &'d Database,
@@ -147,58 +142,33 @@ impl<'d, T: Template> Create<'d, T> {
             return;
         }
 
-        let inner = self.table.inner.upgradable_read();
-        // Ensure that the table's capacity.
-        let (start, inner) = {
-            let (index, _) = {
-                let add = Table::recompose_pending(count as _, 0);
-                let pending = inner.pending.fetch_add(add, AcqRel);
-                Table::decompose_pending(pending)
-            };
-            // There can not be more than `u32::MAX` keys at a given time.
-            assert!(index < u32::MAX - count as u32);
-
-            let capacity = index as usize + count;
-            if capacity <= inner.capacity() {
-                (index as usize, RwLockUpgradableReadGuard::downgrade(inner))
-            } else {
-                let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
-                inner.grow(capacity);
-                (index as usize, RwLockWriteGuard::downgrade(inner))
+        let (start, inner) = table::Inner::reserve(self.table.inner.upgradable_read(), count);
+        if T::SIZE == 0 {
+            // No data to initialize. Initialize table keys.
+            self.templates.clear();
+            for i in 0..count {
+                let key = unsafe { *self.keys.get_unchecked(i) };
+                let slot = unsafe { self.database.keys().get_unchecked(key) };
+                slot.initialize(key.generation(), self.table.index(), (start + i) as u32);
             }
-        };
-        let end = start + count;
-
-        // Initialize table keys.
-        unsafe { (&mut **inner.keys.get()).get_unchecked_mut(start..end) }
-            .copy_from_slice(&self.keys[..count]);
-
-        // Initialize table rows.
-        self.pointers.extend(
-            inner
-                .stores()
-                .iter()
+        } else {
+            // Initialize table rows.
+            for store in inner.stores() {
                 // SAFETY: Since this row is not yet observable by any thread but this one, no need to take locks.
-                .map(|store| unsafe { *store.data().data_ptr() }),
-        );
-        let context = ApplyContext(&self.pointers, 0);
-        for (i, template) in self.templates.drain(..).enumerate() {
-            unsafe { template.apply(&self.state, context.with(start + i)) };
+                self.pointers.push(unsafe { *store.data().data_ptr() });
+            }
 
-            let key = unsafe { *self.keys.get_unchecked(i) };
-            let slot = unsafe { self.database.keys().get_unchecked(key) };
-            slot.initialize(key.generation(), self.table.index(), (start + i) as u32);
+            let context = ApplyContext(&self.pointers, 0);
+            for (i, template) in self.templates.drain(..).enumerate() {
+                let key = unsafe { *self.keys.get_unchecked(i) };
+                let slot = unsafe { self.database.keys().get_unchecked(key) };
+                unsafe { *(&mut **inner.keys.get()).get_unchecked_mut(start + i) = key };
+                unsafe { template.apply(&self.state, context.with(start + i)) };
+                slot.initialize(key.generation(), self.table.index(), (start + i) as u32);
+            }
+            self.pointers.clear();
         }
-        self.pointers.clear();
-
-        // Try to commit the table count.
-        let add = Table::recompose_pending(0, count as _);
-        let pending = inner.pending.fetch_add(add, AcqRel);
-        let (begun, ended) = Table::decompose_pending(pending);
-        debug_assert!(begun >= ended);
-        if begun == ended + count as u32 {
-            inner.count.fetch_max(begun, Relaxed);
-        }
+        table::Inner::commit(inner, count);
 
         // Sanity checks.
         debug_assert!(self.templates.is_empty());

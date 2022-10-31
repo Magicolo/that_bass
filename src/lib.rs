@@ -8,11 +8,11 @@
 #![feature(associated_type_defaults)]
 #![feature(portable_simd)]
 #![feature(array_windows)]
+#![feature(drain_filter)]
 
 pub mod add;
 pub mod core;
 pub mod create;
-pub mod database;
 pub mod destroy;
 pub mod filter;
 pub mod key;
@@ -115,15 +115,15 @@ Scheduler library:
     }
 */
 
+use key::{Key, Keys};
+use resources::Resources;
 use std::{
     any::{type_name, TypeId},
     mem::{forget, needs_drop, size_of},
     num::NonZeroUsize,
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
-    sync::atomic::{AtomicUsize, Ordering},
 };
-
-use key::Key;
+use table::Tables;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -148,6 +148,12 @@ pub enum Error {
     MissingJoinKey,
     InvalidTable,
     MissingTable,
+}
+
+pub struct Database {
+    keys: Keys,
+    tables: Tables,
+    resources: Resources,
 }
 
 pub struct Meta {
@@ -205,14 +211,34 @@ impl Meta {
     }
 }
 
-pub fn identify() -> usize {
-    static COUNTER: AtomicUsize = AtomicUsize::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+impl Database {
+    pub fn new() -> Self {
+        Self {
+            keys: Keys::new(),
+            tables: Tables::new(),
+            resources: Resources::new(),
+        }
+    }
+
+    #[inline]
+    pub const fn keys(&self) -> &Keys {
+        &self.keys
+    }
+
+    #[inline]
+    pub const fn tables(&self) -> &Tables {
+        &self.tables
+    }
+
+    #[inline]
+    pub const fn resources(&self) -> &Resources {
+        &self.resources
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{database::Database, filter::False, key::Key, query::By, Datum, Error};
+    use crate::{filter::False, key::Key, query::By, Database, Datum, Error};
     use std::{
         collections::HashSet,
         simd::{f32x16, f32x2, f32x4, f32x8},

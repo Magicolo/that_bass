@@ -3,6 +3,7 @@ use std::{
     any::TypeId,
     collections::{HashMap, HashSet},
     marker::PhantomData,
+    mem::size_of,
     ptr::NonNull,
 };
 
@@ -15,6 +16,7 @@ pub struct InitializeContext<'a>(pub(crate) &'a HashMap<TypeId, usize>);
 pub struct ApplyContext<'a>(pub(crate) &'a [NonNull<()>], pub(crate) usize);
 
 pub unsafe trait Template: 'static {
+    const SIZE: usize;
     type State: Send + Sync;
     fn declare(context: DeclareContext) -> Result<(), Error>;
     fn initialize(context: InitializeContext) -> Result<Self::State, Error>;
@@ -50,12 +52,10 @@ impl InitializeContext<'_> {
     }
 
     pub fn apply<D: Datum>(&self) -> Result<Apply<D>, Error> {
-        let index = self.index(TypeId::of::<D>())?;
-        Ok(Apply(index, PhantomData))
-    }
-
-    fn index(&self, identifier: TypeId) -> Result<usize, Error> {
-        self.0.get(&identifier).copied().ok_or(Error::MissingStore)
+        match self.0.get(&TypeId::of::<D>()) {
+            Some(&index) => Ok(Apply(index, PhantomData)),
+            None => Err(Error::MissingStore),
+        }
     }
 }
 
@@ -78,6 +78,7 @@ impl ApplyContext<'_> {
 }
 
 unsafe impl<D: Datum> Template for D {
+    const SIZE: usize = size_of::<D>();
     type State = Apply<D>;
 
     fn declare(mut context: DeclareContext) -> Result<(), Error> {
@@ -95,6 +96,7 @@ unsafe impl<D: Datum> Template for D {
 }
 
 unsafe impl Template for () {
+    const SIZE: usize = 0;
     type State = ();
     fn declare(_: DeclareContext) -> Result<(), Error> {
         Ok(())
@@ -107,6 +109,7 @@ unsafe impl Template for () {
 }
 
 unsafe impl<T1: Template, T2: Template> Template for (T1, T2) {
+    const SIZE: usize = T1::SIZE + T2::SIZE;
     type State = (T1::State, T2::State);
 
     fn declare(mut context: DeclareContext) -> Result<(), Error> {

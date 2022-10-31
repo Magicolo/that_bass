@@ -1,10 +1,9 @@
 use crate::{
-    database::Database,
     filter::Filter,
     key::{Key, Slot},
     row::{Access, ChunkContext, DeclareContext, InitializeContext, ItemContext, Row},
     table::{self, Table},
-    Datum, Error,
+    Database, Datum, Error,
 };
 use std::{
     any::TypeId,

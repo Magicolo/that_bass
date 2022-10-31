@@ -1,4 +1,4 @@
-use crate::{create, database::Database, table::Table, template::Template};
+use crate::{create, table::Table, template::Template, Database};
 use std::marker::PhantomData;
 
 pub trait Filter: Sized {

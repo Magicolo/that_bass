@@ -51,17 +51,17 @@ impl InitializeContext<'_> {
     }
 
     pub fn read<D: Datum>(&self) -> Result<Read<D>, Error> {
-        let index = self.index(Access::Read(TypeId::of::<D>()))?;
-        Ok(Read(index, PhantomData))
+        match self.0.get(&Access::Read(TypeId::of::<D>())) {
+            Some(&index) => Ok(Read(index, PhantomData)),
+            None => Err(Error::MissingStore),
+        }
     }
 
     pub fn write<D: Datum>(&self) -> Result<Write<D>, Error> {
-        let index = self.index(Access::Write(TypeId::of::<D>()))?;
-        Ok(Write(index, PhantomData))
-    }
-
-    fn index(&self, access: Access) -> Result<usize, Error> {
-        self.0.get(&access).copied().ok_or(Error::MissingStore)
+        match self.0.get(&Access::Write(TypeId::of::<D>())) {
+            Some(&index) => Ok(Write(index, PhantomData)),
+            None => Err(Error::MissingStore),
+        }
     }
 }
 

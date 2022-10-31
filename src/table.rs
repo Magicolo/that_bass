@@ -1,5 +1,5 @@
 use crate::{core::FullIterator, key::Key, Datum, Error, Meta};
-use parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
     any::TypeId,
     cell::UnsafeCell,
@@ -270,16 +270,6 @@ impl Table {
             .copied()
             .ok_or(Error::MissingStore)
     }
-
-    #[inline]
-    pub(crate) const fn decompose_pending(pending: u64) -> (u32, u32) {
-        ((pending >> 32) as u32, pending as u32)
-    }
-
-    #[inline]
-    pub(crate) const fn recompose_pending(begun: u32, ended: u32) -> u64 {
-        ((begun as u64) << 32) | (ended as u64)
-    }
 }
 
 unsafe impl Send for Table {}
@@ -311,18 +301,76 @@ impl Inner {
         &self.stores
     }
 
-    pub fn grow(&mut self, capacity: usize) {
-        let keys = self.keys.get_mut();
-        if keys.len() < capacity {
-            let old_capacity = keys.len();
-            keys.resize(capacity, Key::NULL);
-            keys.resize(keys.capacity(), Key::NULL);
-            debug_assert_eq!(keys.len(), keys.capacity());
-            let new_capacity = keys.len();
-            for store in self.stores.iter_mut() {
-                unsafe { store.grow(old_capacity, new_capacity) };
+    #[inline]
+    pub const fn decompose_pending(pending: u64) -> (u32, u32) {
+        ((pending >> 32) as u32, pending as u32)
+    }
+
+    #[inline]
+    pub const fn recompose_pending(begun: u32, ended: u32) -> u64 {
+        ((begun as u64) << 32) | (ended as u64)
+    }
+
+    pub fn reserve<'a>(
+        inner: RwLockUpgradableReadGuard<'a, Inner>,
+        count: usize,
+    ) -> (usize, RwLockReadGuard<'a, Inner>) {
+        let (start, inner) = {
+            let (index, _) = {
+                let add = Self::recompose_pending(count as _, 0);
+                let pending = inner.pending.fetch_add(add, Ordering::AcqRel);
+                Self::decompose_pending(pending)
+            };
+            // There can not be more than `u32::MAX` keys at a given time.
+            assert!(index < u32::MAX - count as u32);
+
+            let capacity = index as usize + count;
+            if capacity <= inner.capacity() {
+                (index as usize, RwLockUpgradableReadGuard::downgrade(inner))
+            } else {
+                let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+                let keys = inner.keys.get_mut();
+                if keys.len() < capacity {
+                    let old_capacity = keys.len();
+                    keys.resize(capacity, Key::NULL);
+                    keys.resize(keys.capacity(), Key::NULL);
+                    debug_assert_eq!(keys.len(), keys.capacity());
+                    let new_capacity = keys.len();
+                    for store in inner.stores.iter_mut() {
+                        unsafe { store.grow(old_capacity, new_capacity) };
+                    }
+                }
+                (index as usize, RwLockWriteGuard::downgrade(inner))
             }
+        };
+        (start, inner)
+    }
+
+    pub fn commit(inner: RwLockReadGuard<Inner>, count: usize) -> bool {
+        let add = Self::recompose_pending(0, count as _);
+        let pending = inner.pending.fetch_add(add, Ordering::AcqRel);
+        let (begun, ended) = Self::decompose_pending(pending);
+        debug_assert!(begun >= ended);
+        if begun == ended + count as u32 {
+            inner.count.fetch_max(begun, Ordering::Relaxed);
+            true
+        } else {
+            false
         }
+    }
+
+    pub fn release(&mut self, count: usize) -> usize {
+        let table_count = self.count.get_mut();
+        let table_pending = self.pending.get_mut();
+        let (begun, ended) = Self::decompose_pending(*table_pending);
+
+        // Sanity checks. If this is not the case, there is a bug in the locking logic.
+        debug_assert_eq!(begun, ended);
+        debug_assert_eq!(begun, *table_count);
+        debug_assert!(*table_count >= count as u32);
+        *table_count -= count as u32;
+        *table_pending = Self::recompose_pending(begun - 1, ended - 1);
+        *table_count as usize
     }
 }
 
