@@ -24,7 +24,15 @@ pub mod template;
 
 /*
     TODO: Complete `Database::move_to_table` and add `Add<T: Template>/Remove<T: Template>` operations.
-    TODO: Implement `Nest`:
+
+    TODO: Implement `Keep<T>/Trim<T>`:
+        - Removes all datum from a key except to ones provided by `T`.
+    TODO: Implement `Change<T>/Convert<T>/Conform<T>`:
+        - Converts a key such that it corresponds to the `T: Template` (adds missing datum, removes exceeding datum).
+    TODO: Implement `Template for Set<D>`:
+        - Sets the datum `D` for a key only if the key already has the datum.
+
+    TODO: Implement nest operations for query:
         - Forces the outer query to take additionnal locks in case the inner query needs to produce the same item as the outer query:
             - An outer read that conflicts with an inner write becomes an upgradable read.
             - An inner read that is missing in outer becomes a read if its index is lower than the last outer store.

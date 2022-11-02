@@ -168,7 +168,7 @@ impl<'d, T: Template> Create<'d, T> {
             }
             self.pointers.clear();
         }
-        table::Inner::commit(inner, count);
+        inner.commit(count);
 
         // Sanity checks.
         debug_assert!(self.templates.is_empty());

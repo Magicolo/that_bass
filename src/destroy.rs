@@ -49,21 +49,33 @@ impl Destroy<'_> {
     }
 
     pub fn resolve(&mut self) -> usize {
+        // TODO: Use the same structure as `Add => while pending.len() > 0 { ... }`?
+        // TODO: Use `drain(..)` here? Or use `swap_remove` for better `remove` performance?
         self.pending.retain(|(key, slot)| {
             // TODO: Between this `slot.release` and the table lock, this key may be found in a `fold` query
             // while the same query would fail a `find` with the same key.
-            if let Ok((table, row)) = slot.release(key.generation()) {
-                let state = self.sorted.entry(table).or_insert_with(|| State {
-                    table: unsafe { self.database.tables().get_unchecked(table as _) },
-                    rows: Vec::new(),
-                    low: u32::MAX,
-                    high: 0,
-                });
-                state.rows.push(row);
-                (state.low, state.high) = (row.min(state.low), row.max(state.high));
-                true
-            } else {
-                false
+            // *** Keys should be released under their table lock.
+            match slot.release(key.generation()) {
+                Ok((table, row)) => match self.sorted.get_mut(&table) {
+                    Some(state) => {
+                        state.rows.push(row);
+                        (state.low, state.high) = (row.min(state.low), row.max(state.high));
+                        true
+                    }
+                    None => {
+                        self.sorted.insert(
+                            table,
+                            State {
+                                table: unsafe { self.database.tables().get_unchecked(table as _) },
+                                rows: vec![row],
+                                low: row,
+                                high: row,
+                            },
+                        );
+                        true
+                    }
+                },
+                Err(_) => false,
             }
         });
 
@@ -79,8 +91,8 @@ impl Destroy<'_> {
 
             debug_assert!(state.low <= state.high);
             let range = state.low..state.high + 1;
-            let mut inner = state.table.inner.write();
-            let inner = &mut *inner;
+            let mut write = state.table.inner.write();
+            let inner = &mut *write;
             let head = inner.release(count);
             let keys = inner.keys.get_mut();
             let (low, high) = (range.start as usize, range.end as usize);
@@ -226,6 +238,7 @@ impl Destroy<'_> {
                 }
             }
 
+            drop(write);
             state.rows.clear();
             (state.low, state.high) = (u32::MAX, 0);
         }

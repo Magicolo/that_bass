@@ -442,10 +442,10 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 let context = ItemContext(inner.keys(), pointers, 0);
                 let slots = unsafe { by.slots.get_unchecked_mut(index as usize) };
                 for (key, value, slot) in slots.drain(..) {
-                    let (table_index, row_index) = slot.indices();
+                    let indices = slot.indices();
                     // The key is allowed to move within its table (such as with a swap as part of a remove).
-                    if table.index() == table_index {
-                        state = fold(state, value, Ok(R::item(row, context.with(row_index as _))))?;
+                    if table.index() == indices.0 {
+                        state = fold(state, value, Ok(R::item(row, context.with(indices.1 as _))))?;
                     } else {
                         // The key has moved to another table between the last moment the slot indices were read and now.
                         by.pairs.push_back((key, value));
@@ -506,10 +506,10 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             let context = ItemContext(inner.keys(), pointers, 0);
             let slots = unsafe { by.slots.get_unchecked_mut(index as usize) };
             for (key, value, slot) in slots.drain(..) {
-                let (table_index, row_index) = slot.indices();
+                let indices = slot.indices();
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
-                if table.index() == table_index {
-                    let item = R::item(row, context.with(row_index as usize));
+                if table.index() == indices.0 {
+                    let item = R::item(row, context.with(indices.1 as _));
                     state = fold(state, value, Ok(item));
                 } else {
                     // The key has moved to another table between the last moment the slot indices were read and now.
@@ -590,16 +590,17 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 Ok(slot) => slot,
                 Err(error) => break find(Err(error)),
             };
-            let (table_index, store_index) = slot.indices();
+            let table_index = slot.table();
             let state_index = match self.indices.get(&table_index) {
                 Some(&state_index) => state_index,
                 None => break find(Err(Error::KeyNotInQuery(key))),
             };
 
             find = match self.lock(state_index, |row, pointers, _, inner| {
-                // If this check fails, it means that the `key` has just been moved or destroyed.
-                if slot.indices() == (table_index, store_index) {
-                    let context = ItemContext(inner.keys(), pointers, store_index as _);
+                // If this check fails, it means that the `key` has just been moved to another table or destroyed.
+                let indices = slot.indices();
+                if indices.0 == table_index {
+                    let context = ItemContext(inner.keys(), pointers, indices.1 as _);
                     Ok(find(Ok(R::item(row, context))))
                 } else {
                     Err(find)

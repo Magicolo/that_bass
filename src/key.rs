@@ -12,6 +12,9 @@ pub struct Key {
 }
 
 pub struct Slot {
+    // TODO: Package `table` with `generation` since they tend to be required together.
+    // - Most updates to `indices` only change the `row`.
+    // - `generation` has to be validated everytime the table is read to sort keys in `Add/Remove/Destroy`.
     generation: AtomicU32,
     indices: AtomicU64,
 }
@@ -186,16 +189,16 @@ impl Slot {
     }
 
     #[inline]
-    pub fn initialize(&self, generation: u32, table: u32, store: u32) {
+    pub fn initialize(&self, generation: u32, table: u32, row: u32) {
         debug_assert!(generation < u32::MAX);
         self.generation.store(generation, Release);
-        self.update(table, store);
+        self.update(table, row);
     }
 
     #[inline]
-    pub fn update(&self, table: u32, store: u32) {
+    pub fn update(&self, table: u32, row: u32) {
         debug_assert!(self.generation() < u32::MAX);
-        let indices = Self::recompose_indices(table, store);
+        let indices = Self::recompose_indices(table, row);
         debug_assert!(indices < u64::MAX);
         self.indices.store(indices, Release);
     }

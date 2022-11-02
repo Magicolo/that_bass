@@ -58,7 +58,7 @@ impl Store {
     }
 
     #[inline]
-    pub unsafe fn copy(source: (&mut Self, usize), target: (&Self, usize), count: NonZeroUsize) {
+    pub unsafe fn copy_to(source: (&mut Self, usize), target: (&Self, usize), count: NonZeroUsize) {
         debug_assert_eq!(source.0.meta().identifier(), target.0.meta().identifier());
         let &Meta { copy, .. } = source.0.meta();
         copy(
@@ -90,6 +90,15 @@ impl Store {
         let &Meta { copy, drop, .. } = self.meta();
         let data = *self.data.get_mut();
         drop(data, target_index, count);
+        copy((data, source_index), (data, target_index), count);
+    }
+
+    /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the store.
+    /// The ranges 'source_index..source_index + count' and 'target_index..target_index + count' must not overlap.
+    #[inline]
+    pub unsafe fn copy(&mut self, source_index: usize, target_index: usize, count: NonZeroUsize) {
+        let &Meta { copy, .. } = self.meta();
+        let data = *self.data.get_mut();
         copy((data, source_index), (data, target_index), count);
     }
 
@@ -346,13 +355,13 @@ impl Inner {
         (start, inner)
     }
 
-    pub fn commit(inner: RwLockReadGuard<Inner>, count: usize) -> bool {
+    pub fn commit(&self, count: usize) -> bool {
         let add = Self::recompose_pending(0, count as _);
-        let pending = inner.pending.fetch_add(add, Ordering::AcqRel);
+        let pending = self.pending.fetch_add(add, Ordering::AcqRel);
         let (begun, ended) = Self::decompose_pending(pending);
         debug_assert!(begun >= ended);
         if begun == ended + count as u32 {
-            inner.count.fetch_max(begun, Ordering::Relaxed);
+            self.count.fetch_max(begun, Ordering::Relaxed);
             true
         } else {
             false
@@ -360,17 +369,17 @@ impl Inner {
     }
 
     pub fn release(&mut self, count: usize) -> usize {
-        let table_count = self.count.get_mut();
-        let table_pending = self.pending.get_mut();
-        let (begun, ended) = Self::decompose_pending(*table_pending);
+        let current = self.count.get_mut();
+        let pending = self.pending.get_mut();
+        let (begun, ended) = Self::decompose_pending(*pending);
 
         // Sanity checks. If this is not the case, there is a bug in the locking logic.
         debug_assert_eq!(begun, ended);
-        debug_assert_eq!(begun, *table_count);
-        debug_assert!(*table_count >= count as u32);
-        *table_count -= count as u32;
-        *table_pending = Self::recompose_pending(begun - 1, ended - 1);
-        *table_count as usize
+        debug_assert_eq!(begun, *current);
+        debug_assert!(*current >= count as u32);
+        *current -= count as u32;
+        *pending = Self::recompose_pending(begun - 1, ended - 1);
+        *current as usize
     }
 }
 
