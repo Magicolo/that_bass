@@ -1,12 +1,14 @@
-use parking_lot::RwLockWriteGuard;
-
 use crate::{
     key::{Key, Slot},
     table::{self, Store, Table},
     template::{ApplyContext, DeclareContext, InitializeContext, Template},
     Database, Error, Meta,
 };
-use std::{collections::HashMap, marker::PhantomData, num::NonZeroUsize, ptr::NonNull, sync::Arc};
+use parking_lot::RwLockWriteGuard;
+use std::{
+    collections::HashMap, marker::PhantomData, mem::replace, num::NonZeroUsize, ptr::NonNull,
+    sync::Arc,
+};
 
 pub struct Add<'d, T: Template> {
     database: &'d Database,
@@ -110,69 +112,67 @@ impl<'d, T: Template> Add<'d, T> {
             }
 
             // If locks are always taken in order (lower index first), there can not be a deadlock between move operations.
-            let (mut source, target, count, low, high) =
-                if state.source.index() < state.target.index() {
-                    let (source, low, high) = Self::filter(
-                        &state.source,
-                        &mut self.keys,
-                        &mut state.rows,
-                        &mut state.templates,
-                        &mut self.pending,
-                    );
-                    let count = state.rows.len();
-                    if count == 0 {
-                        // Happens if all keys from this table have been moved or destroyed between here and the sorting.
-                        // - One less lock to take if all rows have been filtered.
-                        continue;
-                    }
-                    let target = state.target.inner.upgradable_read();
-                    (source, target, count, low, high)
-                } else if state.source.index() > state.target.index() {
-                    let target = state.target.inner.upgradable_read();
-                    let (source, low, high) = Self::filter(
-                        &state.source,
-                        &mut self.keys,
-                        &mut state.rows,
-                        &mut state.templates,
-                        &mut self.pending,
-                    );
-                    let count = state.rows.len();
-                    if count == 0 {
-                        // Happens if all keys from this table have been moved or destroyed between here and the sorting.
-                        continue;
-                    }
-                    (source, target, count, low, high)
-                } else {
-                    // The keys do not need to be moved, simply write the row data.
-                    let (inner, ..) = Self::filter(
-                        &state.source,
-                        &mut self.keys,
-                        &mut state.rows,
-                        &mut state.templates,
-                        &mut self.pending,
-                    );
-                    if state.rows.len() > 0 && T::SIZE > 0 {
-                        lock(&state.inner.add, &mut self.pointers, &inner, |pointers| {
-                            for (i, template) in state.templates.drain(..).enumerate() {
-                                let &(.., row) = unsafe { state.rows.get_unchecked(i) };
-                                debug_assert!(row < u32::MAX);
-                                let context = ApplyContext(pointers, row as _);
-                                unsafe { template.apply(&state.inner.state, context) };
-                            }
-                            state.rows.clear();
-                        });
-                    } else {
-                        state.rows.clear();
-                        state.templates.clear();
-                    }
-
-                    // Sanity checks.
-                    debug_assert!(state.rows.is_empty());
-                    debug_assert!(state.templates.is_empty());
-                    debug_assert!(self.pointers.is_empty());
+            let (mut source, target, low, high) = if state.source.index() < state.target.index() {
+                let (source, low, high) = Self::filter(
+                    &state.source,
+                    &mut self.keys,
+                    &mut state.rows,
+                    &mut state.templates,
+                    &mut self.pending,
+                );
+                if state.rows.len() == 0 {
+                    // Happens if all keys from this table have been moved or destroyed between here and the sorting.
+                    // - One less lock to take if all rows have been filtered.
                     continue;
-                };
+                }
+                let target = state.target.inner.upgradable_read();
+                (source, target, low, high)
+            } else if state.source.index() > state.target.index() {
+                let target = state.target.inner.upgradable_read();
+                let (source, low, high) = Self::filter(
+                    &state.source,
+                    &mut self.keys,
+                    &mut state.rows,
+                    &mut state.templates,
+                    &mut self.pending,
+                );
+                if state.rows.len() == 0 {
+                    // Happens if all keys from this table have been moved or destroyed between here and the sorting.
+                    continue;
+                }
+                (source, target, low, high)
+            } else {
+                // The keys do not need to be moved, simply write the row data.
+                let (inner, ..) = Self::filter(
+                    &state.source,
+                    &mut self.keys,
+                    &mut state.rows,
+                    &mut state.templates,
+                    &mut self.pending,
+                );
+                if state.rows.len() > 0 && T::SIZE > 0 {
+                    lock(&state.inner.add, &mut self.pointers, &inner, |pointers| {
+                        for (i, template) in state.templates.drain(..).enumerate() {
+                            let &(.., row) = unsafe { state.rows.get_unchecked(i) };
+                            debug_assert!(row < u32::MAX);
+                            let context = ApplyContext(pointers, row as _);
+                            unsafe { template.apply(&state.inner.state, context) };
+                        }
+                        state.rows.clear();
+                    });
+                } else {
+                    state.rows.clear();
+                    state.templates.clear();
+                }
 
+                // Sanity checks.
+                debug_assert!(state.rows.is_empty());
+                debug_assert!(state.templates.is_empty());
+                debug_assert!(self.pointers.is_empty());
+                continue;
+            };
+
+            let count = state.rows.len();
             let (start, target) = table::Inner::reserve(target, count);
             // Move data from source to target.
             debug_assert!(low <= high);
@@ -183,7 +183,7 @@ impl<'d, T: Template> Add<'d, T> {
             let (low, high) = (range.start as usize, range.end as usize);
 
             if range.len() == count {
-                // Fast path. The move range is contiguous. Copy everything from source to target.
+                // Fast path. The move range is contiguous. Copy everything from source to target at once.
                 for &indices in state.inner.copy.iter() {
                     let source = unsafe { source.stores.get_unchecked_mut(indices.0) };
                     let target = unsafe { target.stores.get_unchecked(indices.1) };
@@ -212,7 +212,42 @@ impl<'d, T: Template> Add<'d, T> {
                     }
                 }
             } else {
-                // TODO: Range is not contiguous...
+                // Range is not contiguous; use the slow path.
+                let mut cursor = head;
+                for (i, &(.., row)) in state.rows.iter().enumerate() {
+                    let row = row as usize;
+
+                    for &indices in state.inner.copy.iter() {
+                        let source = unsafe { source.stores.get_unchecked_mut(indices.0) };
+                        let target = unsafe { target.stores.get_unchecked(indices.1) };
+                        let count = unsafe { NonZeroUsize::new_unchecked(1) };
+                        unsafe {
+                            Store::copy_to((source, row), (target, start + i), count);
+                        };
+                    }
+
+                    // Tag keys that are going to be removed such that removed keys and valid keys can be differentiated.
+                    let key = replace(unsafe { keys.0.get_unchecked_mut(row as usize) }, Key::NULL);
+                    unsafe { *keys.1.get_unchecked_mut(start + i) = key };
+
+                    if row < head {
+                        // Find the next valid row to move.
+                        while unsafe { *keys.0.get_unchecked(cursor) } == Key::NULL {
+                            cursor += 1;
+                        }
+                        debug_assert!(cursor < head + count);
+
+                        for store in source.stores.iter_mut() {
+                            unsafe { store.squash(cursor, row, NonZeroUsize::new_unchecked(1)) };
+                        }
+
+                        let key = unsafe { *keys.0.get_unchecked_mut(cursor) };
+                        unsafe { *keys.0.get_unchecked_mut(row) = key };
+                        let slot = unsafe { self.database.keys().get_unchecked(key) };
+                        slot.update(row as _);
+                        cursor += 1;
+                    }
+                }
             }
 
             // Initialize missing data `T` in target.
@@ -220,7 +255,7 @@ impl<'d, T: Template> Add<'d, T> {
                 state.templates.clear();
             } else {
                 for &index in state.inner.add.iter() {
-                    // SAFETY: Since this row is not yet observable by any thread but this one, no need to take locks.
+                    // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
                     let store = unsafe { target.stores.get_unchecked(index) };
                     self.pointers.push(unsafe { *store.data().data_ptr() });
                 }

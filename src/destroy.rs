@@ -76,20 +76,6 @@ impl<'d> Destroy<'d> {
     }
 
     fn resolve_sorted(&mut self) {
-        #[inline]
-        fn batch<'d>(mut previous: usize, index: &mut usize, rows: &[(Key, &'d Slot, u32)]) {
-            // Try to batch contiguous rows.
-            while let Some(&(.., current)) = rows.get(*index) {
-                let current = current as usize;
-                if previous + 1 == current {
-                    previous = current;
-                    *index += 1;
-                } else {
-                    break;
-                }
-            }
-        }
-
         for state in self.sorted.values_mut() {
             let (mut inner, low, high) = Self::filter(
                 state.table,
@@ -134,91 +120,47 @@ impl<'d> Destroy<'d> {
                     }
                 }
             } else {
-                let mut index = 0;
-                let mut last = keys.len();
-
-                // Try to consume the rows in the range `end..keys.len()` since they are guaranteed to be valid.
-                let end = high.max(head);
-                while last > end {
-                    match state.rows.get(index) {
-                        Some(&(.., row)) => {
-                            let row = row as usize;
-                            let mut previous = row;
-                            let start = index;
-                            index += 1;
-
-                            if row < head {
-                                last -= 1;
-
-                                // Try to batch contiguous squashes.
-                                while last > end {
-                                    if let Some(&(.., row)) = state.rows.get(index) {
-                                        let row = row as usize;
-                                        if previous + 1 == row && row < head {
-                                            previous = row;
-                                            last -= 1;
-                                            index += 1;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                let count = unsafe { NonZeroUsize::new_unchecked(index - start) };
-                                for store in inner.stores.iter_mut() {
-                                    unsafe { store.squash(last, row, count) };
-                                }
-                                keys.copy_within(last..last + count.get(), row);
-
-                                for row in row..row + count.get() {
-                                    let key = unsafe { *keys.get_unchecked(row) };
-                                    let slot = unsafe { self.database.keys().get_unchecked(key) };
-                                    slot.update(row as _);
-                                }
-                            } else {
-                                // Try to batch contiguous drops.
-                                batch(previous, &mut index, &state.rows);
-                                let count = unsafe { NonZeroUsize::new_unchecked(index - start) };
-                                for store in inner.stores.iter_mut() {
-                                    unsafe { store.drop(row, count) };
-                                }
-                            }
-                        }
-                        None => break,
-                    }
-                }
-
-                // Tag keys that are going to be removed such removed keys and valid keys can be differentiated.
-                for &(.., row) in &state.rows[index..] {
+                // Tag keys that are going to be removed such that removed keys and valid keys can be differentiated.
+                for &(.., row) in state.rows.iter() {
                     *unsafe { keys.get_unchecked_mut(row as usize) } = Key::NULL;
                 }
 
-                // Remove that remaining rows the slow way.
+                let mut index = 0;
+                let mut cursor = head;
                 while let Some(&(.., row)) = state.rows.get(index) {
                     let row = row as usize;
-                    let previous = row;
+                    let mut previous = row;
                     let start = index;
                     index += 1;
 
                     if row < head {
                         // Find the next valid row to move.
-                        while keys.get(last).copied() == Some(Key::NULL) {
-                            last -= 1;
+                        while unsafe { *keys.get_unchecked(cursor) } == Key::NULL {
+                            cursor += 1;
                         }
-                        debug_assert!(last >= head);
+                        debug_assert!(cursor < head + count);
 
                         for store in inner.stores.iter_mut() {
-                            unsafe { store.squash(last, row, NonZeroUsize::new_unchecked(1)) };
+                            unsafe { store.squash(cursor, row, NonZeroUsize::new_unchecked(1)) };
                         }
 
-                        let key = unsafe { *keys.get_unchecked_mut(last) };
+                        let key = unsafe { *keys.get_unchecked_mut(cursor) };
                         unsafe { *keys.get_unchecked_mut(row) = key };
                         let slot = unsafe { self.database.keys().get_unchecked(key) };
                         slot.update(row as _);
-                        last -= 1;
+                        cursor += 1;
                     } else {
                         // Try to batch contiguous drops.
-                        batch(previous, &mut index, &state.rows);
+                        while let Some(&(.., current)) = state.rows.get(index) {
+                            let current = current as usize;
+                            if previous + 1 == current {
+                                previous = current;
+                                index += 1;
+                            } else {
+                                break;
+                            }
+                        }
+
                         let count = unsafe { NonZeroUsize::new_unchecked(index - start) };
                         for store in inner.stores.iter_mut() {
                             unsafe { store.drop(row, count) };
