@@ -13,9 +13,7 @@
                     "test",
                     "--no-run",
                     "--lib",
-                    "--package=that_bass",
-                    "--",
-                    "--nocapture"
+                    "--package=that_bass"
                 ],
                 "filter": {
                     "name": "that_bass",
