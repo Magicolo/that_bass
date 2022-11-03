@@ -368,6 +368,12 @@ impl<'d, T: Template> Add<'d, T> {
     }
 }
 
+impl<T: Template> Drop for Add<'_, T> {
+    fn drop(&mut self) {
+        self.resolve();
+    }
+}
+
 #[inline]
 fn lock<T>(
     indices: &[usize],

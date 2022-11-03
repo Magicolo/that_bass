@@ -133,7 +133,9 @@ impl Resources {
         key: K,
         default: impl FnOnce() -> T,
     ) -> Global<T> {
-        self.global(Globals::<K>::new).write().get(key, default)
+        self.global(Globals::new)
+            .write()
+            .get((key, TypeId::of::<T>()), default)
     }
 
     pub fn try_global_with<K: Eq + Hash + Send + Sync + 'static, T: Send + Sync + 'static>(
@@ -141,7 +143,9 @@ impl Resources {
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
     ) -> Result<Global<T>, Error> {
-        self.global(Globals::<K>::new).write().try_get(key, default)
+        self.global(Globals::new)
+            .write()
+            .try_get((key, TypeId::of::<T>()), default)
     }
 
     pub fn local<T: 'static>(&self, default: impl FnOnce() -> T) -> Local<T> {
@@ -164,7 +168,9 @@ impl Resources {
         key: K,
         default: impl FnOnce() -> T,
     ) -> Local<T> {
-        self.local(Locals::<K>::new).borrow_mut().get(key, default)
+        self.local(Locals::new)
+            .borrow_mut()
+            .get((key, TypeId::of::<T>()), default)
     }
 
     pub fn try_local_with<K: Eq + Hash + 'static, T: 'static>(
@@ -172,9 +178,9 @@ impl Resources {
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
     ) -> Result<Local<T>, Error> {
-        self.local(Locals::<K>::new)
+        self.local(Locals::new)
             .borrow_mut()
-            .try_get(key, default)
+            .try_get((key, TypeId::of::<T>()), default)
     }
 }
 

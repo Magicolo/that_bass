@@ -382,6 +382,95 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn add_resolve_is_0() -> Result<(), Error> {
+        let database = Database::new();
+        assert_eq!(database.add::<()>()?.resolve(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn add_no_double_resolve() -> Result<(), Error> {
+        struct A;
+        impl Datum for A {}
+
+        let database = Database::new();
+        let key = database.create()?.one(());
+        let mut add = database.add()?;
+        assert!(add.one(key, A));
+        assert_eq!(add.resolve(), 1);
+        assert_eq!(add.resolve(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn add_simple_template() -> Result<(), Error> {
+        struct A;
+        impl Datum for A {}
+
+        let database = Database::new();
+        let key = database.create()?.one(());
+        let mut add = database.add()?;
+        assert!(add.one(key, A));
+        assert!(!database.query::<&A>()?.has(key));
+        assert_eq!(add.resolve(), 1);
+        assert!(database.query::<&A>()?.has(key));
+        Ok(())
+    }
+
+    #[test]
+    fn add_simple_template_twice() -> Result<(), Error> {
+        struct A;
+        struct B;
+        impl Datum for A {}
+        impl Datum for B {}
+
+        let database = Database::new();
+        let key = database.create()?.one(());
+        let mut addA = database.add()?;
+        let mut addB = database.add()?;
+
+        assert!(addA.one(key, A));
+        assert!(addB.one(key, B));
+        assert!(!database.query::<&A>()?.has(key));
+        assert!(!database.query::<&B>()?.has(key));
+        assert!(!database.query::<(&A, &B)>()?.has(key));
+
+        assert_eq!(addA.resolve(), 1);
+        assert!(database.query::<&A>()?.has(key));
+        assert!(!database.query::<&B>()?.has(key));
+        assert!(!database.query::<(&A, &B)>()?.has(key));
+
+        assert_eq!(addB.resolve(), 1);
+        assert!(database.query::<&A>()?.has(key));
+        assert!(database.query::<&B>()?.has(key));
+        assert!(database.query::<(&A, &B)>()?.has(key));
+        Ok(())
+    }
+
+    #[test]
+    fn add_composite_template() -> Result<(), Error> {
+        struct A;
+        struct B;
+        impl Datum for A {}
+        impl Datum for B {}
+
+        let database = Database::new();
+        let key = database.create()?.one(());
+        let mut add = database.add()?;
+
+        assert!(add.one(key, (A, B)));
+        assert!(!database.query::<&A>()?.has(key));
+        assert!(!database.query::<&B>()?.has(key));
+        assert!(!database.query::<(&A, &B)>()?.has(key));
+
+        assert_eq!(add.resolve(), 1);
+        assert!(database.query::<&A>()?.has(key));
+        assert!(database.query::<&B>()?.has(key));
+        assert!(database.query::<(&A, &B)>()?.has(key));
+        Ok(())
+    }
+
     // #[test]
     // fn destroy_one_in_query_does_not_deadlock() -> Result<(), Error> {
     //     let database = Database::new();
@@ -764,7 +853,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    // #[test]
     fn simd_add() -> Result<(), Error> {
         #[repr(transparent)]
         #[derive(Clone, Copy)]
