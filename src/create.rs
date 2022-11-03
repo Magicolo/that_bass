@@ -143,6 +143,8 @@ impl<'d, T: Template> Create<'d, T> {
         }
 
         let (start, inner) = table::Inner::reserve(self.table.inner.upgradable_read(), count);
+        let keys = unsafe { &mut **inner.keys.get() };
+        keys[start..start + count].copy_from_slice(&self.keys[..count]);
         if T::SIZE == 0 {
             // No data to initialize. Initialize table keys.
             self.templates.clear();
@@ -162,7 +164,6 @@ impl<'d, T: Template> Create<'d, T> {
             for (i, template) in self.templates.drain(..).enumerate() {
                 let key = unsafe { *self.keys.get_unchecked(i) };
                 let slot = unsafe { self.database.keys().get_unchecked(key) };
-                unsafe { *(&mut **inner.keys.get()).get_unchecked_mut(start + i) = key };
                 unsafe { template.apply(&self.state, context.with(start + i)) };
                 slot.initialize(key.generation(), self.table.index(), (start + i) as u32);
             }

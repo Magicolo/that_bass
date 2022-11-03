@@ -145,6 +145,8 @@ pub enum Error {
     InvalidGuard,
     InsufficientGuard,
     WrongGeneration,
+    WrongGenerationOrTable,
+    WrongRow,
     FailedToLockTable,
     FailedToLockColumns,
     KeyNotInQuery(Key),
@@ -246,7 +248,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use crate::{filter::False, key::Key, query::By, Database, Datum, Error};
+    use crate::{filter::False, key::Key, Database, Datum, Error};
     use std::{
         collections::HashSet,
         simd::{f32x16, f32x2, f32x4, f32x8},
@@ -324,7 +326,7 @@ mod tests {
     fn create_destroy_create_reuses_key_index() -> Result<(), Error> {
         let database = Database::new();
         let key1 = database.create()?.one(());
-        database.destroy().one(key1);
+        assert_eq!(database.destroy().one(key1), true);
         let key2 = database.create()?.one(());
         assert_eq!(key1.index(), key2.index());
         assert_ne!(key1.generation(), key2.generation());
@@ -345,17 +347,13 @@ mod tests {
     // }
 
     #[test]
-    fn destroy_none_resolves_none() {
-        let database = Database::new();
-        assert_eq!(database.destroy().resolve(), 0);
-    }
-
-    #[test]
     fn destroy_one_fails_with_null_key() {
         let database = Database::new();
         let mut destroy = database.destroy();
+        assert_eq!(database.keys().valid([Key::NULL]), 0);
         assert_eq!(destroy.one(Key::NULL), false);
         assert_eq!(destroy.resolve(), 0);
+        assert_eq!(database.keys().valid([Key::NULL]), 0);
     }
 
     #[test]
@@ -363,8 +361,11 @@ mod tests {
         let database = Database::new();
         let key = database.create::<()>()?.one(());
         let mut destroy = database.destroy();
+        assert_eq!(database.keys().valid([key]), 1);
         assert_eq!(destroy.one(key), true);
+        assert_eq!(database.keys().valid([key]), 1);
         assert_eq!(destroy.resolve(), 1);
+        assert_eq!(database.keys().valid([key]), 0);
         Ok(())
     }
 
@@ -373,8 +374,11 @@ mod tests {
         let database = Database::new();
         let keys = database.create::<()>()?.all_n([(); 1000]);
         let mut destroy = database.destroy();
-        assert_eq!(destroy.all(keys), 1000);
+        assert_eq!(database.keys().valid(keys.clone()), 1000);
+        assert_eq!(destroy.all(keys.clone()), 1000);
+        assert_eq!(database.keys().valid(keys.clone()), 1000);
         assert_eq!(destroy.resolve(), 1000);
+        assert_eq!(database.keys().valid(keys.clone()), 0);
         Ok(())
     }
 
@@ -641,11 +645,13 @@ mod tests {
 
         let mut query = database.query::<&A>()?;
         assert_eq!(query.count(), 3);
-        let mut by = By::new();
+        let mut by = database.by();
         assert_eq!(by.len(), 0);
-        query.each(|a| by.keys(a.0.iter().cloned()));
+        query.each(|a| {
+            by.keys(a.0.iter().cloned());
+        });
         assert_eq!(query.count_by(&by), 4);
-        assert_eq!(by.len(), 7);
+        assert_eq!(by.len(), 4);
 
         let mut query = database.query::<Key>()?;
         assert_eq!(query.count(), 3);
@@ -675,8 +681,10 @@ mod tests {
 
         let mut sources = database.query::<(&A, &CopyTo)>()?;
         let mut targets = database.query::<&mut A>()?;
-        let mut by = By::new();
-        sources.each(|(a, copy)| by.pair(copy.0, a.0));
+        let mut by = database.by();
+        sources.each(|(a, copy)| {
+            by.pair(copy.0, a.0);
+        });
         targets.each_by_ok(&mut by, |value, a| a.0 = value);
         // TODO: Add assertions.
         Ok(())
@@ -701,11 +709,15 @@ mod tests {
         let mut copies = database.query::<(Key, &CopyFrom)>()?;
         let mut sources = database.query::<&A>()?;
         let mut targets = database.query::<&mut A>()?;
-        let mut by_source = By::new();
-        let mut by_target = By::new();
+        let mut by_source = database.by();
+        let mut by_target = database.by();
 
-        copies.each(|(key, copy)| by_source.pair(copy.0, key));
-        sources.each_by_ok(&mut by_source, |target, a| by_target.pair(target, a.0));
+        copies.each(|(key, copy)| {
+            by_source.pair(copy.0, key);
+        });
+        sources.each_by_ok(&mut by_source, |target, a| {
+            by_target.pair(target, a.0);
+        });
         targets.each_by_ok(&mut by_target, |value, a| a.0 = value);
 
         assert_eq!(copies.count(), COUNT);
@@ -739,10 +751,14 @@ mod tests {
         let mut swaps = database.query::<&Swap>()?;
         let mut sources = database.query::<&A>()?;
         let mut targets = database.query::<&mut A>()?;
-        let mut by_source = By::new();
-        let mut by_target = By::new();
-        swaps.each(|swap| by_source.pairs([(swap.0, swap.1), (swap.1, swap.0)]));
-        sources.each_by_ok(&mut by_source, |target, a| by_target.pair(target, a.0));
+        let mut by_source = database.by();
+        let mut by_target = database.by();
+        swaps.each(|swap| {
+            by_source.pairs([(swap.0, swap.1), (swap.1, swap.0)]);
+        });
+        sources.each_by_ok(&mut by_source, |target, a| {
+            by_target.pair(target, a.0);
+        });
         targets.each_by_ok(&mut by_target, |value, a| a.0 = value);
         // TODO: Add assertions.
         Ok(())

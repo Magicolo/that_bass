@@ -1,41 +1,46 @@
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroUsize,
+};
+
+use parking_lot::RwLockWriteGuard;
 
 use crate::{
     key::{Key, Slot},
-    table::Table,
-    Database,
+    table::{self, Table},
+    Database, Error,
 };
 
 pub struct Destroy<'d> {
     database: &'d Database,
-    pending: Vec<(Key, &'d Slot)>, // Note that `Slot::release` will remove duplicates.
+    keys: HashSet<Key>,
+    pending: Vec<(Key, &'d Slot, u32)>,
     sorted: HashMap<u32, State<'d>>,
 }
 
 struct State<'d> {
     table: &'d Table,
-    rows: Vec<u32>,
-    low: u32,
-    high: u32,
+    rows: Vec<(Key, &'d Slot, u32)>,
 }
 
 impl Database {
     pub fn destroy(&self) -> Destroy {
         Destroy {
             database: self,
+            keys: HashSet::new(),
             pending: Vec::new(),
             sorted: HashMap::new(),
         }
     }
 }
 
-impl Destroy<'_> {
+impl<'d> Destroy<'d> {
     #[inline]
     pub fn one(&mut self, key: Key) -> bool {
+        // TODO: Prevent duplicate keys to be added...
         match self.database.keys().get(key) {
-            Ok(slot) => {
-                self.pending.push((key, slot));
-                true
+            Ok((slot, table)) => {
+                Self::sort(key, slot, table, &mut self.sorted, self.database).is_ok()
             }
             Err(_) => false,
         }
@@ -48,51 +53,58 @@ impl Destroy<'_> {
             .count()
     }
 
+    #[inline]
     pub fn resolve(&mut self) -> usize {
-        // TODO: Use the same structure as `Add => while pending.len() > 0 { ... }`?
-        // TODO: Use `drain(..)` here? Or use `swap_remove` for better `remove` performance?
-        self.pending.retain(|(key, slot)| {
-            // TODO: Between this `slot.release` and the table lock, this key may be found in a `fold` query
-            // while the same query would fail a `find` with the same key.
-            // *** Keys should be released under their table lock.
-            match slot.release(key.generation()) {
-                Ok((table, row)) => match self.sorted.get_mut(&table) {
-                    Some(state) => {
-                        state.rows.push(row);
-                        (state.low, state.high) = (row.min(state.low), row.max(state.high));
-                        true
-                    }
-                    None => {
-                        self.sorted.insert(
-                            table,
-                            State {
-                                table: unsafe { self.database.tables().get_unchecked(table as _) },
-                                rows: vec![row],
-                                low: row,
-                                high: row,
-                            },
-                        );
-                        true
-                    }
-                },
-                Err(_) => false,
+        self.resolve_sorted();
+        while self.pending.len() > 0 {
+            for (key, slot, table) in self.pending.drain(..) {
+                let _ = Self::sort(key, slot, table, &mut self.sorted, self.database);
             }
-        });
+            self.resolve_sorted();
+        }
+        let count = self.keys.len();
+        // Note: Since releasing of keys is done here, there is a period of time where some keys are unavailable for reuse.
+        self.database.keys.release(self.keys.drain());
+        count
+    }
 
-        let count = self.pending.len();
-        let keys = self.database.keys();
-        keys.release(self.pending.drain(..).map(|(key, _)| key));
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        for state in self.sorted.values_mut() {
+            state.rows.clear();
+        }
+    }
+
+    fn resolve_sorted(&mut self) {
+        #[inline]
+        fn batch<'d>(mut previous: usize, index: &mut usize, rows: &[(Key, &'d Slot, u32)]) {
+            // Try to batch contiguous rows.
+            while let Some(&(.., current)) = rows.get(*index) {
+                let current = current as usize;
+                if previous + 1 == current {
+                    previous = current;
+                    *index += 1;
+                } else {
+                    break;
+                }
+            }
+        }
 
         for state in self.sorted.values_mut() {
+            let (mut inner, low, high) = Self::filter(
+                state.table,
+                &mut state.rows,
+                &mut self.keys,
+                &mut self.pending,
+            );
             let count = state.rows.len();
             if count == 0 {
                 continue;
             }
+            debug_assert!(low <= high);
 
-            debug_assert!(state.low <= state.high);
-            let range = state.low..state.high + 1;
-            let mut write = state.table.inner.write();
-            let inner = &mut *write;
+            let range = low..high + 1;
+            let inner = &mut *inner;
             let head = inner.release(count);
             let keys = inner.keys.get_mut();
             let (low, high) = (range.start as usize, range.end as usize);
@@ -110,8 +122,9 @@ impl Destroy<'_> {
                     // Update the keys.
                     keys.copy_within(start..start + end.get(), low);
                     for i in low..low + end.get() {
-                        unsafe { self.database.keys().get_unchecked(*keys.get_unchecked(i)) }
-                            .update(state.table.index(), i as _);
+                        let key = unsafe { *keys.get_unchecked(i) };
+                        let slot = unsafe { self.database.keys().get_unchecked(key) };
+                        slot.update(i as _);
                     }
                 }
 
@@ -128,7 +141,7 @@ impl Destroy<'_> {
                 let end = high.max(head);
                 while last > end {
                     match state.rows.get(index) {
-                        Some(&row) => {
+                        Some(&(.., row)) => {
                             let row = row as usize;
                             let mut previous = row;
                             let start = index;
@@ -139,7 +152,7 @@ impl Destroy<'_> {
 
                                 // Try to batch contiguous squashes.
                                 while last > end {
-                                    if let Some(&row) = state.rows.get(index) {
+                                    if let Some(&(.., row)) = state.rows.get(index) {
                                         let row = row as usize;
                                         if previous + 1 == row && row < head {
                                             previous = row;
@@ -158,23 +171,13 @@ impl Destroy<'_> {
                                 keys.copy_within(last..last + count.get(), row);
 
                                 for row in row..row + count.get() {
-                                    unsafe {
-                                        self.database.keys().get_unchecked(*keys.get_unchecked(row))
-                                    }
-                                    .update(state.table.index(), row as _);
+                                    let key = unsafe { *keys.get_unchecked(row) };
+                                    let slot = unsafe { self.database.keys().get_unchecked(key) };
+                                    slot.update(row as _);
                                 }
                             } else {
                                 // Try to batch contiguous drops.
-                                while let Some(&row) = state.rows.get(index) {
-                                    let row = row as usize;
-                                    if previous + 1 == row {
-                                        previous = row;
-                                        index += 1;
-                                    } else {
-                                        break;
-                                    }
-                                }
-
+                                batch(previous, &mut index, &state.rows);
                                 let count = unsafe { NonZeroUsize::new_unchecked(index - start) };
                                 for store in inner.stores.iter_mut() {
                                     unsafe { store.drop(row, count) };
@@ -186,14 +189,14 @@ impl Destroy<'_> {
                 }
 
                 // Tag keys that are going to be removed such removed keys and valid keys can be differentiated.
-                for &row in &state.rows[index..] {
+                for &(.., row) in &state.rows[index..] {
                     *unsafe { keys.get_unchecked_mut(row as usize) } = Key::NULL;
                 }
 
                 // Remove that remaining rows the slow way.
-                while let Some(&row) = state.rows.get(index) {
+                while let Some(&(.., row)) = state.rows.get(index) {
                     let row = row as usize;
-                    let mut previous = row;
+                    let previous = row;
                     let start = index;
                     index += 1;
 
@@ -208,28 +211,14 @@ impl Destroy<'_> {
                             unsafe { store.squash(last, row, NonZeroUsize::new_unchecked(1)) };
                         }
 
-                        unsafe {
-                            let key = *keys.get_unchecked_mut(last);
-                            *keys.get_unchecked_mut(row) = key;
-                            self.database
-                                .keys()
-                                .get_unchecked(key)
-                                .update(state.table.index(), row as _);
-                        }
-
+                        let key = unsafe { *keys.get_unchecked_mut(last) };
+                        unsafe { *keys.get_unchecked_mut(row) = key };
+                        let slot = unsafe { self.database.keys().get_unchecked(key) };
+                        slot.update(row as _);
                         last -= 1;
                     } else {
                         // Try to batch contiguous drops.
-                        while let Some(&row) = state.rows.get(index) {
-                            let row = row as usize;
-                            if previous + 1 == row {
-                                previous = row;
-                                index += 1;
-                            } else {
-                                break;
-                            }
-                        }
-
+                        batch(previous, &mut index, &state.rows);
                         let count = unsafe { NonZeroUsize::new_unchecked(index - start) };
                         for store in inner.stores.iter_mut() {
                             unsafe { store.drop(row, count) };
@@ -238,16 +227,68 @@ impl Destroy<'_> {
                 }
             }
 
-            drop(write);
-            state.rows.clear();
-            (state.low, state.high) = (u32::MAX, 0);
+            for &(key, slot, row) in state.rows.iter() {
+                debug_assert_eq!(slot.indices(), (key.generation(), state.table.index()));
+                debug_assert_eq!(slot.row(), row);
+                slot.release();
+            }
         }
-
-        count
     }
 
-    pub fn clear(&mut self) {
-        self.pending.clear();
+    fn sort(
+        key: Key,
+        slot: &'d Slot,
+        table: u32,
+        sorted: &mut HashMap<u32, State<'d>>,
+        database: &'d Database,
+    ) -> Result<(), Error> {
+        match sorted.get_mut(&table) {
+            Some(state) => state.rows.push((key, slot, u32::MAX)),
+            None => {
+                sorted.insert(
+                    table,
+                    State {
+                        table: unsafe { database.tables().get_unchecked(table as _) },
+                        rows: vec![(key, slot, u32::MAX)],
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn filter<'a>(
+        table: &'a Table,
+        rows: &mut Vec<(Key, &'d Slot, u32)>,
+        keys: &mut HashSet<Key>,
+        pending: &mut Vec<(Key, &'d Slot, u32)>,
+    ) -> (RwLockWriteGuard<'a, table::Inner>, u32, u32) {
+        let mut low = u32::MAX;
+        let mut high = 0;
+        let mut index = 0;
+        let inner = table.inner.write();
+        while let Some((key, slot, row)) = rows.get_mut(index) {
+            if let Ok(table_index) = slot.table(key.generation()) {
+                if table_index == table.index() {
+                    // Duplicates must only be checked here where the key would be guaranteed to be destroyed.
+                    // - This way `database.keys().release()` can be called with `keys.drain()` at the end of `resolve`.
+                    if keys.insert(*key) {
+                        *row = slot.row();
+                        low = low.min(*row);
+                        high = high.max(*row);
+                        index += 1;
+                    } else {
+                        rows.swap_remove(index);
+                    }
+                } else {
+                    let (key, slot, _) = rows.swap_remove(index);
+                    pending.push((key, slot, table_index));
+                }
+            } else {
+                rows.swap_remove(index);
+            }
+        }
+        (inner, low, high)
     }
 }
 

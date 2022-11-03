@@ -15,8 +15,9 @@ pub struct Slot {
     // TODO: Package `table` with `generation` since they tend to be required together.
     // - Most updates to `indices` only change the `row`.
     // - `generation` has to be validated everytime the table is read to sort keys in `Add/Remove/Destroy`.
-    generation: AtomicU32,
+    // generation: AtomicU32,
     indices: AtomicU64,
+    row: AtomicU32,
 }
 
 pub struct Keys {
@@ -63,9 +64,9 @@ impl Key {
     }
 
     #[inline]
-    pub(crate) fn increment(&mut self) -> u32 {
+    pub(crate) fn increment(&mut self) -> bool {
         self.generation = self.generation.saturating_add(1);
-        self.generation
+        self.generation < u32::MAX
     }
 }
 
@@ -87,7 +88,27 @@ impl Keys {
         (index >> Self::SHIFT, index as u8)
     }
 
-    pub fn get(&self, key: Key) -> Result<&Slot, Error> {
+    #[inline]
+    pub fn valid(&self, keys: impl IntoIterator<Item = Key>) -> usize {
+        let mut count = 0;
+        let count_read = self.count.read();
+        for key in keys {
+            let (chunk_index, slot_index) = Self::decompose(key.index());
+            // SAFETY: `chunks` can be read since the `count_read` lock is held.
+            let chunks = unsafe { &**self.chunks.get() };
+            if let Some(chunk) = chunks.get(chunk_index as usize) {
+                // SAFETY: As soon as the `chunk` is dereferenced, the `count_read` lock is no longer needed.
+                let slot = unsafe { chunk.get_unchecked(slot_index as usize) };
+                if let Ok(_) = slot.table(key.generation()) {
+                    count += 1;
+                }
+            }
+        }
+        drop(count_read);
+        count
+    }
+
+    pub fn get(&self, key: Key) -> Result<(&Slot, u32), Error> {
         let count_read = self.count.read();
         let (chunk_index, slot_index) = Self::decompose(key.index());
         // SAFETY: `chunks` can be read since the `count_read` lock is held.
@@ -96,15 +117,11 @@ impl Keys {
         // SAFETY: As soon as the `chunk` is dereferenced, the `count_read` lock is no longer needed.
         drop(count_read);
         let slot = unsafe { chunk.get_unchecked(slot_index as usize) };
-        if slot.generation() == key.generation() {
-            // SAFETY: A shared reference to a slot can be returned safely without being tied to the lifetime of the read guard
-            // because its address is stable and no mutable reference to it is ever given out.
-            // The stability of the address is guaranteed by the fact that the `chunks` vector never drops its items other than
-            // when `self` is dropped.
-            Ok(slot)
-        } else {
-            Err(Error::InvalidKey)
-        }
+        // SAFETY: A shared reference to a slot can be returned safely without being tied to the lifetime of the read guard
+        // because its address is stable and no mutable reference to it is ever given out.
+        // The stability of the address is guaranteed by the fact that the `chunks` vector never drops its items other than
+        // when `self` is dropped.
+        Ok((slot, slot.table(key.generation())?))
     }
 
     pub unsafe fn get_unchecked(&self, key: Key) -> &Slot {
@@ -154,7 +171,7 @@ impl Keys {
         }
     }
 
-    /// Assumes that the keys have had their `Slot` released.
+    /// Assumes that the keys have had their `Slot` released and that keys are release only once.
     pub(crate) fn release(&self, keys: impl IntoIterator<Item = Key>) {
         let mut free_write = self.free.write();
         let (free_keys, free_count) = &mut *free_write;
@@ -162,7 +179,7 @@ impl Keys {
 
         for mut key in keys {
             // If the key reached generation `u32::MAX`, its index is discarded which results in a dead `Slot`.
-            if key.increment() < u32::MAX {
+            if key.increment() {
                 free_keys.push(key);
             }
         }
@@ -172,8 +189,8 @@ impl Keys {
 }
 
 impl Slot {
-    const fn recompose_indices(table: u32, store: u32) -> u64 {
-        ((table as u64) << 32) | (store as u64)
+    const fn recompose_indices(generation: u32, table: u32) -> u64 {
+        ((generation as u64) << 32) | (table as u64)
     }
 
     const fn decompose_indices(indices: u64) -> (u32, u32) {
@@ -181,41 +198,32 @@ impl Slot {
     }
 
     #[inline]
-    pub fn new(table: u32, store: u32) -> Self {
+    pub fn new(table: u32, row: u32) -> Self {
         Self {
-            generation: 0.into(),
-            indices: Self::recompose_indices(table, store).into(),
+            indices: Self::recompose_indices(0, table).into(),
+            row: row.into(),
         }
     }
 
     #[inline]
     pub fn initialize(&self, generation: u32, table: u32, row: u32) {
         debug_assert!(generation < u32::MAX);
-        self.generation.store(generation, Release);
-        self.update(table, row);
-    }
-
-    #[inline]
-    pub fn update(&self, table: u32, row: u32) {
-        debug_assert!(self.generation() < u32::MAX);
-        let indices = Self::recompose_indices(table, row);
-        debug_assert!(indices < u64::MAX);
+        debug_assert!(table < u32::MAX);
+        let indices = Self::recompose_indices(generation, table);
         self.indices.store(indices, Release);
+        self.update(row);
     }
 
     #[inline]
-    pub fn release(&self, generation: u32) -> Result<(u32, u32), Error> {
-        self.generation
-            .compare_exchange(generation, u32::MAX, AcqRel, Acquire)
-            .map_err(|_| Error::WrongGeneration)?;
-        let indices = self.indices.swap(u64::MAX, Release);
-        debug_assert!(indices < u64::MAX);
-        Ok(Self::decompose_indices(indices))
+    pub fn update(&self, row: u32) {
+        debug_assert!(row < u32::MAX);
+        self.row.store(row, Release);
     }
 
     #[inline]
-    pub fn generation(&self) -> u32 {
-        self.generation.load(Acquire)
+    pub fn release(&self) {
+        self.indices.store(u64::MAX, Release);
+        self.row.store(u32::MAX, Release);
     }
 
     #[inline]
@@ -224,13 +232,18 @@ impl Slot {
     }
 
     #[inline]
-    pub fn table(&self) -> u32 {
-        self.indices().0
+    pub fn table(&self, generation: u32) -> Result<u32, Error> {
+        let indices = self.indices();
+        if indices.0 == generation && indices.1 < u32::MAX {
+            Ok(indices.1)
+        } else {
+            Err(Error::InvalidKey)
+        }
     }
 
     #[inline]
     pub fn row(&self) -> u32 {
-        self.indices().1
+        self.row.load(Acquire)
     }
 }
 
