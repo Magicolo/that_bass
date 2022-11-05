@@ -2,6 +2,7 @@ use crate::Error;
 use parking_lot::RwLock;
 use std::{
     cell::UnsafeCell,
+    ops::Range,
     sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering::*},
 };
 
@@ -89,33 +90,14 @@ impl Keys {
     }
 
     #[inline]
-    pub fn valid(&self, keys: impl IntoIterator<Item = Key>) -> usize {
-        let mut count = 0;
-        let count_read = self.count.read();
-        for key in keys {
-            let (chunk_index, slot_index) = Self::decompose(key.index());
-            // SAFETY: `chunks` can be read since the `count_read` lock is held.
-            let chunks = unsafe { &**self.chunks.get() };
-            if let Some(chunk) = chunks.get(chunk_index as usize) {
-                // SAFETY: As soon as the `chunk` is dereferenced, the `count_read` lock is no longer needed.
-                let slot = unsafe { chunk.get_unchecked(slot_index as usize) };
-                if let Ok(_) = slot.table(key.generation()) {
-                    count += 1;
-                }
-            }
-        }
-        drop(count_read);
-        count
-    }
-
     pub fn get(&self, key: Key) -> Result<(&Slot, u32), Error> {
-        let count_read = self.count.read();
+        let read = self.count.read();
         let (chunk_index, slot_index) = Self::decompose(key.index());
         // SAFETY: `chunks` can be read since the `count_read` lock is held.
         let chunks = unsafe { &**self.chunks.get() };
         let chunk = &**chunks.get(chunk_index as usize).ok_or(Error::InvalidKey)?;
         // SAFETY: As soon as the `chunk` is dereferenced, the `count_read` lock is no longer needed.
-        drop(count_read);
+        drop(read);
         let slot = unsafe { chunk.get_unchecked(slot_index as usize) };
         // SAFETY: A shared reference to a slot can be returned safely without being tied to the lifetime of the read guard
         // because its address is stable and no mutable reference to it is ever given out.
@@ -124,14 +106,53 @@ impl Keys {
         Ok((slot, slot.table(key.generation())?))
     }
 
+    #[inline]
     pub unsafe fn get_unchecked(&self, key: Key) -> &Slot {
-        // See `slot` for safety.
-        let count_read = self.count.read();
+        // See `get` for safety.
+        let read = self.count.read();
         let (chunk_index, slot_index) = Self::decompose(key.index());
         let chunks = &**self.chunks.get();
         let chunk = &**chunks.get_unchecked(chunk_index as usize);
-        drop(count_read);
+        drop(read);
         chunk.get_unchecked(slot_index as usize)
+    }
+
+    #[inline]
+    pub fn get_all(
+        &self,
+        keys: impl IntoIterator<Item = Key>,
+    ) -> impl Iterator<Item = (Key, Result<(&Slot, u32), Error>)> {
+        let read = self.count.read();
+        keys.into_iter().map(move |key| {
+            // Keep the lock alive.
+            let _read = &read;
+            let (chunk_index, slot_index) = Keys::decompose(key.index());
+            let chunks = unsafe { &**self.chunks.get() };
+            let Some(chunk) = chunks.get(chunk_index as usize) else {
+                return (key, Err(Error::InvalidKey));
+            };
+            let slot = unsafe { chunk.get_unchecked(slot_index as usize) };
+            match slot.table(key.generation()) {
+                Ok(table) => (key, Ok((slot, table))),
+                Err(error) => (key, Err(error)),
+            }
+        })
+    }
+
+    #[inline]
+    pub unsafe fn get_all_unchecked(
+        &self,
+        keys: impl IntoIterator<Item = Key>,
+    ) -> impl Iterator<Item = (Key, &Slot)> {
+        let read = self.count.read();
+        keys.into_iter().map(move |key| {
+            // Keep the lock alive.
+            let _read = &read;
+            let (chunk_index, slot_index) = Keys::decompose(key.index());
+            let chunks = unsafe { &**self.chunks.get() };
+            let chunk = unsafe { chunks.get_unchecked(chunk_index as usize) };
+            (key, unsafe { chunk.get_unchecked(slot_index as usize) })
+        })
     }
 
     pub fn reserve(&self, keys: &mut [Key]) {
@@ -171,8 +192,34 @@ impl Keys {
         }
     }
 
+    #[inline]
+    pub(crate) fn initialize(&self, keys: &[Key], table: u32, range: Range<usize>) {
+        let mut row = range.start as u32;
+        for (key, slot) in unsafe { self.get_all_unchecked(keys[range].iter().copied()) } {
+            slot.initialize(key.generation(), table, row);
+            row += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn update(&self, keys: &[Key], range: Range<usize>) {
+        let mut row = range.start as u32;
+        for (_, slot) in unsafe { self.get_all_unchecked(keys[range].iter().copied()) } {
+            slot.update(row);
+            row += 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn release(&self, keys: &[Key]) {
+        for (_, slot) in unsafe { self.get_all_unchecked(keys.iter().copied()) } {
+            slot.release();
+        }
+        self.recycle(keys.iter().copied());
+    }
+
     /// Assumes that the keys have had their `Slot` released and that keys are release only once.
-    pub(crate) fn release(&self, keys: impl IntoIterator<Item = Key>) {
+    pub(crate) fn recycle(&self, keys: impl IntoIterator<Item = Key>) {
         let mut free_write = self.free.write();
         let (free_keys, free_count) = &mut *free_write;
         free_keys.truncate((*free_count.get_mut()).max(0) as _);

@@ -1,14 +1,16 @@
 use std::{
     collections::{HashMap, HashSet},
+    marker::PhantomData,
     num::NonZeroUsize,
 };
 
 use parking_lot::RwLockWriteGuard;
 
 use crate::{
+    filter::Filter,
     key::{Key, Slot},
-    table::{self, Table},
-    Database, Error,
+    table::{self, Store, Table},
+    try_each_swap, Database, Error,
 };
 
 pub struct Destroy<'d> {
@@ -16,6 +18,14 @@ pub struct Destroy<'d> {
     keys: HashSet<Key>,
     pending: Vec<(Key, &'d Slot, u32)>,
     sorted: HashMap<u32, State<'d>>,
+}
+
+/// Destroys all keys in tables that satisfy the filter `F`.
+pub struct DestroyAll<'d, F: Filter> {
+    database: &'d Database,
+    index: usize,
+    tables: Vec<&'d Table>,
+    _marker: PhantomData<fn(F)>,
 }
 
 struct State<'d> {
@@ -32,12 +42,20 @@ impl Database {
             sorted: HashMap::new(),
         }
     }
+
+    pub fn destroy_all<F: Filter>(&self) -> DestroyAll<F> {
+        DestroyAll {
+            database: self,
+            index: 0,
+            tables: Vec::new(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<'d> Destroy<'d> {
     #[inline]
     pub fn one(&mut self, key: Key) -> bool {
-        // TODO: Prevent duplicate keys to be added...
         match self.database.keys().get(key) {
             Ok((slot, table)) => {
                 Self::sort(key, slot, table, &mut self.sorted, self.database).is_ok()
@@ -53,7 +71,6 @@ impl<'d> Destroy<'d> {
             .count()
     }
 
-    #[inline]
     pub fn resolve(&mut self) -> usize {
         self.resolve_sorted();
         while self.pending.len() > 0 {
@@ -64,7 +81,7 @@ impl<'d> Destroy<'d> {
         }
         let count = self.keys.len();
         // Note: Since releasing of keys is done here, there is a period of time where some keys are unavailable for reuse.
-        self.database.keys.release(self.keys.drain());
+        self.database.keys.recycle(self.keys.drain());
         count
     }
 
@@ -83,10 +100,9 @@ impl<'d> Destroy<'d> {
                 &mut self.keys,
                 &mut self.pending,
             );
-            let count = state.rows.len();
-            if count == 0 {
+            let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                 continue;
-            }
+            };
             debug_assert!(low <= high);
 
             let range = low..high + 1;
@@ -94,24 +110,15 @@ impl<'d> Destroy<'d> {
             let head = inner.release(count);
             let keys = inner.keys.get_mut();
             let (low, high) = (range.start as usize, range.end as usize);
-            if range.len() == count {
+
+            if range.len() == count.get() {
                 // The destroy range is contiguous.
                 let over = high.saturating_sub(head);
-                let end = count - over;
+                let end = count.get() - over;
                 if let Some(end) = NonZeroUsize::new(end) {
                     // Squash the range at the end of the table on the beginning of the removed range.
                     let start = head + over;
-                    for store in inner.stores.iter_mut() {
-                        unsafe { store.squash(start, low, end) };
-                    }
-
-                    // Update the keys.
-                    keys.copy_within(start..start + end.get(), low);
-                    for i in low..low + end.get() {
-                        let key = unsafe { *keys.get_unchecked(i) };
-                        let slot = unsafe { self.database.keys().get_unchecked(key) };
-                        slot.update(i as _);
-                    }
+                    squash(self.database, keys, &mut inner.stores, start, low, end);
                 }
 
                 if let Some(over) = NonZeroUsize::new(over) {
@@ -138,16 +145,9 @@ impl<'d> Destroy<'d> {
                         while unsafe { *keys.get_unchecked(cursor) } == Key::NULL {
                             cursor += 1;
                         }
-                        debug_assert!(cursor < head + count);
-
-                        for store in inner.stores.iter_mut() {
-                            unsafe { store.squash(cursor, row, NonZeroUsize::new_unchecked(1)) };
-                        }
-
-                        let key = unsafe { *keys.get_unchecked_mut(cursor) };
-                        unsafe { *keys.get_unchecked_mut(row) = key };
-                        let slot = unsafe { self.database.keys().get_unchecked(key) };
-                        slot.update(row as _);
+                        debug_assert!(cursor < head + count.get());
+                        let one = NonZeroUsize::MIN;
+                        squash(self.database, keys, &mut inner.stores, cursor, row, one);
                         cursor += 1;
                     } else {
                         // Try to batch contiguous drops.
@@ -238,4 +238,60 @@ impl Drop for Destroy<'_> {
     fn drop(&mut self) {
         self.resolve();
     }
+}
+
+impl<'d, F: Filter> DestroyAll<'d, F> {
+    pub fn resolve(&mut self) -> usize {
+        while let Ok(table) = self.database.tables().get(self.index) {
+            self.index += 1;
+            if F::filter(table, self.database) {
+                self.tables.push(table);
+            }
+        }
+
+        try_each_swap(
+            &mut self.tables,
+            0,
+            |sum, table| Some(*sum += Self::resolve_table(table.inner.try_write()?, self.database)),
+            |sum, table| *sum += Self::resolve_table(table.inner.write(), self.database),
+        )
+    }
+
+    fn resolve_table(mut inner: RwLockWriteGuard<'d, table::Inner>, database: &Database) -> usize {
+        let Some(count) = NonZeroUsize::new(*inner.count.get_mut() as _) else {
+            return 0;
+        };
+        inner.release(count);
+
+        for store in inner.stores.iter_mut() {
+            unsafe { store.drop(0, count) };
+        }
+        let keys = inner.keys.get_mut();
+        database.keys().release(&keys[..count.get()]);
+        return count.get();
+    }
+}
+
+impl<F: Filter> Drop for DestroyAll<'_, F> {
+    fn drop(&mut self) {
+        self.resolve();
+    }
+}
+
+#[inline]
+fn squash(
+    database: &Database,
+    keys: &mut [Key],
+    stores: &mut [Store],
+    source: usize,
+    target: usize,
+    count: NonZeroUsize,
+) {
+    for store in stores {
+        unsafe { store.squash(source, target, count) };
+    }
+
+    // Update the keys.
+    keys.copy_within(source..source + count.get(), target);
+    database.keys().update(keys, target..target + count.get());
 }

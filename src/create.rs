@@ -5,7 +5,7 @@ use crate::{
     template::{ApplyContext, DeclareContext, InitializeContext, Template},
     Database, Error,
 };
-use std::{ptr::NonNull, sync::Arc};
+use std::{num::NonZeroUsize, ptr::NonNull, sync::Arc};
 
 pub struct Create<'d, T: Template> {
     database: &'d Database,
@@ -137,38 +137,32 @@ impl<'d, T: Template> Create<'d, T> {
     /// In order to prevent deadlocks, **do not call this method while using a `Query`** unless you can
     /// guarantee that there are no overlaps in table usage between this `Create` and the `Query`.
     pub fn resolve(&mut self) {
-        let count = self.templates.len();
-        if count == 0 {
+        let Some(count) = NonZeroUsize::new(self.templates.len()) else {
             return;
-        }
+        };
 
         let (start, inner) = table::Inner::reserve(self.table.inner.upgradable_read(), count);
         let keys = unsafe { &mut **inner.keys.get() };
-        keys[start..start + count].copy_from_slice(&self.keys[..count]);
+        keys[start..start + count.get()].copy_from_slice(&self.keys[..count.get()]);
         if T::SIZE == 0 {
-            // No data to initialize. Initialize table keys.
+            // No data to initialize.
             self.templates.clear();
-            for i in 0..count {
-                let key = unsafe { *self.keys.get_unchecked(i) };
-                let slot = unsafe { self.database.keys().get_unchecked(key) };
-                slot.initialize(key.generation(), self.table.index(), (start + i) as u32);
-            }
         } else {
             // Initialize table rows.
             for store in inner.stores() {
                 // SAFETY: Since this row is not yet observable by any thread but this one, no need to take locks.
                 self.pointers.push(unsafe { *store.data().data_ptr() });
             }
-
             let context = ApplyContext(&self.pointers, 0);
             for (i, template) in self.templates.drain(..).enumerate() {
-                let key = unsafe { *self.keys.get_unchecked(i) };
-                let slot = unsafe { self.database.keys().get_unchecked(key) };
                 unsafe { template.apply(&self.state, context.with(start + i)) };
-                slot.initialize(key.generation(), self.table.index(), (start + i) as u32);
             }
             self.pointers.clear();
         }
+        // Initialize table keys.
+        self.database
+            .keys()
+            .initialize(keys, self.table.index(), start..start + count.get());
         inner.commit(count);
 
         // Sanity checks.
@@ -179,7 +173,7 @@ impl<'d, T: Template> Create<'d, T> {
     #[inline]
     pub fn clear(&mut self) {
         let keys = self.database.keys();
-        keys.release(self.keys[..self.templates.len()].iter().copied());
+        keys.recycle(self.keys[..self.templates.len()].iter().copied());
         self.templates.clear();
     }
 }

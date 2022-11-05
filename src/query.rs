@@ -1,9 +1,9 @@
 use crate::{
     filter::Filter,
     key::{Key, Slot},
-    row::{Access, ChunkContext, DeclareContext, InitializeContext, ItemContext, Row},
+    row::{Access, ChunkContext, DeclareContext, InitializeContext, ItemContext, Order, Row},
     table::{self, Table},
-    Database, Datum, Error,
+    Database, Error,
 };
 use std::{
     any::TypeId,
@@ -20,7 +20,8 @@ pub struct Query<'d, R: Row, F = (), I = Item> {
     index: usize,
     indices: HashMap<u32, u32>, // From table index to state index.
     states: Vec<(R::State, &'d Table, Vec<(usize, Access)>)>,
-    accesses: Vec<Access>,
+    accesses: HashSet<Access>,
+    order: Order,
     done: VecDeque<u32>,
     pending: VecDeque<u32>,
     pointers: Vec<NonNull<()>>,
@@ -47,14 +48,20 @@ impl Database {
     pub fn query<R: Row>(&self) -> Result<Query<'_, R>, Error> {
         // Detects violations of rust's invariants.
         let mut accesses = HashSet::new();
-        R::declare(DeclareContext(&mut accesses))?;
+        let mut order = Order::Any;
+        let context = DeclareContext {
+            accesses: &mut accesses,
+            order: &mut order,
+        };
+        R::declare(context)?;
         Ok(Query {
             database: self,
             indices: HashMap::new(),
             states: Vec::new(),
             done: VecDeque::new(),
             pending: VecDeque::new(),
-            accesses: accesses.into_iter().collect(),
+            accesses,
+            order,
             pointers: Vec::new(),
             index: 0,
             _marker: PhantomData,
@@ -79,13 +86,14 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             pending: self.pending,
             states: self.states,
             accesses: self.accesses,
+            order: self.order,
             pointers: self.pointers,
             index: self.index,
             _marker: PhantomData,
         }
     }
 
-    pub fn read(mut self) -> Query<'d, R::Read, F, I> {
+    pub fn read(self) -> Query<'d, R::Read, F, I> {
         debug_assert!(self.done.is_empty());
         debug_assert!(self.pointers.is_empty());
 
@@ -99,16 +107,19 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 (R::read(state), table, indices)
             })
             .collect();
-        for access in self.accesses.iter_mut() {
-            *access = access.read();
-        }
+        let accesses = self
+            .accesses
+            .into_iter()
+            .map(|access| access.read())
+            .collect();
         Query {
             database: self.database,
             indices: self.indices,
             states,
             done: self.done,
             pending: self.pending,
-            accesses: self.accesses,
+            accesses,
+            order: Order::Any, // TODO: Is this ok?
             pointers: self.pointers,
             index: self.index,
             _marker: PhantomData,
@@ -119,6 +130,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         debug_assert!(self.done.is_empty());
         debug_assert!(self.pointers.is_empty());
 
+        // TODO: Do I need to do something about ordering here?
         let indices = self.states.iter().filter_map(|(_, table, _)| {
             if G::filter(table, self.database) {
                 self.indices.get(&table.index()).copied()
@@ -137,6 +149,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             done: self.done,
             pending: self.pending,
             accesses: self.accesses,
+            order: self.order,
             pointers: self.pointers,
             index: self.index,
             _marker: PhantomData,
@@ -157,7 +170,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         mut fold: impl FnMut(
             S,
             u32,
-            &R::State,
+            &mut R::State,
             &[NonNull<()>],
             &Table,
             &table::Inner,
@@ -214,7 +227,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
     pub(crate) fn guards<S>(
         &mut self,
         mut state: S,
-        mut fold: impl FnMut(S, u32, &R::State, &[NonNull<()>], &Table, &table::Inner) -> S,
+        mut fold: impl FnMut(S, u32, &mut R::State, &[NonNull<()>], &Table, &table::Inner) -> S,
     ) -> S {
         for _ in 0..self.pending.len() {
             let index = unsafe { self.pending.pop_front().unwrap_unchecked() };
@@ -248,7 +261,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         &mut self,
         state: S,
         index: u32,
-        with: impl FnOnce(S, &R::State, &[NonNull<()>], &Table, &table::Inner) -> T,
+        with: impl FnOnce(S, &mut R::State, &[NonNull<()>], &Table, &table::Inner) -> T,
     ) -> Result<T, S> {
         fn next<S, T>(
             state: S,
@@ -297,7 +310,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             }
         }
 
-        let (row, table, indices) = unsafe { self.states.get_unchecked(index as usize) };
+        let (row, table, indices) = unsafe { self.states.get_unchecked_mut(index as usize) };
         let inner = match table.inner.try_read() {
             Some(inner) => inner,
             None => return Err(state),
@@ -315,7 +328,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
     fn lock<T>(
         &mut self,
         index: u32,
-        with: impl FnOnce(&R::State, &[NonNull<()>], &Table, &table::Inner) -> T,
+        with: impl FnOnce(&mut R::State, &[NonNull<()>], &Table, &table::Inner) -> T,
     ) -> T {
         #[inline]
         fn next<T>(
@@ -358,7 +371,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             }
         }
 
-        let (row, table, indices) = unsafe { self.states.get_unchecked(index as usize) };
+        let (row, table, indices) = unsafe { self.states.get_unchecked_mut(index as usize) };
         let inner = table.inner.read();
         next(indices, &mut self.pointers, &inner, |pointers, inner| {
             with(row, pointers, table, inner)
@@ -425,7 +438,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     ) -> S {
         self.update();
         match self.try_guards(state, |mut state, _, row, pointers, _, inner| {
-            let context = ItemContext(inner.keys(), pointers, 0);
+            let context = ItemContext::new(inner.keys(), pointers);
             for i in 0..inner.count() {
                 state = fold(state, R::item(row, context.with(i as _)))?;
             }
@@ -465,7 +478,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     pub fn fold<S, G: FnMut(S, R::Item<'_>) -> S>(&mut self, state: S, mut fold: G) -> S {
         self.update();
         self.guards(state, |mut state, _, row, pointers, _, inner| {
-            let context = ItemContext(inner.keys(), pointers, 0);
+            let context = ItemContext::new(inner.keys(), pointers);
             for i in 0..inner.count() {
                 state = fold(state, R::item(row, context.with(i as _)));
             }
@@ -561,8 +574,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 debug_assert_eq!(old_table, table.index());
                 match slot.table(key.generation()) {
                     Ok(new_table) if old_table == new_table => {
-                        let context = ItemContext(inner.keys(), pointers, slot.row() as _);
-                        Ok(find(Ok(R::item(row, context))))
+                        let context = ItemContext::new(inner.keys(), pointers);
+                        Ok(find(Ok(R::item(row, context.with(slot.row() as _)))))
                     }
                     // The `key` has just been moved to another table.
                     Ok(new_table) => {
@@ -597,7 +610,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         self.guards(state, |mut state, index, row, pointers, table, inner| {
-            let context = ItemContext(inner.keys(), pointers, 0);
+            let context = ItemContext::new(inner.keys(), pointers);
             let slots = unsafe { by.slots.get_unchecked_mut(index as usize) };
             for (key, value, slot) in slots.drain(..) {
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
@@ -626,7 +639,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         self.try_guards(state, |mut state, index, row, pointers, table, inner| {
-            let context = ItemContext(inner.keys(), pointers, 0);
+            let context = ItemContext::new(inner.keys(), pointers);
             let slots = unsafe { by.slots.get_unchecked_mut(index as usize) };
             for (key, value, slot) in slots.drain(..) {
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
@@ -717,33 +730,6 @@ impl Access {
     #[inline]
     pub const fn read(&self) -> Self {
         Self::Read(self.identifier())
-    }
-}
-
-impl DeclareContext<'_> {
-    pub fn own(&mut self) -> DeclareContext<'_> {
-        DeclareContext(self.0)
-    }
-
-    pub fn read<D: Datum>(&mut self) -> Result<(), Error> {
-        let identifier = TypeId::of::<D>();
-        if self.0.contains(&Access::Write(identifier)) {
-            Err(Error::ReadWriteConflict)
-        } else {
-            self.0.insert(Access::Read(identifier));
-            Ok(())
-        }
-    }
-
-    pub fn write<D: Datum>(&mut self) -> Result<(), Error> {
-        let identifier = TypeId::of::<D>();
-        if self.0.contains(&Access::Read(identifier)) {
-            Err(Error::ReadWriteConflict)
-        } else if self.0.insert(Access::Write(identifier)) {
-            Ok(())
-        } else {
-            Err(Error::WriteWriteConflict)
-        }
     }
 }
 

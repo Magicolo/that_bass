@@ -1,36 +1,56 @@
 #![feature(type_alias_impl_trait)]
 #![feature(auto_traits)]
 #![feature(negative_impls)]
-#![feature(generic_associated_types)]
-#![feature(generators)]
-#![feature(iter_from_generator)]
-#![feature(generator_trait)]
-#![feature(associated_type_defaults)]
 #![feature(portable_simd)]
-#![feature(array_windows)]
-#![feature(drain_filter)]
+#![feature(slice_swap_unchecked)]
+#![feature(nonzero_min_max)]
 
 pub mod add;
 pub mod core;
 pub mod create;
+pub mod defer;
 pub mod destroy;
 pub mod filter;
 pub mod key;
 pub mod query;
+pub mod remove;
 pub mod resources;
 pub mod row;
 pub mod table;
 pub mod template;
 
 /*
-    TODO: Complete `Database::move_to_table` and add `Add<T: Template>/Remove<T: Template>` operations.
-
-    TODO: Implement `Keep<T>/Trim<T>`:
+    TODO: Use `try_each_swap` in `Query` instead of `pending/done`?
+    TODO: Implement `Row` for `Add<T: Template>`:
+        - Has only one method `Add::add(self, T)` (consuming `self` ensures that there are no duplicate keys).
+        - Since a table lock will be held while iterating the query up to the resolving of `Add` (inclusively), keys can be assumed
+        to be valid and to not have been moved.
+        - Keys can also be assumed to be ordered in the table!
+        - `Add` would be resolved right after a table is done being iterated.
+        - The query will need to take upgradable locks on its tables rather than read locks.
+        - Upgradable locks will also need to be taken for source tables that have a target table with a lower index (such that table
+        locks can be taken in index order).
+        - To prevent visiting keys twice, some ordering must apply on the query tables:
+            - Group tables by overlap, order them from most to least stores, groups can be reordered freely within themselves.
+                - The overlap is the size of the intersection of all of the combined `Add<T>` (or similar operator) metas.
+            - With `Add<A>`, all tables with an `A` must be visited first (in any order within themselves).
+            - With `Add<A>, Add<B>`: `A & B`, `A | B`, others.
+            - With `Add<A>, Add<B>, Add<C>`: `A & B & C`, (`A & B`) | (`A & C`) | (`B & C`), A | B | C, others.
+        - Because of this ordering, `Add<T>` will not be allowed with `Remove<U>` in the same query.
+    TODO: Implement `Row` for `Remove<T: Template>`:
+        - Same benefits and inconvenients as `Add<T>`.
+        - Requires the reverse ordering as `Add<T>`.
+        - Do not allow `Add`-like and `Remove`-like operators in the same query.
+    TODO: Implement `Remove<T: Template>`
+    TODO: Implement `Keep<T: Template>/Trim<T: Template>`:
         - Removes all datum from a key except to ones provided by `T`.
-    TODO: Implement `Change<T>/Convert<T>/Conform<T>`:
+    TODO: Implement `Change<T: Template>/Convert<T: Template>/Conform<T: Template>`:
         - Converts a key such that it corresponds to the `T: Template` (adds missing datum, removes exceeding datum).
-    TODO: Implement `Template for Set<D>`:
+    TODO: Implement `Template for Set<D: Datum>`:
         - Sets the datum `D` for a key only if the key already has the datum.
+    TODO: Implement `Row` for `Get<D: Datum + Copy>`:
+        - At the beginning of iteration, `Get` makes a copy of the whole store to a temporary buffer, then the store lock can be
+        released immediately.
 
     TODO: Implement nest operations for query:
         - Forces the outer query to take additionnal locks in case the inner query needs to produce the same item as the outer query:
@@ -138,6 +158,7 @@ pub enum Error {
     DuplicateMeta,
     ReadWriteConflict,
     WriteWriteConflict,
+    AddRemoveConflict,
     WouldBlock,
     WouldDeadlock,
     InvalidKey,
@@ -175,6 +196,14 @@ pub struct Meta {
     copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), NonZeroUsize),
     drop: unsafe fn(NonNull<()>, usize, NonZeroUsize),
 }
+
+impl PartialEq for Meta {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.identifier() == other.identifier()
+    }
+}
+impl Eq for Meta {}
 
 pub trait Datum: Sized + 'static {
     #[inline]
@@ -246,9 +275,50 @@ impl Database {
     }
 }
 
+fn try_each_swap<S, T>(
+    items: &mut [T],
+    mut state: S,
+    mut try_each: impl FnMut(&mut S, &mut T) -> Option<()>,
+    mut each: impl FnMut(&mut S, &mut T),
+) -> S {
+    // TODO: Implement this `head/tail` algorithm in `Query` (to replace `pending/done`)?
+    let mut head = 0;
+    let mut tail = items.len();
+    while head < tail {
+        // SAFETY:
+        // - `head` is only ever incremented and is always `< tail`.
+        // - `tail` is only ever decremented and is always `< items.len() && > head`.
+        match try_each(&mut state, unsafe { items.get_unchecked_mut(head) }) {
+            Some(_) => head += 1,
+            None => {
+                // Requeue the table at the end of `items`.
+                tail -= 1;
+                // SAFETY:
+                // - `tail` must be greater than 0 before the decrement because of the `while` condition.
+                // - `head` and `tail` are always valid indices because of the safety explanation above.
+                unsafe { items.swap_unchecked(head, tail) };
+            }
+        };
+    }
+
+    // Iterate in reverse to visit the oldest requeued table first.
+    let mut tail = items.len();
+    while head < tail {
+        tail -= 1;
+        each(&mut state, unsafe { items.get_unchecked_mut(tail) });
+    }
+
+    state
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{filter::False, key::Key, Database, Datum, Error};
+    use crate::{
+        add::Add,
+        filter::{False, Has, True},
+        key::Key,
+        Database, Datum, Error,
+    };
     use std::{
         collections::HashSet,
         simd::{f32x16, f32x2, f32x4, f32x8},
@@ -350,10 +420,16 @@ mod tests {
     fn destroy_one_fails_with_null_key() {
         let database = Database::new();
         let mut destroy = database.destroy();
-        assert_eq!(database.keys().valid([Key::NULL]), 0);
+        assert_eq!(
+            database.keys().get(Key::NULL).err(),
+            Some(Error::InvalidKey)
+        );
         assert_eq!(destroy.one(Key::NULL), false);
         assert_eq!(destroy.resolve(), 0);
-        assert_eq!(database.keys().valid([Key::NULL]), 0);
+        assert_eq!(
+            database.keys().get(Key::NULL).err(),
+            Some(Error::InvalidKey)
+        );
     }
 
     #[test]
@@ -361,24 +437,32 @@ mod tests {
         let database = Database::new();
         let key = database.create::<()>()?.one(());
         let mut destroy = database.destroy();
-        assert_eq!(database.keys().valid([key]), 1);
+        assert!(database.keys().get(key).is_ok());
         assert_eq!(destroy.one(key), true);
-        assert_eq!(database.keys().valid([key]), 1);
+        assert!(database.keys().get(key).is_ok());
         assert_eq!(destroy.resolve(), 1);
-        assert_eq!(database.keys().valid([key]), 0);
+        assert_eq!(database.keys().get(key).err(), Some(Error::InvalidKey));
         Ok(())
     }
 
     #[test]
     fn destroy_all_n_with_create_all_n_resolves_n() -> Result<(), Error> {
         let database = Database::new();
+        let count = |keys: &[Key]| {
+            database
+                .keys()
+                .get_all(keys.iter().copied())
+                .filter(|(_, result)| result.is_ok())
+                .count()
+        };
+
         let keys = database.create::<()>()?.all_n([(); 1000]);
         let mut destroy = database.destroy();
-        assert_eq!(database.keys().valid(keys.clone()), 1000);
+        assert_eq!(count(&keys), 1000);
         assert_eq!(destroy.all(keys.clone()), 1000);
-        assert_eq!(database.keys().valid(keys.clone()), 1000);
+        assert_eq!(count(&keys), 1000);
         assert_eq!(destroy.resolve(), 1000);
-        assert_eq!(database.keys().valid(keys.clone()), 0);
+        assert_eq!(count(&keys), 0);
         Ok(())
     }
 
@@ -427,21 +511,21 @@ mod tests {
 
         let database = Database::new();
         let key = database.create()?.one(());
-        let mut addA = database.add()?;
-        let mut addB = database.add()?;
+        let mut add_a = database.add()?;
+        let mut add_b = database.add()?;
 
-        assert!(addA.one(key, A));
-        assert!(addB.one(key, B));
+        assert!(add_a.one(key, A));
+        assert!(add_b.one(key, B));
         assert!(!database.query::<&A>()?.has(key));
         assert!(!database.query::<&B>()?.has(key));
         assert!(!database.query::<(&A, &B)>()?.has(key));
 
-        assert_eq!(addA.resolve(), 1);
+        assert_eq!(add_a.resolve(), 1);
         assert!(database.query::<&A>()?.has(key));
         assert!(!database.query::<&B>()?.has(key));
         assert!(!database.query::<(&A, &B)>()?.has(key));
 
-        assert_eq!(addB.resolve(), 1);
+        assert_eq!(add_b.resolve(), 1);
         assert!(database.query::<&A>()?.has(key));
         assert!(database.query::<&B>()?.has(key));
         assert!(database.query::<(&A, &B)>()?.has(key));
@@ -468,6 +552,47 @@ mod tests {
         assert!(database.query::<&A>()?.has(key));
         assert!(database.query::<&B>()?.has(key));
         assert!(database.query::<(&A, &B)>()?.has(key));
+        Ok(())
+    }
+
+    #[test]
+    fn add_item_one() -> Result<(), Error> {
+        struct A;
+        impl Datum for A {}
+
+        let database = Database::new();
+        database.create()?.one(());
+        database.query::<Add<A>>()?.each(|add| add.one(A));
+        assert_eq!(database.query::<&A>()?.count(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn decimate_none() -> Result<(), Error> {
+        let database = Database::new();
+        assert_eq!(database.destroy_all::<True>().resolve(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn decimate_all() -> Result<(), Error> {
+        let database = Database::new();
+        database.create()?.all_n([(); 100]);
+        assert_eq!(database.destroy_all::<True>().resolve(), 100);
+        Ok(())
+    }
+
+    #[test]
+    fn decimate_filtered() -> Result<(), Error> {
+        #[derive(Clone, Copy)]
+        struct A;
+        impl Datum for A {}
+
+        let database = Database::new();
+        database.create()?.all_n([(); 100]);
+        database.create()?.all_n([A; 100]);
+        assert_eq!(database.destroy_all::<Has<A>>().resolve(), 100);
+        assert_eq!(database.destroy_all::<()>().resolve(), 100);
         Ok(())
     }
 

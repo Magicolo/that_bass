@@ -32,7 +32,7 @@ pub struct Store {
 }
 
 pub struct Tables {
-    /// The lock is seperated from the tables because once a table is dereferenced from the `tables` vector, it no longer
+    /// The lock is separated from the tables because once a table is dereferenced from the `tables` vector, it no longer
     /// needs to have its lifetime tied to a `RwLockReadGuard`. This is safe because the addresses of tables are stable
     /// (guaranteed by the `Arc` indirection) and no mutable references are ever given out.
     lock: RwLock<()>,
@@ -237,10 +237,9 @@ impl<'a> IntoIterator for &'a Tables {
 
     fn into_iter(self) -> Self::IntoIter {
         let read = self.lock.read();
-        let tables = unsafe { &**self.tables.get() };
-        tables.iter().map(move |table| {
+        unsafe { &**self.tables.get() }.iter().map(move |table| {
             // Keep the read guard alive.
-            let _ = &read;
+            let _read = &read;
             &**table
         })
     }
@@ -322,18 +321,18 @@ impl Inner {
 
     pub fn reserve<'a>(
         inner: RwLockUpgradableReadGuard<'a, Inner>,
-        count: usize,
+        count: NonZeroUsize,
     ) -> (usize, RwLockReadGuard<'a, Inner>) {
         let (start, inner) = {
             let (index, _) = {
-                let add = Self::recompose_pending(count as _, 0);
+                let add = Self::recompose_pending(count.get() as _, 0);
                 let pending = inner.pending.fetch_add(add, Ordering::AcqRel);
                 Self::decompose_pending(pending)
             };
             // There can not be more than `u32::MAX` keys at a given time.
-            assert!(index < u32::MAX - count as u32);
+            assert!(index < u32::MAX - count.get() as u32);
 
-            let capacity = index as usize + count;
+            let capacity = index as usize + count.get();
             if capacity <= inner.capacity() {
                 (index as usize, RwLockUpgradableReadGuard::downgrade(inner))
             } else {
@@ -355,12 +354,12 @@ impl Inner {
         (start, inner)
     }
 
-    pub fn commit(&self, count: usize) -> bool {
-        let add = Self::recompose_pending(0, count as _);
+    pub fn commit(&self, count: NonZeroUsize) -> bool {
+        let add = Self::recompose_pending(0, count.get() as _);
         let pending = self.pending.fetch_add(add, Ordering::AcqRel);
         let (begun, ended) = Self::decompose_pending(pending);
         debug_assert!(begun >= ended);
-        if begun == ended + count as u32 {
+        if begun == ended + count.get() as u32 {
             self.count.fetch_max(begun, Ordering::Relaxed);
             true
         } else {
@@ -368,7 +367,7 @@ impl Inner {
         }
     }
 
-    pub fn release(&mut self, count: usize) -> usize {
+    pub fn release(&mut self, count: NonZeroUsize) -> usize {
         let current = self.count.get_mut();
         let pending = self.pending.get_mut();
         let (begun, ended) = Self::decompose_pending(*pending);
@@ -376,9 +375,9 @@ impl Inner {
         // Sanity checks. If this is not the case, there is a bug in the locking logic.
         debug_assert_eq!(begun, ended);
         debug_assert_eq!(begun, *current);
-        debug_assert!(*current >= count as u32);
-        *current -= count as u32;
-        *pending = Self::recompose_pending(begun - 1, ended - 1);
+        debug_assert!(*current >= count.get() as u32);
+        *current -= count.get() as u32;
+        *pending = Self::recompose_pending(begun - count.get() as u32, ended - count.get() as u32);
         *current as usize
     }
 }

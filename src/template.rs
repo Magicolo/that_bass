@@ -1,17 +1,8 @@
 use crate::{Datum, Error, Meta};
-use std::{
-    any::TypeId,
-    collections::{HashMap, HashSet},
-    marker::PhantomData,
-    mem::size_of,
-    ptr::NonNull,
-};
+use std::{any::TypeId, collections::HashMap, marker::PhantomData, mem::size_of, ptr::NonNull};
 
 pub struct Apply<D>(usize, PhantomData<fn(D)>);
-pub struct DeclareContext<'a>(
-    pub(crate) &'a mut HashSet<TypeId>,
-    pub(crate) &'a mut Vec<&'static Meta>,
-);
+pub struct DeclareContext<'a>(&'a mut Vec<&'static Meta>);
 pub struct InitializeContext<'a>(pub(crate) &'a HashMap<TypeId, usize>);
 pub struct ApplyContext<'a>(pub(crate) &'a [NonNull<()>], pub(crate) usize);
 
@@ -26,23 +17,23 @@ pub unsafe trait Template: 'static {
 impl DeclareContext<'_> {
     pub fn metas<T: Template>() -> Result<Vec<&'static Meta>, Error> {
         let mut metas = Vec::new();
-        let mut types = HashSet::new();
-        let context = DeclareContext(&mut types, &mut metas);
+        let context = DeclareContext(&mut metas);
         T::declare(context)?;
         Ok(metas)
     }
 
     pub fn apply<D: Datum>(&mut self) -> Result<(), Error> {
-        if self.0.insert(TypeId::of::<D>()) {
-            self.1.push(D::meta());
-            Ok(())
-        } else {
+        let meta = D::meta();
+        if self.0.contains(&meta) {
             Err(Error::DuplicateMeta)
+        } else {
+            self.0.push(meta);
+            Ok(())
         }
     }
 
     pub fn own(&mut self) -> DeclareContext {
-        DeclareContext(self.0, self.1)
+        DeclareContext(self.0)
     }
 }
 
