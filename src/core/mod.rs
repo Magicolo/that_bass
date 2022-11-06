@@ -2,6 +2,7 @@ pub mod bits;
 pub mod borrow;
 pub mod iterate;
 pub mod or;
+pub mod utility;
 
 pub use bits::*;
 pub use borrow::*;

@@ -21,6 +21,8 @@ pub mod template;
 
 /*
     TODO: Use `try_each_swap` in `Query` instead of `pending/done`?
+    TODO: Implement `Defer`:
+        - Will order the resolution of deferred operations such that coherence is maintained.
     TODO: Implement `Remove<T: Template>`
     TODO: Implement `Keep<T: Template>/Trim<T: Template>`:
         - Removes all datum from a key except to ones provided by `T`.
@@ -259,46 +261,10 @@ impl Database {
     }
 }
 
-fn try_each_swap<S, T>(
-    items: &mut [T],
-    mut state: S,
-    mut try_each: impl FnMut(&mut S, &mut T) -> Option<()>,
-    mut each: impl FnMut(&mut S, &mut T),
-) -> S {
-    // TODO: Implement this `head/tail` algorithm in `Query` (to replace `pending/done`)?
-    let mut head = 0;
-    let mut tail = items.len();
-    while head < tail {
-        // SAFETY:
-        // - `head` is only ever incremented and is always `< tail`.
-        // - `tail` is only ever decremented and is always `< items.len() && > head`.
-        match try_each(&mut state, unsafe { items.get_unchecked_mut(head) }) {
-            Some(_) => head += 1,
-            None => {
-                // Requeue the table at the end of `items`.
-                tail -= 1;
-                // SAFETY:
-                // - `tail` must be greater than 0 before the decrement because of the `while` condition.
-                // - `head` and `tail` are always valid indices because of the safety explanation above.
-                unsafe { items.swap_unchecked(head, tail) };
-            }
-        };
-    }
-
-    // Iterate in reverse to visit the oldest requeued table first.
-    let mut tail = items.len();
-    while head < tail {
-        tail -= 1;
-        each(&mut state, unsafe { items.get_unchecked_mut(tail) });
-    }
-
-    state
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
-        filter::{False, Has, True},
+        filter::{False, Has},
         key::Key,
         Database, Datum, Error,
     };
@@ -527,7 +493,7 @@ mod tests {
     #[test]
     fn destroy_all_resolve_0() -> Result<(), Error> {
         let database = Database::new();
-        assert_eq!(database.destroy_all::<True>().resolve(), 0);
+        assert_eq!(database.destroy_all().resolve(), 0);
         Ok(())
     }
 
@@ -535,7 +501,7 @@ mod tests {
     fn destroy_all_resolve_100() -> Result<(), Error> {
         let database = Database::new();
         database.create()?.all_n([(); 100]);
-        assert_eq!(database.destroy_all::<True>().resolve(), 100);
+        assert_eq!(database.destroy_all().resolve(), 100);
         Ok(())
     }
 
@@ -544,8 +510,8 @@ mod tests {
         let database = Database::new();
         database.create()?.all_n([(); 100]);
         database.create()?.all_n([A; 100]);
-        assert_eq!(database.destroy_all::<Has<A>>().resolve(), 100);
-        assert_eq!(database.destroy_all::<()>().resolve(), 100);
+        assert_eq!(database.destroy_all().filter::<Has<A>>().resolve(), 100);
+        assert_eq!(database.destroy_all().resolve(), 100);
         Ok(())
     }
 

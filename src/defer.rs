@@ -1,6 +1,11 @@
-use crate::{key::Key, Database};
+use crate::{
+    key::{Key, Slot},
+    template::Template,
+    Database, Error,
+};
 use std::{
-    any::TypeId,
+    any::{Any, TypeId},
+    cell::RefCell,
     collections::{HashMap, HashSet},
     ptr::NonNull,
 };
@@ -15,9 +20,26 @@ use std::{
 
 pub struct Defer<'d> {
     database: &'d Database,
-    indices: HashMap<TypeId, usize>,
-    keys: (Vec<Key>, HashSet<Key>, HashMap<Key, u32>),
+    creates: RefCell<Creates>,
     pointers: Vec<NonNull<()>>,
+}
+
+pub(crate) struct Inner {}
+
+struct Creates {
+    indices: HashMap<TypeId, usize>,
+    resolvers: Vec<Resolver>,
+}
+
+// struct Destroys {
+//     keys: HashSet<Key>,
+//     pending: Vec<(Key, &'d Slot, u32)>,
+//     sorted: HashMap<u32, State<'d>>,
+// }
+
+struct Resolver {
+    state: Box<dyn Any>,
+    resolve: fn(&mut dyn Any, usize),
 }
 
 impl Database {
@@ -27,31 +49,48 @@ impl Database {
 }
 
 impl<'d> Defer<'d> {
-    // pub fn create<T: Template>(&mut self) -> Result<Create<'d, '_, T>, Error> {
+    // pub fn create<T: Template>(&self) -> Result<Create<'d, '_, T>, Error> {
+    //     let mut creates = self.creates.borrow_mut();
+    //     let identifier = TypeId::of::<T>();
+    //     let index = match creates.indices.get(&identifier) {
+    //         Some(&index) => index,
+    //         None => {
+    //             let index = creates.resolvers.len();
+    //             creates.indices.insert(identifier, index);
+    //             creates.resolvers.push(Resolver {
+    //                 state: Box::new(()),
+    //                 resolve: |state, count| {},
+    //             });
+    //             index
+    //         }
+    //     };
+    //     let Some(resolver) = creates.resolvers.get_mut(index) else {
+    //         return Err(Error::MissingIndex);
+    //     };
     //     todo!()
     // }
 
-    // pub fn destroy(&mut self) -> Destroy<'d, '_> {
+    // pub fn destroy(&self) -> Destroy<'d, '_> {
     //     todo!()
     // }
 
-    // pub fn destroy_all<F: Filter>(&mut self) -> DestroyAll<'d, '_, F> {
+    // pub fn destroy_all<F: Filter>(&self) -> DestroyAll<'d, '_, F> {
     //     todo!()
     // }
 
-    // pub fn add<T: Template>(&mut self) -> Result<Add<'d, '_, T>, Error> {
+    // pub fn add<T: Template>(&self) -> Result<Add<'d, '_, T>, Error> {
     //     todo!()
     // }
 
-    // pub fn add_all<T: Template, F: Filter>(&mut self) -> Result<AddAll<'d, '_, T, F>, Error> {
+    // pub fn add_all<T: Template, F: Filter>(&self) -> Result<AddAll<'d, '_, T, F>, Error> {
     //     todo!()
     // }
 
-    // pub fn remove<T: Template>(&mut self) -> Result<Remove<'d, '_, T>, Error> {
+    // pub fn remove<T: Template>(&self) -> Result<Remove<'d, '_, T>, Error> {
     //     todo!()
     // }
 
-    // pub fn remove_all<T: Template, F: Filter>(&mut self) -> Result<RemoveAll<'d, '_, T, F>, Error> {
+    // pub fn remove_all<T: Template, F: Filter>(&self) -> Result<RemoveAll<'d, '_, T, F>, Error> {
     //     todo!()
     // }
 

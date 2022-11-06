@@ -1,16 +1,15 @@
+use crate::{
+    core::utility::fold_swap,
+    filter::Filter,
+    key::{Key, Slot},
+    table::{self, Store, Table},
+    Database, Error,
+};
+use parking_lot::RwLockWriteGuard;
 use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     num::NonZeroUsize,
-};
-
-use parking_lot::RwLockWriteGuard;
-
-use crate::{
-    filter::Filter,
-    key::{Key, Slot},
-    table::{self, Store, Table},
-    try_each_swap, Database, Error,
 };
 
 pub struct Destroy<'d> {
@@ -21,7 +20,7 @@ pub struct Destroy<'d> {
 }
 
 /// Destroys all keys in tables that satisfy the filter `F`.
-pub struct DestroyAll<'d, F: Filter> {
+pub struct DestroyAll<'d, F: Filter = ()> {
     database: &'d Database,
     index: usize,
     tables: Vec<&'d Table>,
@@ -43,7 +42,7 @@ impl Database {
         }
     }
 
-    pub fn destroy_all<F: Filter>(&self) -> DestroyAll<F> {
+    pub fn destroy_all(&self) -> DestroyAll {
         DestroyAll {
             database: self,
             index: 0,
@@ -241,6 +240,16 @@ impl Drop for Destroy<'_> {
 }
 
 impl<'d, F: Filter> DestroyAll<'d, F> {
+    pub fn filter<G: Filter>(mut self) -> DestroyAll<'d, (F, G)> {
+        self.tables.retain(|table| G::filter(table, self.database));
+        DestroyAll {
+            database: self.database,
+            index: self.index,
+            tables: self.tables,
+            _marker: PhantomData,
+        }
+    }
+
     pub fn resolve(&mut self) -> usize {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
@@ -249,11 +258,14 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
             }
         }
 
-        try_each_swap(
+        fold_swap(
             &mut self.tables,
             0,
-            |sum, table| Some(*sum += Self::resolve_table(table.inner.try_write()?, self.database)),
-            |sum, table| *sum += Self::resolve_table(table.inner.write(), self.database),
+            (),
+            |sum, _, table| {
+                Ok(sum + Self::resolve_table(table.inner.try_write().ok_or(sum)?, self.database))
+            },
+            |sum, _, table| sum + Self::resolve_table(table.inner.write(), self.database),
         )
     }
 
@@ -269,12 +281,6 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
         let keys = inner.keys.get_mut();
         database.keys().release(&keys[..count.get()]);
         return count.get();
-    }
-}
-
-impl<F: Filter> Drop for DestroyAll<'_, F> {
-    fn drop(&mut self) {
-        self.resolve();
     }
 }
 

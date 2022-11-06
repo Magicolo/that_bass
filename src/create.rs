@@ -96,22 +96,6 @@ impl<'d, T: Template> Create<'d, T> {
     }
 
     #[inline]
-    pub fn clone(&mut self, template: &T) -> Key
-    where
-        T: Clone,
-    {
-        self.one(template.clone())
-    }
-
-    #[inline]
-    pub fn default(&mut self) -> Key
-    where
-        T: Default,
-    {
-        self.one(T::default())
-    }
-
-    #[inline]
     pub fn with_n<const N: usize>(&mut self, mut with: impl FnMut() -> T) -> [Key; N] {
         self.all_n([(); N].map(|_| with()))
     }

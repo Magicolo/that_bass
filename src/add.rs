@@ -1,10 +1,11 @@
 use crate::{
+    core::utility::fold_swap,
     filter::Filter,
     key::{Key, Slot},
     resources::Global,
     table::{self, Store, Table},
     template::{ApplyContext, DeclareContext, InitializeContext, Template},
-    try_each_swap, Database, Error, Meta,
+    Database, Error, Meta,
 };
 use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{collections::HashMap, marker::PhantomData, num::NonZeroUsize, ptr::NonNull, sync::Arc};
@@ -423,28 +424,29 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
             }
         }
 
-        let (sum, ..) = try_each_swap(
+        fold_swap(
             &mut self.states,
-            (0, with, &mut self.pointers),
-            |(sum, with, pointers), state| {
-                *sum += if state.source.index() < state.target.index() {
-                    let source = state.source.inner.try_write()?;
-                    let target = state.target.inner.try_upgradable_read()?;
+            0,
+            (&mut self.pointers, with),
+            |sum, (pointers, with), state| {
+                let count = if state.source.index() < state.target.index() {
+                    let source = state.source.inner.try_write().ok_or(sum)?;
+                    let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
                     Self::resolve_tables(source, target, state, pointers, self.database, with)
                 } else if state.source.index() > state.target.index() {
-                    let target = state.target.inner.try_upgradable_read()?;
-                    let source = state.source.inner.try_write()?;
+                    let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
+                    let source = state.source.inner.try_write().ok_or(sum)?;
                     Self::resolve_tables(source, target, state, pointers, self.database, with)
                 } else if T::SIZE > 0 && set {
-                    let inner = state.source.inner.try_read()?;
+                    let inner = state.source.inner.try_read().ok_or(sum)?;
                     Self::resolve_table(inner, state, pointers, with)
                 } else {
                     0
                 };
-                Some(())
+                Ok(sum + count)
             },
-            |(sum, with, pointers), state| {
-                *sum += if state.source.index() < state.target.index() {
+            |sum, (pointers, with), state| {
+                sum + if state.source.index() < state.target.index() {
                     let source = state.source.inner.write();
                     let target = state.target.inner.upgradable_read();
                     Self::resolve_tables(source, target, state, pointers, self.database, with)
@@ -457,10 +459,9 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
                     Self::resolve_table(inner, state, pointers, with)
                 } else {
                     0
-                };
+                }
             },
-        );
-        sum
+        )
     }
 
     fn resolve_tables(
