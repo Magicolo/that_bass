@@ -21,7 +21,33 @@ pub mod template;
 
 /*
     TODO: Use `try_each_swap` in `Query` instead of `pending/done`?
-    TODO: Implement `Row` for `Add<T: Template>`:
+    TODO: Implement `Remove<T: Template>`
+    TODO: Implement `Keep<T: Template>/Trim<T: Template>`:
+        - Removes all datum from a key except to ones provided by `T`.
+    TODO: Implement `Change<T: Template>/Convert<T: Template>/Conform<T: Template>`:
+        - Converts a key such that it corresponds to the `T: Template` (adds missing datum, removes exceeding datum).
+    TODO: Implement `Template for Set<D: Datum>`:
+        - Sets the datum `D` for a key only if the key already has the datum.
+    TODO: Implement `Row` for `Get<D: Datum + Copy>`:
+        - At the beginning of iteration, `Get` makes a copy of the whole store to a temporary buffer, then the store lock can be
+        released immediately.
+    TODO: Implement traits for many tuple.
+
+    TODO: Implement `Permute`.
+        - Returns all permutations (with repetitions) of two queries.
+        - Order of items matters, so (A, B) is considered different than (B, A), thus both will be returned.
+        - May be unified with `Combine`.
+    TODO: Implement `Combine`.
+        - Returns all combinations (no repetitions) of two queries.
+        - Order of items does not matter, so (A, B) is the same as (B, A), thus only one of those will be returned.
+        - Use a filter similar to `A.key() < B.key()` to eliminate duplicates.
+    TODO: Implement compile-time checking of `Columns`, if possible.
+    TODO: Prevent using a query within a query using an auto trait `Nest` that is negatively implemented for `Query`.
+
+    TODO (POSTPONED): Implement `Row` for `Add<T: Template>`?
+        - The added constraints on `Query`, the added locks, the added complexity and the added confusion in the API tend
+        to outweigh the potential benefits of being able to make more assumptions about queued keys...
+
         - Has only one method `Add::add(self, T)` (consuming `self` ensures that there are no duplicate keys).
         - Since a table lock will be held while iterating the query up to the resolving of `Add` (inclusively), keys can be assumed
         to be valid and to not have been moved.
@@ -37,22 +63,11 @@ pub mod template;
             - With `Add<A>, Add<B>`: `A & B`, `A | B`, others.
             - With `Add<A>, Add<B>, Add<C>`: `A & B & C`, (`A & B`) | (`A & C`) | (`B & C`), A | B | C, others.
         - Because of this ordering, `Add<T>` will not be allowed with `Remove<U>` in the same query.
-    TODO: Implement `Row` for `Remove<T: Template>`:
+    TODO (POSTPONED): Implement `Row` for `Remove<T: Template>`:
         - Same benefits and inconvenients as `Add<T>`.
         - Requires the reverse ordering as `Add<T>`.
         - Do not allow `Add`-like and `Remove`-like operators in the same query.
-    TODO: Implement `Remove<T: Template>`
-    TODO: Implement `Keep<T: Template>/Trim<T: Template>`:
-        - Removes all datum from a key except to ones provided by `T`.
-    TODO: Implement `Change<T: Template>/Convert<T: Template>/Conform<T: Template>`:
-        - Converts a key such that it corresponds to the `T: Template` (adds missing datum, removes exceeding datum).
-    TODO: Implement `Template for Set<D: Datum>`:
-        - Sets the datum `D` for a key only if the key already has the datum.
-    TODO: Implement `Row` for `Get<D: Datum + Copy>`:
-        - At the beginning of iteration, `Get` makes a copy of the whole store to a temporary buffer, then the store lock can be
-        released immediately.
-
-    TODO: Implement nest operations for query:
+    TODO (POSTPONED): Implement nest operations for query:
         - Forces the outer query to take additionnal locks in case the inner query needs to produce the same item as the outer query:
             - An outer read that conflicts with an inner write becomes an upgradable read.
             - An inner read that is missing in outer becomes a read if its index is lower than the last outer store.
@@ -64,7 +79,6 @@ pub mod template;
             - LESS than outer => first try to lock the stores and on failure, drop the stores
                 locks (while keeping the table locks) from the outer query and hard lock all the store locks in order.
             - FIX: this strategy may allow an outer immutable reference to be modified elsewhere while holding on to it...
-
         database
             .query::<(&mut A, &CopyFrom)>()
             .nest::<&A>()
@@ -73,36 +87,6 @@ pub mod template;
             .query::<&A>()
             .nest::<&mut A>()
             .each(|(a1, nest)| nest.each(|a2| a2.0 = a1.0));
-
-    TODO: Implement traits for many tuple.
-
-    TODO: Try to implement a `FullJoin` that returns both `L::Item` and `R::Item`.
-        1. For each left table 'T', lock it stores that are the strictest intersection of the left and right queries.
-            - A variation on this might take only upgradable locks on a `left read/ right write` conflict.
-        2. For each item `I` in `T`, run the `by` function to retrieve the join key/value.
-            - If the join key is the same as the left item key, skip.
-            - If the join key is in table `T`, fold right away since the locks are already taken (upgrade locks if required).
-            - If the join key is in another table, enqueue (left key, (right key/value)) sorted*.
-                - The sorting must allow to lock tables in `index` order.
-                - Some fancy merging of left and right table locks may be accomplished here.
-        3. Complete the iterations.
-        4. Resolve the queued keys. Note that at this point, the left and right keys will not be in the same table since
-        those are already resolved.
-            - Since the keys are sorted in such a way that tables can be locked in `index` order, no deadlock can occur at
-            the table level and as long as stores are also locked in order, no deadlock can occur at the store level.
-            -
-
-        - A `FullJoin` will require very careful synchronization between locks to prevent the `symmetric join` problem
-        (i.e. `FullJoin<A, B>` running concurrently with `FullJoin<B, A>` must not deadlock).
-    TODO: Implement `Permute`.
-        - Returns all permutations (with repetitions) of two queries.
-        - Order of items matters, so (A, B) is considered different than (B, A), thus both will be returned.
-        - May be unified with `Combine`.
-    TODO: Implement `Combine`.
-        - Returns all combinations (no repetitions) of two queries.
-        - Order of items does not matter, so (A, B) is the same as (B, A), thus only one of those will be returned.
-        - Use a filter similar to `A.key() < B.key()` to eliminate duplicates.
-    TODO: Implement compile-time checking of `Columns`, if possible.
 */
 
 /*
@@ -314,7 +298,6 @@ fn try_each_swap<S, T>(
 #[cfg(test)]
 mod tests {
     use crate::{
-        add::Add,
         filter::{False, Has, True},
         key::Key,
         Database, Datum, Error,
@@ -552,18 +535,6 @@ mod tests {
         assert!(database.query::<&A>()?.has(key));
         assert!(database.query::<&B>()?.has(key));
         assert!(database.query::<(&A, &B)>()?.has(key));
-        Ok(())
-    }
-
-    #[test]
-    fn add_item_one() -> Result<(), Error> {
-        struct A;
-        impl Datum for A {}
-
-        let database = Database::new();
-        database.create()?.one(());
-        database.query::<Add<A>>()?.each(|add| add.one(A));
-        assert_eq!(database.query::<&A>()?.count(), 1);
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use crate::{
     filter::Filter,
     key::{Key, Slot},
-    row::{Access, ChunkContext, DeclareContext, InitializeContext, ItemContext, Order, Row},
+    row::{Access, ChunkContext, DeclareContext, InitializeContext, ItemContext, Row},
     table::{self, Table},
     Database, Error,
 };
@@ -19,9 +19,8 @@ pub struct Query<'d, R: Row, F = (), I = Item> {
     database: &'d Database,
     index: usize,
     indices: HashMap<u32, u32>, // From table index to state index.
-    states: Vec<(R::State, &'d Table, Vec<(usize, Access)>)>,
+    states: Vec<State<'d, R>>,
     accesses: HashSet<Access>,
-    order: Order,
     done: VecDeque<u32>,
     pending: VecDeque<u32>,
     pointers: Vec<NonNull<()>>,
@@ -37,6 +36,12 @@ pub struct By<'d, V> {
     slots: Vec<Vec<(Key, V, &'d Slot)>>,
 }
 
+struct State<'d, R: Row> {
+    state: R::State,
+    table: &'d Table,
+    indices: Vec<(usize, Access)>,
+}
+
 struct Errors<'d, 'a, V> {
     indices: &'a HashMap<u32, u32>,
     pending: &'a mut VecDeque<u32>,
@@ -48,11 +53,7 @@ impl Database {
     pub fn query<R: Row>(&self) -> Result<Query<'_, R>, Error> {
         // Detects violations of rust's invariants.
         let mut accesses = HashSet::new();
-        let mut order = Order::Any;
-        let context = DeclareContext {
-            accesses: &mut accesses,
-            order: &mut order,
-        };
+        let context = DeclareContext(&mut accesses);
         R::declare(context)?;
         Ok(Query {
             database: self,
@@ -61,7 +62,6 @@ impl Database {
             done: VecDeque::new(),
             pending: VecDeque::new(),
             accesses,
-            order,
             pointers: Vec::new(),
             index: 0,
             _marker: PhantomData,
@@ -86,7 +86,6 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             pending: self.pending,
             states: self.states,
             accesses: self.accesses,
-            order: self.order,
             pointers: self.pointers,
             index: self.index,
             _marker: PhantomData,
@@ -100,11 +99,15 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         let states = self
             .states
             .into_iter()
-            .map(|(state, table, mut indices)| {
-                for (_, access) in indices.iter_mut() {
+            .map(|mut state| {
+                for (_, access) in state.indices.iter_mut() {
                     *access = access.read();
                 }
-                (R::read(state), table, indices)
+                State {
+                    state: R::read(state.state),
+                    table: state.table,
+                    indices: state.indices,
+                }
             })
             .collect();
         let accesses = self
@@ -119,7 +122,6 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             done: self.done,
             pending: self.pending,
             accesses,
-            order: Order::Any, // TODO: Is this ok?
             pointers: self.pointers,
             index: self.index,
             _marker: PhantomData,
@@ -130,17 +132,15 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         debug_assert!(self.done.is_empty());
         debug_assert!(self.pointers.is_empty());
 
-        // TODO: Do I need to do something about ordering here?
-        let indices = self.states.iter().filter_map(|(_, table, _)| {
-            if G::filter(table, self.database) {
-                self.indices.get(&table.index()).copied()
+        for state in self.states.iter() {
+            if G::filter(state.table, self.database) {
+                continue;
             } else {
-                self.indices.remove(&table.index());
-                None
+                self.indices.remove(&state.table.index());
             }
-        });
+        }
         self.pending.clear();
-        self.pending.extend(indices);
+        self.pending.extend(self.indices.values());
 
         Query {
             database: self.database,
@@ -149,7 +149,6 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             done: self.done,
             pending: self.pending,
             accesses: self.accesses,
-            order: self.order,
             pointers: self.pointers,
             index: self.index,
             _marker: PhantomData,
@@ -179,9 +178,10 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         let mut fold = |mut state: S| -> ControlFlow<S, S> {
             for _ in 0..self.pending.len() {
                 let index = unsafe { self.pending.pop_front().unwrap_unchecked() };
-                state = match self.try_lock(state, index, |state, row, pointers, table, inner| {
+                let result = self.try_lock(state, index, |state, row, pointers, table, inner| {
                     fold(state, index, row, pointers, table, inner)
-                }) {
+                });
+                state = match result {
                     Ok(result) => {
                         self.done.push_back(index);
                         result?
@@ -310,10 +310,13 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             }
         }
 
-        let (row, table, indices) = unsafe { self.states.get_unchecked_mut(index as usize) };
-        let inner = match table.inner.try_read() {
-            Some(inner) => inner,
-            None => return Err(state),
+        let State {
+            state: row,
+            table,
+            indices,
+        } = unsafe { self.states.get_unchecked_mut(index as usize) };
+        let Some(inner) = table.inner.try_read() else {
+            return Err(state);
         };
         next(
             state,
@@ -371,7 +374,11 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             }
         }
 
-        let (row, table, indices) = unsafe { self.states.get_unchecked_mut(index as usize) };
+        let State {
+            state: row,
+            table,
+            indices,
+        } = unsafe { self.states.get_unchecked_mut(index as usize) };
         let inner = table.inner.read();
         next(indices, &mut self.pointers, &inner, |pointers, inner| {
             with(row, pointers, table, inner)
@@ -397,7 +404,11 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             let index = self.states.len() as _;
             self.pending.push_back(index);
             self.indices.insert(table.index(), index);
-            self.states.push((state, table, indices));
+            self.states.push(State {
+                state,
+                table,
+                indices,
+            });
             Ok(())
         } else {
             Err(Error::InvalidTable)
@@ -413,7 +424,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             .values()
             .map(|&index| {
                 unsafe { self.states.get_unchecked(index as usize) }
-                    .1
+                    .table
                     .inner
                     .read()
                     .count() as usize
@@ -437,13 +448,14 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         mut fold: G,
     ) -> S {
         self.update();
-        match self.try_guards(state, |mut state, _, row, pointers, _, inner| {
+        let flow = self.try_guards(state, |mut state, _, row, pointers, _, inner| {
             let context = ItemContext::new(inner.keys(), pointers);
             for i in 0..inner.count() {
                 state = fold(state, R::item(row, context.with(i as _)))?;
             }
             Continue(state)
-        }) {
+        });
+        match flow {
             Continue(state) => state,
             Break(state) => state,
         }
@@ -688,9 +700,10 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
         mut fold: G,
     ) -> S {
         self.update();
-        match self.try_guards(state, |state, _, row, pointers, _, inner| {
+        let flow = self.try_guards(state, |state, _, row, pointers, _, inner| {
             fold(state, R::chunk(row, ChunkContext(inner.keys(), pointers)))
-        }) {
+        });
+        match flow {
             Continue(state) => state,
             Break(state) => state,
         }

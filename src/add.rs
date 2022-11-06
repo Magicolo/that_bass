@@ -2,16 +2,12 @@ use crate::{
     filter::Filter,
     key::{Key, Slot},
     resources::Global,
-    row::{self, Row},
     table::{self, Store, Table},
     template::{ApplyContext, DeclareContext, InitializeContext, Template},
     try_each_swap, Database, Error, Meta,
 };
 use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{collections::HashMap, marker::PhantomData, num::NonZeroUsize, ptr::NonNull, sync::Arc};
-
-pub struct AddItem<'a, T: Template>(u32, &'a mut Vec<(u32, T)>);
-pub struct AddChunk<'a, T: Template>(State<'a, T>);
 
 /// Adds template `T` to accumulated add operations.
 pub struct Add<'d, T: Template> {
@@ -46,13 +42,6 @@ struct StateAll<T: Template> {
     source: Arc<Table>,
     target: Arc<Table>,
     inner: Arc<Inner<T>>,
-}
-
-struct StateRow<T: Template> {
-    source: Arc<Table>,
-    target: Arc<Table>,
-    inner: Arc<Inner<T>>,
-    rows: Vec<(u32, T)>,
 }
 
 struct Inner<T: Template> {
@@ -409,54 +398,6 @@ impl<'d, T: Template> Add<'d, T> {
 impl<T: Template> Drop for Add<'_, T> {
     fn drop(&mut self) {
         self.resolve();
-    }
-}
-
-unsafe impl<T: Template> Row for Add<'_, T> {
-    type State = Vec<(u32, T)>;
-    type Read = ();
-    type Item<'a> = AddItem<'a, T>;
-    type Chunk<'a> = AddChunk<'a, T>;
-
-    fn declare(mut context: row::DeclareContext) -> Result<(), Error> {
-        for meta in DeclareContext::metas::<T>()? {
-            context.add_with(meta.identifier())?;
-        }
-        Ok(())
-    }
-
-    fn initialize(_: row::InitializeContext) -> Result<Self::State, Error> {
-        Ok(Vec::new())
-    }
-
-    fn read(_: Self::State) -> <Self::Read as Row>::State {}
-
-    #[inline]
-    fn item<'a>(state: &'a mut Self::State, context: row::ItemContext<'a, '_>) -> Self::Item<'a> {
-        AddItem(context.row() as _, state)
-    }
-
-    #[inline]
-    fn chunk<'a>(
-        state: &'a mut Self::State,
-        context: row::ChunkContext<'a, '_>,
-    ) -> Self::Chunk<'a> {
-        todo!()
-    }
-}
-
-impl<T: Template> AddItem<'_, T> {
-    #[inline]
-    pub fn one(self, template: T) {
-        self.1.push((self.0, template));
-    }
-
-    #[inline]
-    pub fn default(self)
-    where
-        T: Default,
-    {
-        self.one(T::default())
     }
 }
 

@@ -13,19 +13,10 @@ pub(crate) enum Access {
     Write(TypeId),
 }
 
-pub(crate) enum Order {
-    Any,
-    Ascend(HashSet<TypeId>),
-    Descend(HashSet<TypeId>),
-}
-
 pub struct Read<D>(usize, PhantomData<fn(D)>);
 pub struct Write<D>(usize, PhantomData<fn(D)>);
 
-pub struct DeclareContext<'a> {
-    pub(crate) accesses: &'a mut HashSet<Access>,
-    pub(crate) order: &'a mut Order,
-}
+pub struct DeclareContext<'a>(pub(crate) &'a mut HashSet<Access>);
 pub struct InitializeContext<'a>(pub(crate) &'a HashMap<Access, usize>);
 pub struct ItemContext<'a, 'b>(pub(crate) &'a [Key], pub(crate) &'b [NonNull<()>], usize);
 pub struct ChunkContext<'a, 'b>(pub(crate) &'a [Key], pub(crate) &'b [NonNull<()>]);
@@ -51,60 +42,27 @@ impl<D> Write<D> {
 
 impl DeclareContext<'_> {
     pub fn own(&mut self) -> DeclareContext<'_> {
-        DeclareContext {
-            accesses: self.accesses,
-            order: self.order,
-        }
+        DeclareContext(self.0)
     }
 
     pub fn read<D: Datum>(&mut self) -> Result<(), Error> {
         let identifier = TypeId::of::<D>();
-        if self.accesses.contains(&Access::Write(identifier)) {
+        if self.0.contains(&Access::Write(identifier)) {
             Err(Error::ReadWriteConflict)
         } else {
-            self.accesses.insert(Access::Read(identifier));
+            self.0.insert(Access::Read(identifier));
             Ok(())
         }
     }
 
     pub fn write<D: Datum>(&mut self) -> Result<(), Error> {
         let identifier = TypeId::of::<D>();
-        if self.accesses.contains(&Access::Read(identifier)) {
+        if self.0.contains(&Access::Read(identifier)) {
             Err(Error::ReadWriteConflict)
-        } else if self.accesses.insert(Access::Write(identifier)) {
+        } else if self.0.insert(Access::Write(identifier)) {
             Ok(())
         } else {
             Err(Error::WriteWriteConflict)
-        }
-    }
-
-    pub fn add<D: Datum>(&mut self) -> Result<(), Error> {
-        self.add_with(TypeId::of::<D>())
-    }
-
-    pub fn add_with(&mut self, identifier: TypeId) -> Result<(), Error> {
-        match self.order {
-            Order::Any => Ok(*self.order = Order::Descend([identifier].into_iter().collect())),
-            Order::Ascend(_) => Err(Error::AddRemoveConflict),
-            Order::Descend(types) => {
-                types.insert(identifier);
-                Ok(())
-            }
-        }
-    }
-
-    pub fn remove<D: Datum>(&mut self) -> Result<(), Error> {
-        self.remove_with(TypeId::of::<D>())
-    }
-
-    pub fn remove_with(&mut self, identifier: TypeId) -> Result<(), Error> {
-        match self.order {
-            Order::Any => Ok(*self.order = Order::Ascend([identifier].into_iter().collect())),
-            Order::Ascend(types) => {
-                types.insert(identifier);
-                Ok(())
-            }
-            Order::Descend(_) => Err(Error::AddRemoveConflict),
         }
     }
 }
