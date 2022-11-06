@@ -225,6 +225,35 @@ unsafe impl<'b, D: Datum> Row for &'b mut D {
     }
 }
 
+unsafe impl<R: Row> Row for Option<R> {
+    type State = Option<R::State>;
+    type Read = Option<R::Read>;
+    type Item<'a> = Option<R::Item<'a>>;
+    type Chunk<'a> = Option<R::Chunk<'a>>;
+
+    fn declare(context: DeclareContext) -> Result<(), Error> {
+        R::declare(context)
+    }
+
+    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
+        Ok(R::initialize(context).ok())
+    }
+
+    fn read(state: Self::State) -> <Self::Read as Row>::State {
+        Some(R::read(state?))
+    }
+
+    #[inline]
+    fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a, '_>) -> Self::Item<'a> {
+        Some(R::item(state.as_mut()?, context))
+    }
+
+    #[inline]
+    fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a, '_>) -> Self::Chunk<'a> {
+        Some(R::chunk(state.as_mut()?, context))
+    }
+}
+
 unsafe impl Row for () {
     type State = ();
     type Read = ();

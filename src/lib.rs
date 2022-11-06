@@ -307,7 +307,9 @@ mod tests {
         simd::{f32x16, f32x2, f32x4, f32x8},
     };
 
+    #[derive(Debug, Clone, Copy)]
     struct A;
+    #[derive(Debug, Clone, Copy)]
     struct B;
     #[derive(Debug, Clone, Copy)]
     struct C(usize);
@@ -458,9 +460,6 @@ mod tests {
 
     #[test]
     fn add_no_double_resolve() -> Result<(), Error> {
-        struct A;
-        impl Datum for A {}
-
         let database = Database::new();
         let key = database.create()?.one(());
         let mut add = database.add()?;
@@ -472,9 +471,6 @@ mod tests {
 
     #[test]
     fn add_simple_template() -> Result<(), Error> {
-        struct A;
-        impl Datum for A {}
-
         let database = Database::new();
         let key = database.create()?.one(());
         let mut add = database.add()?;
@@ -487,11 +483,6 @@ mod tests {
 
     #[test]
     fn add_simple_template_twice() -> Result<(), Error> {
-        struct A;
-        struct B;
-        impl Datum for A {}
-        impl Datum for B {}
-
         let database = Database::new();
         let key = database.create()?.one(());
         let mut add_a = database.add()?;
@@ -517,11 +508,6 @@ mod tests {
 
     #[test]
     fn add_composite_template() -> Result<(), Error> {
-        struct A;
-        struct B;
-        impl Datum for A {}
-        impl Datum for B {}
-
         let database = Database::new();
         let key = database.create()?.one(());
         let mut add = database.add()?;
@@ -539,14 +525,14 @@ mod tests {
     }
 
     #[test]
-    fn decimate_none() -> Result<(), Error> {
+    fn destroy_all_resolve_0() -> Result<(), Error> {
         let database = Database::new();
         assert_eq!(database.destroy_all::<True>().resolve(), 0);
         Ok(())
     }
 
     #[test]
-    fn decimate_all() -> Result<(), Error> {
+    fn destroy_all_resolve_100() -> Result<(), Error> {
         let database = Database::new();
         database.create()?.all_n([(); 100]);
         assert_eq!(database.destroy_all::<True>().resolve(), 100);
@@ -554,11 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn decimate_filtered() -> Result<(), Error> {
-        #[derive(Clone, Copy)]
-        struct A;
-        impl Datum for A {}
-
+    fn destroy_all_filter() -> Result<(), Error> {
         let database = Database::new();
         database.create()?.all_n([(); 100]);
         database.create()?.all_n([A; 100]);
@@ -566,37 +548,6 @@ mod tests {
         assert_eq!(database.destroy_all::<()>().resolve(), 100);
         Ok(())
     }
-
-    // #[test]
-    // fn destroy_one_in_query_does_not_deadlock() -> Result<(), Error> {
-    //     let database = Database::new();
-    //     let key = database.create()?.one(());
-    //     let mut query = database.query::<Key>()?;
-    //     let key = query.item(key).unwrap();
-    //     database.destroy().one(*key);
-    //     Ok(())
-    // }
-
-    // #[test]
-    // fn destroy_one_delays_resolution_in_query() -> Result<(), Error> {
-    //     let database = Database::new();
-    //     let key = database.create()?.one(());
-    //     let mut query1 = database.query::<()>()?;
-    //     let mut query2 = database.query::<()>()?;
-    //     {
-    //         let guard = query1.item(key)?;
-    //         // assert!(database.destroy().one(key));
-    //         // `items` will have the destroyed key.
-    //         assert!(query2.items().next().is_some());
-    //         // `item(key)` will not.
-    //         assert!(query2.item(key).is_err());
-    //         drop(guard);
-    //     }
-    //     assert_eq!(query1.item(key).err(), Some(Error::InvalidKey));
-    //     assert!(query2.items().next().is_none());
-    //     assert_eq!(query2.item(key).err(), Some(Error::InvalidKey));
-    //     Ok(())
-    // }
 
     #[test]
     fn query_is_some_create_one_key() -> Result<(), Error> {
@@ -694,127 +645,18 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
-    // fn query1_item_nested_in_query2_items_does_not_deadlock() -> Result<(), Error> {
-    //     let database = Database::new();
-    //     let key = database.create()?.one(C(1));
-
-    //     let mut query1 = database.query::<&mut C>()?;
-    //     let mut query2 = database.query::<&mut C>()?;
-    //     for _item1 in query1.items() {
-    //         assert_eq!(query2.item(key).err(), Some(Error::WouldDeadlock));
-    //         assert_eq!(
-    //             query2.item_with(key, |_item2| assert!(false)).err(),
-    //             Some(Error::WouldDeadlock)
-    //         );
-    //     }
-    //     query1.item_with(key, |_item1| {
-    //         for _item2 in query2.items() {
-    //             assert!(false);
-    //         }
-    //     })?;
-
-    //     drop(query2);
-    //     let mut query3 = database.query::<&mut C>()?;
-    //     for _item1 in query1.items() {
-    //         assert_eq!(query3.item(key).err(), Some(Error::WouldDeadlock));
-    //         assert_eq!(
-    //             query3.item_with(key, |_item3| assert!(false)).err(),
-    //             Some(Error::WouldDeadlock)
-    //         );
-    //     }
-    //     query1.item_with(key, |_item1| {
-    //         for _item3 in query3.items() {
-    //             assert!(false);
-    //         }
-    //     })?;
-
-    //     drop(query1);
-    //     let mut query4 = database.query::<&mut C>()?;
-    //     for _item1 in query3.items() {
-    //         assert_eq!(query4.item(key).err(), Some(Error::WouldDeadlock));
-    //         assert_eq!(
-    //             query4.item_with(key, |_item2| assert!(false)).err(),
-    //             Some(Error::WouldDeadlock)
-    //         );
-    //     }
-    //     query3.item_with(key, |_item3| {
-    //         for _item4 in query4.items() {
-    //             assert!(false);
-    //         }
-    //     })?;
-
-    //     Ok(())
-    // }
-
-    // #[test]
-    // fn query1_items_nested_in_query2_items_does_not_deadlock() -> Result<(), Error> {
-    //     let database = Database::new();
-    //     database.create()?.one(C(1));
-
-    //     // TOOD: Give a way to iterate over skipped items (see `query.skip` which is already populated).
-    //     let mut query1 = database.query::<&mut C>()?;
-    //     let mut query2 = database.query::<&mut C>()?;
-    //     for _item1 in query1.items() {
-    //         for _item2 in query2.items() {
-    //             // Getting here means that a mutable reference would be aliased; it must never happen.
-    //             assert!(false);
-    //         }
-    //     }
-    //     query1.items_with(|_item1| {
-    //         for _item2 in query2.items() {
-    //             assert!(false);
-    //         }
-    //     });
-
-    //     drop(query2);
-    //     let mut query3 = database.query::<&mut C>()?;
-    //     for _item1 in query1.items() {
-    //         for _item2 in query3.items() {
-    //             assert!(false);
-    //         }
-    //     }
-    //     query1.items_with(|_item1| {
-    //         for _item3 in query3.items() {
-    //             assert!(false);
-    //         }
-    //     });
-
-    //     drop(query1);
-    //     let mut query4 = database.query::<&mut C>()?;
-    //     for _item1 in query3.items() {
-    //         for _item2 in query4.items() {
-    //             assert!(false);
-    //         }
-    //     }
-    //     query3.items_with(|_item3| {
-    //         for _item4 in query4.items() {
-    //             assert!(false);
-    //         }
-    //     });
-
-    //     Ok(())
-    // }
-
-    // #[test]
-    // fn create_destroy_in_query_defers() -> Result<(), Error> {
-    //     // TODO: This scenario means that sometimes the destroy will succeed (at least it will defer) and sometimes it will simply fail...
-    //     // - Find a way to never defer `Create`.
-    //     let database = Database::new();
-    //     let mut create = database.create()?;
-    //     let mut destroy = database.destroy();
-    //     let mut query = database.query::<()>()?;
-    //     create.one(());
-
-    //     for _ in query.items() {
-    //         // Creating 100 keys will force a resize of the table and since a read lock is held by the `query`, the `create.all` will be deferred.
-    //         let keys = create.all([(); 100]);
-    //         // Since the `create` has been deferred, the `destroy` should fail for all keys.
-    //         destroy.all(keys.iter().copied());
-    //         // assert_eq!(destroy.all(keys.iter().copied()), 0);
-    //     }
-    //     Ok(())
-    // }
+    #[test]
+    fn query_option_read() -> Result<(), Error> {
+        let database = Database::new();
+        let key1 = database.create()?.one(());
+        let key2 = database.create()?.one(A);
+        let mut query = database.query::<Option<&A>>()?;
+        assert_eq!(query.count(), 2);
+        assert_eq!(query.find(key1, |a| a.is_some()), Ok(false));
+        assert_eq!(query.find(key2, |a| a.is_some()), Ok(true));
+        assert_eq!(query.chunk().count(), 2);
+        Ok(())
+    }
 
     #[test]
     fn multi_join() -> Result<(), Error> {

@@ -389,7 +389,9 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         if F::filter(table, self.database) {
             let mut indices = Vec::with_capacity(self.accesses.len());
             for &access in self.accesses.iter() {
-                indices.push((table.store_with(access.identifier())?, access));
+                if let Ok(index) = table.store_with(access.identifier()) {
+                    indices.push((index, access));
+                }
             }
 
             // The sorting of indices ensures that there cannot be a deadlock between `Rows` when locking multiple stores as long as this
