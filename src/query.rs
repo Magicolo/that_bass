@@ -199,7 +199,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 if keys.len() == 0 {
                     return Continue(state);
                 }
-                lock(state, indices, columns, &inner, |state, columns| {
+                lock(indices, columns, &inner, |columns| {
                     fold(state, *index, row, table, keys, columns)
                 })
             },
@@ -244,7 +244,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 if keys.len() == 0 {
                     return state;
                 }
-                lock(state, indices, columns, &inner, |state, columns| {
+                lock(indices, columns, &inner, |columns| {
                     fold(state, *index, row, table, keys, columns)
                 })
             },
@@ -460,7 +460,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             };
             if new_table == table.index() {
                 debug_assert_eq!(old_table, table.index());
-                break lock(state, indices, columns, &inner, |state, columns| {
+                break lock(indices, columns, &inner, |columns| {
                     let row = slot.row() as usize;
                     let keys = inner.keys();
                     debug_assert_eq!(keys.get(row).copied(), Some(key));
@@ -522,6 +522,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         swap(&mut self.states.0, &mut by.states);
+        // TODO: No need to lock the columns if `by.slots[index].is_empty()` after being filtered.
         let flow = self.try_guards(state, |mut state, index, row, table, keys, columns| {
             let context = ItemContext::new(keys, columns);
             let slots = unsafe { by.slots.get_unchecked_mut(index as usize) };
@@ -728,12 +729,11 @@ fn try_lock<T, S>(
     }
 }
 
-fn lock<T, S>(
-    state: S,
+fn lock<T>(
     indices: &[(usize, Access)],
     columns: &mut Vec<NonNull<()>>,
     inner: &table::Inner,
-    with: impl FnOnce(S, &[NonNull<()>]) -> T,
+    with: impl FnOnce(&[NonNull<()>]) -> T,
 ) -> T {
     match indices.split_first() {
         Some((&(index, access), rest)) => {
@@ -741,20 +741,20 @@ fn lock<T, S>(
             debug_assert_eq!(access.identifier(), column.meta().identifier());
             if column.meta().size == 0 {
                 columns.push(unsafe { *column.data().data_ptr() });
-                lock(state, rest, columns, inner, with)
+                lock(rest, columns, inner, with)
             } else {
                 match access {
                     Access::Read(_) => {
                         let guard = column.data().read();
                         columns.push(*guard);
-                        let state = lock(state, rest, columns, inner, with);
+                        let state = lock(rest, columns, inner, with);
                         drop(guard);
                         state
                     }
                     Access::Write(_) => {
                         let guard = column.data().write();
                         columns.push(*guard);
-                        let state = lock(state, rest, columns, inner, with);
+                        let state = lock(rest, columns, inner, with);
                         drop(guard);
                         state
                     }
@@ -762,7 +762,7 @@ fn lock<T, S>(
             }
         }
         None => {
-            let state = with(state, columns);
+            let state = with(columns);
             columns.clear();
             state
         }
