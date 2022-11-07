@@ -22,11 +22,11 @@ pub(crate) struct Inner {
     pub(crate) count: AtomicU32,
     pub(crate) pending: AtomicU64,
     pub(crate) keys: UnsafeCell<Vec<Key>>,
-    /// Stores are ordered consistently between tables.
-    pub(crate) stores: Box<[Store]>,
+    /// Columns are ordered consistently between tables.
+    pub(crate) columns: Box<[Column]>,
 }
 
-pub struct Store {
+pub struct Column {
     meta: &'static Meta,
     data: RwLock<NonNull<()>>,
 }
@@ -39,7 +39,7 @@ pub struct Tables {
     tables: UnsafeCell<Vec<Arc<Table>>>,
 }
 
-impl Store {
+impl Column {
     pub fn new(meta: &'static Meta, capacity: usize) -> Self {
         Self {
             data: RwLock::new(unsafe { (meta.new)(capacity) }),
@@ -83,7 +83,7 @@ impl Store {
         *data = new_data;
     }
 
-    /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the store.
+    /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the column.
     /// The ranges 'source_index..source_index + count' and 'target_index..target_index + count' must not overlap.
     #[inline]
     pub unsafe fn squash(&mut self, source_index: usize, target_index: usize, count: NonZeroUsize) {
@@ -93,7 +93,7 @@ impl Store {
         copy((data, source_index), (data, target_index), count);
     }
 
-    /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the store.
+    /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the column.
     /// The ranges 'source_index..source_index + count' and 'target_index..target_index + count' must not overlap.
     #[inline]
     pub unsafe fn copy(&mut self, source_index: usize, target_index: usize, count: NonZeroUsize) {
@@ -196,18 +196,18 @@ impl Tables {
         }
 
         metas.sort_unstable_by_key(|meta| meta.identifier());
-        let stores: Box<[Store]> = metas.into_iter().map(|meta| Store::new(meta, 0)).collect();
-        let indices = stores
+        let columns: Box<[Column]> = metas.into_iter().map(|meta| Column::new(meta, 0)).collect();
+        let indices = columns
             .iter()
             .enumerate()
-            .map(|(index, store)| (store.meta().identifier(), index))
+            .map(|(index, column)| (column.meta().identifier(), index))
             .collect();
         let index = tables.len();
         let inner = Inner {
             count: 0.into(),
             pending: 0.into(),
             keys: Vec::new().into(),
-            stores,
+            columns,
         };
 
         let table = Arc::new(Table {
@@ -264,16 +264,16 @@ impl Table {
     }
 
     #[inline]
-    pub fn store<D: Datum>(&self) -> Result<usize, Error> {
-        self.store_with(TypeId::of::<D>())
+    pub fn column<D: Datum>(&self) -> Result<usize, Error> {
+        self.column_with(TypeId::of::<D>())
     }
 
     #[inline]
-    pub fn store_with(&self, identifier: TypeId) -> Result<usize, Error> {
+    pub fn column_with(&self, identifier: TypeId) -> Result<usize, Error> {
         self.indices
             .get(&identifier)
             .copied()
-            .ok_or(Error::MissingStore)
+            .ok_or(Error::MissingColumn)
     }
 }
 
@@ -302,8 +302,8 @@ impl Inner {
     }
 
     #[inline]
-    pub fn stores(&self) -> &[Store] {
-        &self.stores
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
     }
 
     #[inline]
@@ -341,8 +341,8 @@ impl Inner {
                     keys.resize(keys.capacity(), Key::NULL);
                     debug_assert_eq!(keys.len(), keys.capacity());
                     let new_capacity = keys.len();
-                    for store in inner.stores.iter_mut() {
-                        unsafe { store.grow(old_capacity, new_capacity) };
+                    for column in inner.columns.iter_mut() {
+                        unsafe { column.grow(old_capacity, new_capacity) };
                     }
                 }
                 RwLockWriteGuard::downgrade(inner)
@@ -385,8 +385,8 @@ impl Drop for Inner {
         let count = *self.count.get_mut() as usize;
         let capacity = self.keys.get_mut().len();
         debug_assert!(count <= capacity);
-        for store in self.stores.iter_mut() {
-            unsafe { store.free(count, capacity) };
+        for column in self.columns.iter_mut() {
+            unsafe { column.free(count, capacity) };
         }
     }
 }

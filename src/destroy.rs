@@ -2,7 +2,7 @@ use crate::{
     core::utility::fold_swap,
     filter::Filter,
     key::{Key, Slot},
-    table::{self, Store, Table},
+    table::{self, Column, Table},
     Database, Error,
 };
 use parking_lot::RwLockWriteGuard;
@@ -117,12 +117,12 @@ impl<'d> Destroy<'d> {
                 if let Some(end) = NonZeroUsize::new(end) {
                     // Squash the range at the end of the table on the beginning of the removed range.
                     let start = head + over;
-                    squash(self.database, keys, &mut inner.stores, start, low, end);
+                    squash(self.database, keys, &mut inner.columns, start, low, end);
                 }
 
                 if let Some(over) = NonZeroUsize::new(over) {
-                    for store in inner.stores.iter_mut() {
-                        unsafe { store.drop(head, over) };
+                    for column in inner.columns.iter_mut() {
+                        unsafe { column.drop(head, over) };
                     }
                 }
             } else {
@@ -146,7 +146,7 @@ impl<'d> Destroy<'d> {
                         }
                         debug_assert!(cursor < head + count.get());
                         let one = NonZeroUsize::MIN;
-                        squash(self.database, keys, &mut inner.stores, cursor, row, one);
+                        squash(self.database, keys, &mut inner.columns, cursor, row, one);
                         cursor += 1;
                     } else {
                         // Try to batch contiguous drops.
@@ -161,8 +161,8 @@ impl<'d> Destroy<'d> {
                         }
 
                         let count = unsafe { NonZeroUsize::new_unchecked(index - start) };
-                        for store in inner.stores.iter_mut() {
-                            unsafe { store.drop(row, count) };
+                        for column in inner.columns.iter_mut() {
+                            unsafe { column.drop(row, count) };
                         }
                     }
                 }
@@ -275,8 +275,8 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
         };
         inner.release(count);
 
-        for store in inner.stores.iter_mut() {
-            unsafe { store.drop(0, count) };
+        for column in inner.columns.iter_mut() {
+            unsafe { column.drop(0, count) };
         }
         let keys = inner.keys.get_mut();
         database.keys().release(&keys[..count.get()]);
@@ -288,13 +288,13 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
 fn squash(
     database: &Database,
     keys: &mut [Key],
-    stores: &mut [Store],
+    columns: &mut [Column],
     source: usize,
     target: usize,
     count: NonZeroUsize,
 ) {
-    for store in stores {
-        unsafe { store.squash(source, target, count) };
+    for column in columns {
+        unsafe { column.squash(source, target, count) };
     }
 
     // Update the keys.

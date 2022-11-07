@@ -3,7 +3,7 @@ use crate::{
     filter::Filter,
     key::{Key, Slot},
     resources::Global,
-    table::{self, Store, Table},
+    table::{self, Column, Table},
     template::{ApplyContext, DeclareContext, InitializeContext, Template},
     Database, Error, Meta,
 };
@@ -17,7 +17,7 @@ pub struct Add<'d, T: Template> {
     pending: Vec<(Key, &'d Slot, T, u32)>,
     sorted: HashMap<u32, State<'d, T>>,
     metas: Arc<Vec<&'static Meta>>,
-    pointers: Vec<NonNull<()>>,
+    columns: Vec<NonNull<()>>,
 }
 
 /// Adds template `T` to all keys in tables that satisfy the filter `F`.
@@ -26,7 +26,7 @@ pub struct AddAll<'d, T: Template, F: Filter> {
     index: usize,
     states: Vec<StateAll<T>>,
     metas: Arc<Vec<&'static Meta>>,
-    pointers: Vec<NonNull<()>>,
+    columns: Vec<NonNull<()>>,
     _marker: PhantomData<fn(F)>,
 }
 
@@ -48,7 +48,7 @@ struct StateAll<T: Template> {
 struct Inner<T: Template> {
     state: T::State,
     add: Vec<usize>,
-    // TODO: A `Vec<usize>` should suffice here where its indices map to its values `source_store -> target_store`.
+    // TODO: A `Vec<usize>` should suffice here where its indices map to its values `source_column -> target_column`.
     copy: Vec<(usize, usize)>,
 }
 
@@ -70,7 +70,7 @@ impl Database {
             pending: Vec::new(),
             sorted: HashMap::new(),
             metas: share.0.clone(),
-            pointers: Vec::new(),
+            columns: Vec::new(),
         })
     }
 
@@ -82,7 +82,7 @@ impl Database {
             index: 0,
             states: Vec::new(),
             metas: share.0.clone(),
-            pointers: Vec::new(),
+            columns: Vec::new(),
             _marker: PhantomData,
         })
     }
@@ -186,8 +186,8 @@ impl<'d, T: Template> Add<'d, T> {
                     &mut self.pending,
                 );
                 if state.rows.len() > 0 && T::SIZE > 0 {
-                    lock(&state.inner.add, &mut self.pointers, &inner, |pointers| {
-                        let context = ApplyContext::new(pointers);
+                    lock(&state.inner.add, &mut self.columns, &inner, |columns| {
+                        let context = ApplyContext::new(columns);
                         for (i, template) in state.templates.drain(..).enumerate() {
                             let &(.., row) = unsafe { state.rows.get_unchecked(i) };
                             debug_assert!(row < u32::MAX);
@@ -203,7 +203,7 @@ impl<'d, T: Template> Add<'d, T> {
                 // Sanity checks.
                 debug_assert!(state.rows.is_empty());
                 debug_assert!(state.templates.is_empty());
-                debug_assert!(self.pointers.is_empty());
+                debug_assert!(self.columns.is_empty());
                 continue;
             };
 
@@ -218,8 +218,8 @@ impl<'d, T: Template> Add<'d, T> {
             if range.len() == count.get() {
                 // Fast path. The move range is contiguous. Copy everything from source to target at once.
                 copy(
-                    (low, keys.0, &mut source.stores),
-                    (start, keys.1, &target.stores),
+                    (low, keys.0, &mut source.columns),
+                    (start, keys.1, &target.columns),
                     count,
                     &state.inner.copy,
                 );
@@ -230,8 +230,8 @@ impl<'d, T: Template> Add<'d, T> {
                 if let Some(end) = NonZeroUsize::new(end) {
                     let start = head + over;
                     // Copy the range at the end of the table on the beginning of the removed range.
-                    for store in source.stores.iter_mut() {
-                        unsafe { store.copy(start, low, end) };
+                    for column in source.columns.iter_mut() {
+                        unsafe { column.copy(start, low, end) };
                     }
 
                     // Update the keys.
@@ -242,8 +242,8 @@ impl<'d, T: Template> Add<'d, T> {
                 // Range is not contiguous; use the slow path.
                 for (i, &(.., row)) in state.rows.iter().enumerate() {
                     copy(
-                        (row as usize, keys.0, &mut source.stores),
-                        (start + i, keys.1, &target.stores),
+                        (row as usize, keys.0, &mut source.columns),
+                        (start + i, keys.1, &target.columns),
                         NonZeroUsize::MIN,
                         &state.inner.copy,
                     );
@@ -261,8 +261,8 @@ impl<'d, T: Template> Add<'d, T> {
                         }
                         debug_assert!(cursor < head + count.get());
 
-                        for store in source.stores.iter_mut() {
-                            unsafe { store.squash(cursor, row, NonZeroUsize::MIN) };
+                        for column in source.columns.iter_mut() {
+                            unsafe { column.squash(cursor, row, NonZeroUsize::MIN) };
                         }
 
                         let key = unsafe { *keys.0.get_unchecked_mut(cursor) };
@@ -280,15 +280,15 @@ impl<'d, T: Template> Add<'d, T> {
             } else {
                 for &index in state.inner.add.iter() {
                     // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
-                    let store = unsafe { target.stores.get_unchecked(index) };
-                    self.pointers.push(unsafe { *store.data().data_ptr() });
+                    let column = unsafe { target.columns.get_unchecked(index) };
+                    self.columns.push(unsafe { *column.data().data_ptr() });
                 }
 
-                let context = ApplyContext::new(&self.pointers);
+                let context = ApplyContext::new(&self.columns);
                 for (i, template) in state.templates.drain(..).enumerate() {
                     unsafe { template.apply(&state.inner.state, context.with(start + i)) };
                 }
-                self.pointers.clear();
+                self.columns.clear();
             }
 
             target.commit(count);
@@ -306,7 +306,7 @@ impl<'d, T: Template> Add<'d, T> {
             // Sanity checks.
             debug_assert!(state.rows.is_empty());
             debug_assert!(state.templates.is_empty());
-            debug_assert!(self.pointers.is_empty());
+            debug_assert!(self.columns.is_empty());
         }
     }
 
@@ -427,36 +427,36 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         fold_swap(
             &mut self.states,
             0,
-            (&mut self.pointers, with),
-            |sum, (pointers, with), state| {
+            (&mut self.columns, with),
+            |sum, (columns, with), state| {
                 let count = if state.source.index() < state.target.index() {
                     let source = state.source.inner.try_write().ok_or(sum)?;
                     let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
-                    Self::resolve_tables(source, target, state, pointers, self.database, with)
+                    Self::resolve_tables(source, target, state, columns, self.database, with)
                 } else if state.source.index() > state.target.index() {
                     let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
                     let source = state.source.inner.try_write().ok_or(sum)?;
-                    Self::resolve_tables(source, target, state, pointers, self.database, with)
+                    Self::resolve_tables(source, target, state, columns, self.database, with)
                 } else if T::SIZE > 0 && set {
                     let inner = state.source.inner.try_read().ok_or(sum)?;
-                    Self::resolve_table(inner, state, pointers, with)
+                    Self::resolve_table(inner, state, columns, with)
                 } else {
                     0
                 };
                 Ok(sum + count)
             },
-            |sum, (pointers, with), state| {
+            |sum, (columns, with), state| {
                 sum + if state.source.index() < state.target.index() {
                     let source = state.source.inner.write();
                     let target = state.target.inner.upgradable_read();
-                    Self::resolve_tables(source, target, state, pointers, self.database, with)
+                    Self::resolve_tables(source, target, state, columns, self.database, with)
                 } else if state.source.index() > state.target.index() {
                     let target = state.target.inner.upgradable_read();
                     let source = state.source.inner.write();
-                    Self::resolve_tables(source, target, state, pointers, self.database, with)
+                    Self::resolve_tables(source, target, state, columns, self.database, with)
                 } else if T::SIZE > 0 && set {
                     let inner = state.source.inner.read();
-                    Self::resolve_table(inner, state, pointers, with)
+                    Self::resolve_table(inner, state, columns, with)
                 } else {
                     0
                 }
@@ -468,7 +468,7 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         mut source: RwLockWriteGuard<table::Inner>,
         target: RwLockUpgradableReadGuard<table::Inner>,
         state: &StateAll<T>,
-        pointers: &mut Vec<NonNull<()>>,
+        columns: &mut Vec<NonNull<()>>,
         database: &Database,
         with: &mut impl FnMut() -> T,
     ) -> usize {
@@ -481,8 +481,8 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         let (source, target) = (&mut *source, &*target);
         let keys = (source.keys.get_mut(), unsafe { &mut *target.keys.get() });
         copy(
-            (0, keys.0, &mut source.stores),
-            (start, keys.1, &target.stores),
+            (0, keys.0, &mut source.columns),
+            (start, keys.1, &target.columns),
             count,
             &state.inner.copy,
         );
@@ -490,14 +490,14 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         if T::SIZE > 0 {
             for &index in state.inner.add.iter() {
                 // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
-                pointers.push(unsafe { *target.stores.get_unchecked(index).data().data_ptr() });
+                columns.push(unsafe { *target.columns.get_unchecked(index).data().data_ptr() });
             }
 
-            let context = ApplyContext::new(pointers);
+            let context = ApplyContext::new(columns);
             for i in 0..count.get() {
                 unsafe { with().apply(&state.inner.state, context.with(start + i)) };
             }
-            pointers.clear();
+            columns.clear();
         }
 
         target.commit(count);
@@ -515,15 +515,15 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
     fn resolve_table(
         inner: RwLockReadGuard<table::Inner>,
         state: &StateAll<T>,
-        pointers: &mut Vec<NonNull<()>>,
+        columns: &mut Vec<NonNull<()>>,
         with: &mut impl FnMut() -> T,
     ) -> usize {
         let Some(count) = NonZeroUsize::new(inner.count() as _) else {
             return 0;
         };
 
-        lock(&state.inner.add, pointers, &inner, |pointers| {
-            let context = ApplyContext::new(&pointers);
+        lock(&state.inner.add, columns, &inner, |columns| {
+            let context = ApplyContext::new(&columns);
             for i in 0..count.get() {
                 unsafe { with().apply(&state.inner.state, context.with(i)) };
             }
@@ -536,7 +536,7 @@ impl<T: Template> ShareMetas<T> {
     pub fn from(database: &Database) -> Result<Global<Self>, Error> {
         database.resources().try_global(|| {
             let mut metas = DeclareContext::metas::<T>()?;
-            // Must sort here since the order of these metas is used to lock stores in target tables.
+            // Must sort here since the order of these metas is used to lock columns in target tables.
             metas.sort_unstable_by_key(|meta| meta.identifier());
             Ok(ShareMetas::<T>(Arc::new(metas), PhantomData))
         })
@@ -552,7 +552,7 @@ impl<T: Template> ShareTable<T> {
         database.resources().try_global_with(table, || {
             let source = database.tables().get_shared(table as usize)?;
             let mut target_metas = metas.clone();
-            target_metas.extend(source.inner.read().stores().iter().map(Store::meta));
+            target_metas.extend(source.inner.read().columns().iter().map(Column::meta));
             let target = database.tables().find_or_add(target_metas);
             let map = metas
                 .iter()
@@ -563,12 +563,12 @@ impl<T: Template> ShareTable<T> {
 
             let mut copy = Vec::new();
             for (source, identifier) in source.types().enumerate() {
-                copy.push((source, target.store_with(identifier)?));
+                copy.push((source, target.column_with(identifier)?));
             }
 
             let mut add = Vec::new();
             for meta in metas.iter() {
-                add.push(target.store_with(meta.identifier())?);
+                add.push(target.column_with(meta.identifier())?);
             }
 
             debug_assert_eq!(source.types().len(), copy.len());
@@ -585,8 +585,8 @@ impl<T: Template> ShareTable<T> {
 
 #[inline]
 fn copy(
-    source: (usize, &[Key], &mut [Store]),
-    target: (usize, &mut [Key], &[Store]),
+    source: (usize, &[Key], &mut [Column]),
+    target: (usize, &mut [Key], &[Column]),
     count: NonZeroUsize,
     indices: &[(usize, usize)],
 ) {
@@ -595,34 +595,34 @@ fn copy(
     for &indices in indices {
         let source = (unsafe { source.2.get_unchecked_mut(indices.0) }, source.0);
         let target = (unsafe { target.2.get_unchecked(indices.1) }, target.0);
-        unsafe { Store::copy_to(source, target, count) };
+        unsafe { Column::copy_to(source, target, count) };
     }
 }
 
 #[inline]
 fn lock<T>(
     indices: &[usize],
-    pointers: &mut Vec<NonNull<()>>,
+    columns: &mut Vec<NonNull<()>>,
     inner: &table::Inner,
     with: impl FnOnce(&[NonNull<()>]) -> T,
 ) -> T {
     match indices.split_first() {
         Some((&index, rest)) => {
-            let store = unsafe { inner.stores.get_unchecked(index) };
-            if store.meta().size == 0 {
-                pointers.push(unsafe { *store.data().data_ptr() });
-                lock(rest, pointers, inner, with)
+            let column = unsafe { inner.columns.get_unchecked(index) };
+            if column.meta().size == 0 {
+                columns.push(unsafe { *column.data().data_ptr() });
+                lock(rest, columns, inner, with)
             } else {
-                let guard = store.data().write();
-                pointers.push(*guard);
-                let state = lock(rest, pointers, inner, with);
+                let guard = column.data().write();
+                columns.push(*guard);
+                let state = lock(rest, columns, inner, with);
                 drop(guard);
                 state
             }
         }
         None => {
-            let state = with(pointers);
-            pointers.clear();
+            let state = with(columns);
+            columns.clear();
             state
         }
     }

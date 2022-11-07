@@ -11,7 +11,7 @@ pub struct Remove<'d> {
     keys: HashMap<Key, u32>,
     pending: Vec<(Key, &'d Slot, u32)>,
     sorted: HashMap<(u32, TypeId), State<'d>>,
-    pointers: Vec<NonNull<()>>,
+    columns: Vec<NonNull<()>>,
 }
 
 struct State<'d> {
@@ -34,7 +34,7 @@ impl Database {
             keys: HashMap::new(),
             pending: Vec::new(),
             sorted: HashMap::new(),
-            pointers: Vec::new(),
+            columns: Vec::new(),
         })
     }
 }
@@ -84,23 +84,23 @@ impl<'d> Remove<'d> {
                     let metas = DeclareContext::metas::<T>()?;
                     let source = database.tables().get_shared(table as usize)?;
                     let mut target_metas = Vec::new();
-                    for store in source.inner.read().stores() {
-                        if metas.contains(&store.meta()) {
+                    for column in source.inner.read().columns() {
+                        if metas.contains(&column.meta()) {
                             continue;
                         } else {
-                            target_metas.push(store.meta());
+                            target_metas.push(column.meta());
                         }
                     }
                     let target = database.tables().find_or_add(target_metas);
 
                     let mut copy = Vec::new();
                     for (target, identifier) in target.types().enumerate() {
-                        copy.push((source.store_with(identifier)?, target));
+                        copy.push((source.column_with(identifier)?, target));
                     }
 
                     let mut remove = Vec::new();
                     for meta in metas.iter() {
-                        remove.push(source.store_with(meta.identifier())?);
+                        remove.push(source.column_with(meta.identifier())?);
                     }
 
                     debug_assert_eq!(source.types().len(), copy.len() + remove.len());

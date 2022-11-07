@@ -13,7 +13,7 @@ pub struct Create<'d, T: Template> {
     table: Arc<Table>,
     keys: Vec<Key>,
     templates: Vec<T>,
-    pointers: Vec<NonNull<()>>,
+    columns: Vec<NonNull<()>>,
 }
 
 struct Share<T: Template>(Arc<T::State>, Arc<Table>);
@@ -45,7 +45,7 @@ impl Database {
             table: share.1.clone(),
             keys: Vec::new(),
             templates: Vec::new(),
-            pointers: Vec::new(),
+            columns: Vec::new(),
         })
     }
 }
@@ -134,15 +134,15 @@ impl<'d, T: Template> Create<'d, T> {
             // No data to initialize.
             self.templates.clear();
         } else {
-            debug_assert!(self.pointers.is_empty());
+            debug_assert!(self.columns.is_empty());
 
             // Initialize table rows.
-            for store in inner.stores() {
+            for column in inner.columns() {
                 // SAFETY: This is safe as long as a table lock is held (to prevent reallocation of the pointer) and as long as only
                 // the rows reserved by `table::Inner::reserve` are used (`start..start + count`).
-                self.pointers.push(unsafe { *store.data().data_ptr() });
+                self.columns.push(unsafe { *column.data().data_ptr() });
             }
-            let context = ApplyContext::new(&self.pointers);
+            let context = ApplyContext::new(&self.columns);
             for (i, template) in self.templates.drain(..).enumerate() {
                 // SAFETY: This is safe by the guarantees of `T::apply` and by the fact that only the rows in the range
                 // `start..start + count` are modified.
@@ -150,7 +150,7 @@ impl<'d, T: Template> Create<'d, T> {
                 debug_assert!(index < start + count.get());
                 unsafe { template.apply(&self.state, context.with(index)) };
             }
-            self.pointers.clear();
+            self.columns.clear();
         }
 
         // Initialize table keys.
@@ -161,7 +161,7 @@ impl<'d, T: Template> Create<'d, T> {
 
         // Sanity checks.
         debug_assert!(self.templates.is_empty());
-        debug_assert!(self.pointers.is_empty());
+        debug_assert!(self.columns.is_empty());
     }
 
     #[inline]

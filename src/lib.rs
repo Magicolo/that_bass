@@ -31,7 +31,7 @@ pub mod template;
     TODO: Implement `Template for Set<D: Datum>`:
         - Sets the datum `D` for a key only if the key already has the datum.
     TODO: Implement `Row` for `Get<D: Datum + Copy>`:
-        - At the beginning of iteration, `Get` makes a copy of the whole store to a temporary buffer, then the store lock can be
+        - At the beginning of iteration, `Get` makes a copy of the whole column to a temporary buffer, then the column lock can be
         released immediately.
     TODO: Implement traits for many tuple.
 
@@ -59,7 +59,7 @@ pub mod template;
         - Upgradable locks will also need to be taken for source tables that have a target table with a lower index (such that table
         locks can be taken in index order).
         - To prevent visiting keys twice, some ordering must apply on the query tables:
-            - Group tables by overlap, order them from most to least stores, groups can be reordered freely within themselves.
+            - Group tables by overlap, order them from most to least columns, groups can be reordered freely within themselves.
                 - The overlap is the size of the intersection of all of the combined `Add<T>` (or similar operator) metas.
             - With `Add<A>`, all tables with an `A` must be visited first (in any order within themselves).
             - With `Add<A>, Add<B>`: `A & B`, `A | B`, others.
@@ -72,14 +72,14 @@ pub mod template;
     TODO (POSTPONED): Implement nest operations for query:
         - Forces the outer query to take additionnal locks in case the inner query needs to produce the same item as the outer query:
             - An outer read that conflicts with an inner write becomes an upgradable read.
-            - An inner read that is missing in outer becomes a read if its index is lower than the last outer store.
-            - An inner write that is missing in outer becomes an upgradable read if its index is lower than the last outer store.
+            - An inner read that is missing in outer becomes a read if its index is lower than the last outer column.
+            - An inner write that is missing in outer becomes an upgradable read if its index is lower than the last outer column.
         - Always skip the current outer key in the inner query.
-        - When inner takes store locks from a table:
-            - GREATER than outer => hard lock the stores directly as usual
+        - When inner takes column locks from a table:
+            - GREATER than outer => hard lock the columns directly as usual
             - EQUAL to outer => add/upgrade the missing locks
-            - LESS than outer => first try to lock the stores and on failure, drop the stores
-                locks (while keeping the table locks) from the outer query and hard lock all the store locks in order.
+            - LESS than outer => first try to lock the columns and on failure, drop the columns
+                locks (while keeping the table locks) from the outer query and hard lock all the column locks in order.
             - FIX: this strategy may allow an outer immutable reference to be modified elsewhere while holding on to it...
         database
             .query::<(&mut A, &CopyFrom)>()
@@ -92,8 +92,8 @@ pub mod template;
 */
 
 /*
-TODO: There is no need to take a `Table` lock when querying as long as the store locks are always taken from left to right.
-    - By declaring used metas in `Item` it should be possible to pass the `Store`.
+TODO: There is no need to take a `Table` lock when querying as long as the column locks are always taken from left to right.
+    - By declaring used metas in `Item` it should be possible to pass the `Column`.
     - The `Lock` might need specialized methods
         `fn read_lock() -> Self::ReadGuard`
         `fn read_chunk() -> Self::ReadChunk`
@@ -160,7 +160,7 @@ pub enum Error {
     KeysMustDiffer(Key),
     QueryConflict,
     Invalid,
-    MissingStore,
+    MissingColumn,
     MissingIndex,
     MissingJoinKey,
     InvalidTable,

@@ -45,15 +45,15 @@ impl InitializeContext<'_> {
     pub fn apply<D: Datum>(&self) -> Result<Apply<D>, Error> {
         match self.0.get(&TypeId::of::<D>()) {
             Some(&index) => Ok(Apply(index, PhantomData)),
-            None => Err(Error::MissingStore),
+            None => Err(Error::MissingColumn),
         }
     }
 }
 
 impl<'a> ApplyContext<'a> {
     #[inline]
-    pub const fn new(pointers: &'a [NonNull<()>]) -> Self {
-        Self(pointers, 0)
+    pub const fn new(columns: &'a [NonNull<()>]) -> Self {
+        Self(columns, 0)
     }
 
     #[inline]

@@ -75,22 +75,22 @@ impl InitializeContext<'_> {
     pub fn read<D: Datum>(&self) -> Result<Read<D>, Error> {
         match self.0.get(&Access::Read(TypeId::of::<D>())) {
             Some(&index) => Ok(Read(index, PhantomData)),
-            None => Err(Error::MissingStore),
+            None => Err(Error::MissingColumn),
         }
     }
 
     pub fn write<D: Datum>(&self) -> Result<Write<D>, Error> {
         match self.0.get(&Access::Write(TypeId::of::<D>())) {
             Some(&index) => Ok(Write(index, PhantomData)),
-            None => Err(Error::MissingStore),
+            None => Err(Error::MissingColumn),
         }
     }
 }
 
 impl<'a, 'b> ItemContext<'a, 'b> {
     #[inline]
-    pub fn new(keys: &'a [Key], pointers: &'b [NonNull<()>]) -> Self {
-        Self(keys, pointers, 0)
+    pub const fn new(keys: &'a [Key], columns: &'b [NonNull<()>]) -> Self {
+        Self(keys, columns, 0)
     }
 
     #[inline]
@@ -100,6 +100,7 @@ impl<'a, 'b> ItemContext<'a, 'b> {
 
     #[inline]
     pub const fn with(&self, index: usize) -> Self {
+        debug_assert!(index < self.0.len());
         Self(self.0, self.1, index)
     }
 

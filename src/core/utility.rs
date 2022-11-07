@@ -1,6 +1,6 @@
 use std::ops::ControlFlow::{self, *};
 
-pub fn try_fold_swap<S, C, T>(
+pub fn try_fold_swap<T, S, C>(
     items: &mut [T],
     mut state: S,
     mut context: C,
@@ -44,7 +44,7 @@ pub fn try_fold_swap<S, C, T>(
     Continue(state)
 }
 
-pub fn fold_swap<S, C, T>(
+pub fn fold_swap<T, S, C>(
     items: &mut [T],
     mut state: S,
     mut context: C,
