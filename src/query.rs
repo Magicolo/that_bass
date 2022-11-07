@@ -56,6 +56,7 @@ impl Database {
         let mut accesses = HashSet::new();
         let context = DeclareContext(&mut accesses);
         R::declare(context)?;
+        accesses.shrink_to_fit();
         Ok(Query {
             database: self,
             indices: Vec::new(),
@@ -245,7 +246,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
 
     fn try_add(&mut self, table: &'d Table) -> Result<(), Error> {
         if F::filter(table, self.database) {
-            let mut indices = Vec::with_capacity(self.accesses.len());
+            let mut indices = Vec::new();
             for &access in self.accesses.iter() {
                 if let Ok(index) = table.column_with(access.identifier()) {
                     indices.push((index, access));
@@ -255,6 +256,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             // The sorting of indices ensures that there cannot be a deadlock between `Rows` when locking multiple columns as long as this
             // happens while holding at most 1 table lock.
             indices.sort_unstable_by_key(|&(index, _)| index);
+            indices.shrink_to_fit();
             let map = indices
                 .iter()
                 .enumerate()
