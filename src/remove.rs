@@ -91,7 +91,7 @@ impl<'d> Remove<'d> {
                             target_metas.push(store.meta());
                         }
                     }
-                    let target = database.tables().find_or_add(target_metas, 0);
+                    let target = database.tables().find_or_add(target_metas);
 
                     let mut copy = Vec::new();
                     for (target, identifier) in target.types().enumerate() {

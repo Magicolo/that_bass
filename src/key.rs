@@ -106,11 +106,12 @@ impl Keys {
         Ok((slot, slot.table(key.generation())?))
     }
 
+    /// SAFETY: The provided key must be valid.
     #[inline]
     pub unsafe fn get_unchecked(&self, key: Key) -> &Slot {
-        // See `get` for safety.
         let read = self.count.read();
         let (chunk_index, slot_index) = Self::decompose(key.index());
+        // SAFETY: See `get`.
         let chunks = &**self.chunks.get();
         let chunk = &**chunks.get_unchecked(chunk_index as usize);
         drop(read);
@@ -127,6 +128,7 @@ impl Keys {
             // Keep the lock alive.
             let _read = &read;
             let (chunk_index, slot_index) = Keys::decompose(key.index());
+            // SAFETY: See `get`.
             let chunks = unsafe { &**self.chunks.get() };
             let Some(chunk) = chunks.get(chunk_index as usize) else {
                 return (key, Err(Error::InvalidKey));
@@ -139,6 +141,7 @@ impl Keys {
         })
     }
 
+    /// SAFETY: The provided keys must be valid.
     #[inline]
     pub unsafe fn get_all_unchecked(
         &self,
@@ -149,6 +152,7 @@ impl Keys {
             // Keep the lock alive.
             let _read = &read;
             let (chunk_index, slot_index) = Keys::decompose(key.index());
+            // SAFETY: See `get`.
             let chunks = unsafe { &**self.chunks.get() };
             let chunk = unsafe { chunks.get_unchecked(chunk_index as usize) };
             (key, unsafe { chunk.get_unchecked(slot_index as usize) })

@@ -354,19 +354,6 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
-    // fn create_all_in_query_does_not_deadlock() -> Result<(), Error> {
-    //     let database = Database::new();
-    //     let mut create = database.create()?;
-    //     let key = create.one(());
-    //     create.resolve();
-    //     let mut query = database.query::<Key>()?;
-    //     let _key = query.item(key).unwrap();
-    //     create.all([(); 1000]);
-    //     create.resolve();
-    //     Ok(())
-    // }
-
     #[test]
     fn destroy_one_fails_with_null_key() {
         let database = Database::new();
@@ -683,7 +670,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    // #[test]
     fn copy_from() -> Result<(), Error> {
         struct A(usize);
         struct CopyFrom(Key);
@@ -725,34 +712,32 @@ mod tests {
 
     #[test]
     fn swap() -> Result<(), Error> {
-        struct A(usize);
         struct Swap(Key, Key);
-        impl Datum for A {}
         impl Datum for Swap {}
 
         let database = Database::new();
-        let mut a = database.create()?.one(A(1));
-        let mut b = database.create()?.one(A(2));
+        let mut a = database.create()?.one(C(1));
+        let mut b = database.create()?.one(C(2));
         let mut create = database.create()?;
         for i in 0..100 {
-            let c = create.one((A(i), Swap(a, b)));
+            let c = create.one((C(i), Swap(a, b)));
             a = b;
             b = c;
         }
         create.resolve();
 
         let mut swaps = database.query::<&Swap>()?;
-        let mut sources = database.query::<&A>()?;
-        let mut targets = database.query::<&mut A>()?;
+        let mut sources = database.query::<&C>()?;
+        let mut targets = database.query::<&mut C>()?;
         let mut by_source = database.by();
         let mut by_target = database.by();
         swaps.each(|swap| {
             by_source.pairs([(swap.0, swap.1), (swap.1, swap.0)]);
         });
-        sources.each_by_ok(&mut by_source, |target, a| {
-            by_target.pair(target, a.0);
+        sources.each_by_ok(&mut by_source, |target, c| {
+            by_target.pair(target, c.0);
         });
-        targets.each_by_ok(&mut by_target, |value, a| a.0 = value);
+        targets.each_by_ok(&mut by_target, |value, c| c.0 = value);
         // TODO: Add assertions.
         Ok(())
     }

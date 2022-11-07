@@ -187,7 +187,7 @@ impl<'d, T: Template> Add<'d, T> {
                 );
                 if state.rows.len() > 0 && T::SIZE > 0 {
                     lock(&state.inner.add, &mut self.pointers, &inner, |pointers| {
-                        let context = ApplyContext(pointers, 0);
+                        let context = ApplyContext::new(pointers);
                         for (i, template) in state.templates.drain(..).enumerate() {
                             let &(.., row) = unsafe { state.rows.get_unchecked(i) };
                             debug_assert!(row < u32::MAX);
@@ -284,7 +284,7 @@ impl<'d, T: Template> Add<'d, T> {
                     self.pointers.push(unsafe { *store.data().data_ptr() });
                 }
 
-                let context = ApplyContext(&self.pointers, 0);
+                let context = ApplyContext::new(&self.pointers);
                 for (i, template) in state.templates.drain(..).enumerate() {
                     unsafe { template.apply(&state.inner.state, context.with(start + i)) };
                 }
@@ -391,7 +391,7 @@ impl<'d, T: Template> Add<'d, T> {
             }
         }
 
-        debug_assert!(low <= high);
+        debug_assert_eq!(low <= high, rows.len() > 0);
         (low, high)
     }
 }
@@ -493,7 +493,7 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
                 pointers.push(unsafe { *target.stores.get_unchecked(index).data().data_ptr() });
             }
 
-            let context = ApplyContext(pointers, 0);
+            let context = ApplyContext::new(pointers);
             for i in 0..count.get() {
                 unsafe { with().apply(&state.inner.state, context.with(start + i)) };
             }
@@ -523,7 +523,7 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         };
 
         lock(&state.inner.add, pointers, &inner, |pointers| {
-            let context = ApplyContext(&pointers, 0);
+            let context = ApplyContext::new(&pointers);
             for i in 0..count.get() {
                 unsafe { with().apply(&state.inner.state, context.with(i)) };
             }
@@ -553,7 +553,7 @@ impl<T: Template> ShareTable<T> {
             let source = database.tables().get_shared(table as usize)?;
             let mut target_metas = metas.clone();
             target_metas.extend(source.inner.read().stores().iter().map(Store::meta));
-            let target = database.tables().find_or_add(target_metas, 0);
+            let target = database.tables().find_or_add(target_metas);
             let map = metas
                 .iter()
                 .enumerate()

@@ -22,7 +22,7 @@ impl<T: Template> Share<T> {
     pub fn from(database: &Database) -> Result<Global<Share<T>>, Error> {
         database.resources().try_global(|| {
             let metas = DeclareContext::metas::<T>()?;
-            let table = database.tables().find_or_add(metas, 0);
+            let table = database.tables().find_or_add(metas);
             let indices = table
                 .types()
                 .enumerate()
@@ -126,23 +126,33 @@ impl<'d, T: Template> Create<'d, T> {
         };
 
         let (start, inner) = table::Inner::reserve(self.table.inner.upgradable_read(), count);
+        // SAFETY: The range `start..start + count` is reserved to this thread by `table::Inner::reserve` and will not be modified
+        // until `table::Inner::commit` is called and as long as a table lock is held.
         let keys = unsafe { &mut **inner.keys.get() };
         keys[start..start + count.get()].copy_from_slice(&self.keys[..count.get()]);
         if T::SIZE == 0 {
             // No data to initialize.
             self.templates.clear();
         } else {
+            debug_assert!(self.pointers.is_empty());
+
             // Initialize table rows.
             for store in inner.stores() {
-                // SAFETY: Since this row is not yet observable by any thread but this one, no need to take locks.
+                // SAFETY: This is safe as long as a table lock is held (to prevent reallocation of the pointer) and as long as only
+                // the rows reserved by `table::Inner::reserve` are used (`start..start + count`).
                 self.pointers.push(unsafe { *store.data().data_ptr() });
             }
-            let context = ApplyContext(&self.pointers, 0);
+            let context = ApplyContext::new(&self.pointers);
             for (i, template) in self.templates.drain(..).enumerate() {
-                unsafe { template.apply(&self.state, context.with(start + i)) };
+                // SAFETY: This is safe by the guarantees of `T::apply` and by the fact that only the rows in the range
+                // `start..start + count` are modified.
+                let index = start + i;
+                debug_assert!(index < start + count.get());
+                unsafe { template.apply(&self.state, context.with(index)) };
             }
             self.pointers.clear();
         }
+
         // Initialize table keys.
         self.database
             .keys()

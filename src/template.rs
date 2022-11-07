@@ -4,7 +4,7 @@ use std::{any::TypeId, collections::HashMap, marker::PhantomData, mem::size_of, 
 pub struct Apply<D>(usize, PhantomData<fn(D)>);
 pub struct DeclareContext<'a>(&'a mut Vec<&'static Meta>);
 pub struct InitializeContext<'a>(pub(crate) &'a HashMap<TypeId, usize>);
-pub struct ApplyContext<'a>(pub(crate) &'a [NonNull<()>], pub(crate) usize);
+pub struct ApplyContext<'a>(&'a [NonNull<()>], usize);
 
 pub unsafe trait Template: 'static {
     const SIZE: usize;
@@ -50,7 +50,12 @@ impl InitializeContext<'_> {
     }
 }
 
-impl ApplyContext<'_> {
+impl<'a> ApplyContext<'a> {
+    #[inline]
+    pub const fn new(pointers: &'a [NonNull<()>]) -> Self {
+        Self(pointers, 0)
+    }
+
     #[inline]
     pub const fn own(&self) -> Self {
         Self(self.0, self.1)

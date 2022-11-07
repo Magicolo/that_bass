@@ -1,5 +1,8 @@
 use crate::{
-    core::utility::{fold_swap, try_fold_swap},
+    core::{
+        utility::{fold_swap, try_fold_swap},
+        FullIterator,
+    },
     filter::Filter,
     key::{Key, Slot},
     row::{Access, ChunkContext, DeclareContext, InitializeContext, ItemContext, Row},
@@ -75,6 +78,11 @@ impl Database {
 }
 
 impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
+    pub fn tables(&mut self) -> impl FullIterator<Item = &'d Table> + '_ {
+        self.update();
+        self.states.1.iter().map(|state| state.table)
+    }
+
     pub fn chunk(self) -> Query<'d, R, F, Chunk> {
         Query {
             database: self.database,
@@ -373,10 +381,8 @@ impl<'d, R: Row> State<'d, R> {
 impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     #[inline]
     pub fn count(&mut self) -> usize {
-        self.update();
-        self.states.1.iter().fold(0, |sum, state| {
-            sum + state.table.inner.read().count() as usize
-        })
+        self.tables()
+            .fold(0, |sum, table| sum + table.inner.read().count() as usize)
     }
 
     #[inline]
@@ -641,8 +647,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
 impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
     #[inline]
     pub fn count(&mut self) -> usize {
-        self.update();
-        self.indices.len()
+        self.tables().len()
     }
 
     #[inline]

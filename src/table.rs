@@ -182,7 +182,7 @@ impl Tables {
     }
 
     #[inline]
-    pub(crate) fn find_or_add(&self, mut metas: Vec<&'static Meta>, capacity: usize) -> Arc<Table> {
+    pub(crate) fn find_or_add(&self, mut metas: Vec<&'static Meta>) -> Arc<Table> {
         let upgrade = self.lock.upgradable_read();
         // SAFETY: `tables` can be read since an upgrade lock is held. The lock will need to be upgraded
         // before any mutation to `tables`.
@@ -196,10 +196,7 @@ impl Tables {
         }
 
         metas.sort_unstable_by_key(|meta| meta.identifier());
-        let stores: Box<[Store]> = metas
-            .into_iter()
-            .map(|meta| Store::new(meta, capacity))
-            .collect();
+        let stores: Box<[Store]> = metas.into_iter().map(|meta| Store::new(meta, 0)).collect();
         let indices = stores
             .iter()
             .enumerate()
@@ -209,7 +206,7 @@ impl Tables {
         let inner = Inner {
             count: 0.into(),
             pending: 0.into(),
-            keys: Vec::with_capacity(capacity).into(),
+            keys: Vec::new().into(),
             stores,
         };
 
@@ -333,8 +330,8 @@ impl Inner {
             assert!(index < u32::MAX - count.get() as u32);
 
             let capacity = index as usize + count.get();
-            if capacity <= inner.capacity() {
-                (index as usize, RwLockUpgradableReadGuard::downgrade(inner))
+            let inner = if capacity <= inner.capacity() {
+                RwLockUpgradableReadGuard::downgrade(inner)
             } else {
                 let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
                 let keys = inner.keys.get_mut();
@@ -348,8 +345,9 @@ impl Inner {
                         unsafe { store.grow(old_capacity, new_capacity) };
                     }
                 }
-                (index as usize, RwLockWriteGuard::downgrade(inner))
-            }
+                RwLockWriteGuard::downgrade(inner)
+            };
+            (index as usize, inner)
         };
         (start, inner)
     }
@@ -384,8 +382,8 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        let count = self.count() as usize;
-        let capacity = self.capacity();
+        let count = *self.count.get_mut() as usize;
+        let capacity = self.keys.get_mut().len();
         debug_assert!(count <= capacity);
         for store in self.stores.iter_mut() {
             unsafe { store.free(count, capacity) };
