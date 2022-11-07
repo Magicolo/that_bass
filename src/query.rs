@@ -281,7 +281,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     #[inline]
     pub fn count(&mut self) -> usize {
         self.tables()
-            .fold(0, |sum, table| sum + table.inner.read().count() as usize)
+            .fold(0, |sum, table| sum + table.inner.read().count())
     }
 
     #[inline]

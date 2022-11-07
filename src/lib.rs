@@ -264,6 +264,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use crate::{
+        core::utility::get_unchecked,
         filter::{False, Has},
         key::Key,
         Database, Datum, Error,
@@ -724,7 +725,7 @@ mod tests {
             a = b;
             b = c;
         }
-        create.resolve(); // TODO: Fix `resolve()` causes weird memory bugs...
+        create.resolve();
 
         let mut swaps = database.query::<&Swap>()?;
         let mut sources = database.query::<&C>()?;

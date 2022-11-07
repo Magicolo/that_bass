@@ -219,7 +219,7 @@ impl<'d, T: Template> Add<'d, T> {
                 // Fast path. The move range is contiguous. Copy everything from source to target at once.
                 copy(
                     (low, keys.0, &mut source.columns),
-                    (start, keys.1, &target.columns),
+                    (start, keys.1, target.columns()),
                     count,
                     &state.inner.copy,
                 );
@@ -243,7 +243,7 @@ impl<'d, T: Template> Add<'d, T> {
                 for (i, &(.., row)) in state.rows.iter().enumerate() {
                     copy(
                         (row as usize, keys.0, &mut source.columns),
-                        (start + i, keys.1, &target.columns),
+                        (start + i, keys.1, target.columns()),
                         NonZeroUsize::MIN,
                         &state.inner.copy,
                     );
@@ -482,7 +482,7 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         let keys = (source.keys.get_mut(), unsafe { &mut *target.keys.get() });
         copy(
             (0, keys.0, &mut source.columns),
-            (start, keys.1, &target.columns),
+            (start, keys.1, target.columns()),
             count,
             &state.inner.copy,
         );
@@ -490,7 +490,7 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         if T::SIZE > 0 {
             for &index in state.inner.add.iter() {
                 // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
-                columns.push(unsafe { *get_unchecked(&target.columns, index).data().data_ptr() });
+                columns.push(unsafe { *get_unchecked(target.columns(), index).data().data_ptr() });
             }
 
             let context = ApplyContext::new(columns);
@@ -518,7 +518,7 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         columns: &mut Vec<NonNull<()>>,
         with: &mut impl FnMut() -> T,
     ) -> usize {
-        let Some(count) = NonZeroUsize::new(inner.count() as _) else {
+        let Some(count) = NonZeroUsize::new(inner.count()) else {
             return 0;
         };
 

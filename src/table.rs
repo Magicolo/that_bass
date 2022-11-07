@@ -188,9 +188,9 @@ impl Tables {
     #[inline]
     pub(crate) fn find_or_add(&self, mut metas: Vec<&'static Meta>) -> Arc<Table> {
         let upgrade = self.lock.upgradable_read();
-        // SAFETY: `tables` can be read since an upgrade lock is held. The lock will need to be upgraded
-        // before any mutation to `tables`.
-        let tables = unsafe { &mut *self.tables.get() };
+        // SAFETY: `self.tables` can be read since an upgrade lock is held. The lock will need to be upgraded
+        // before any mutation to `self.tables`.
+        let tables = unsafe { &*self.tables.get() };
         for table in tables.iter() {
             if table.indices.len() == metas.len()
                 && metas.iter().all(|meta| table.has_with(meta.identifier()))
@@ -220,8 +220,8 @@ impl Tables {
             inner: RwLock::new(inner),
         });
         let write = RwLockUpgradableReadGuard::upgrade(upgrade);
-        // SAFETY: The lock has been upgraded before `tables` is mutated, which satisfy the requirement above.
-        tables.push(table.clone());
+        // SAFETY: The lock has been upgraded so `self.tables` can be mutated.
+        unsafe { &mut *self.tables.get() }.push(table.clone());
         let read = RwLockWriteGuard::downgrade(write);
         let table = unsafe { get_unchecked(tables, index) }.clone();
         drop(read);
@@ -240,6 +240,7 @@ impl<'a> IntoIterator for &'a Tables {
         let read = self.lock.read();
         unsafe { &**self.tables.get() }.iter().map(move |table| {
             // Keep the read guard alive.
+            // SAFETY: Consumer of the iterator may keep references to tables since their address is guaranteed to remain stable.
             let _read = &read;
             &**table
         })
@@ -286,23 +287,13 @@ unsafe impl Sync for Table {}
 
 impl Inner {
     #[inline]
-    pub fn count(&self) -> u32 {
+    pub fn count(&self) -> usize {
         self.count.load(Ordering::Acquire) as _
     }
 
     #[inline]
-    pub fn capacity(&self) -> usize {
-        unsafe { &*self.keys.get() }.len()
-    }
-
-    #[inline]
     pub fn keys(&self) -> &[Key] {
-        let count = self.count() as usize;
-        unsafe {
-            let keys = &**self.keys.get();
-            debug_assert!(count <= keys.len());
-            get_unchecked(keys, ..count)
-        }
+        unsafe { get_unchecked(&**self.keys.get(), ..self.count()) }
     }
 
     #[inline]
@@ -325,33 +316,32 @@ impl Inner {
         count: NonZeroUsize,
     ) -> (usize, RwLockReadGuard<'a, Inner>) {
         let (start, inner) = {
-            let (index, _) = {
+            let (start, _) = {
                 let add = Self::recompose_pending(count.get() as _, 0);
                 let pending = inner.pending.fetch_add(add, Ordering::AcqRel);
                 Self::decompose_pending(pending)
             };
             // There can not be more than `u32::MAX` keys at a given time.
-            assert!(index < u32::MAX - count.get() as u32);
+            assert!(start < u32::MAX - count.get() as u32);
 
-            let capacity = index as usize + count.get();
-            let inner = if capacity <= inner.capacity() {
+            let old_capacity = unsafe { &*inner.keys.get() }.len();
+            let new_capacity = start as usize + count.get();
+            let inner = if new_capacity <= old_capacity {
                 RwLockUpgradableReadGuard::downgrade(inner)
             } else {
                 let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
                 let keys = inner.keys.get_mut();
-                if keys.len() < capacity {
-                    let old_capacity = keys.len();
-                    keys.resize(capacity, Key::NULL);
-                    keys.resize(keys.capacity(), Key::NULL);
-                    debug_assert_eq!(keys.len(), keys.capacity());
-                    let new_capacity = keys.len();
-                    for column in inner.columns.iter_mut() {
-                        unsafe { column.grow(old_capacity, new_capacity) };
-                    }
+                keys.resize(new_capacity, Key::NULL);
+                keys.resize(keys.capacity(), Key::NULL);
+                debug_assert_eq!(keys.len(), keys.capacity());
+                let new_capacity = keys.len();
+                for column in inner.columns.iter_mut() {
+                    // CHECK
+                    unsafe { column.grow(old_capacity, new_capacity) };
                 }
                 RwLockWriteGuard::downgrade(inner)
             };
-            (index as usize, inner)
+            (start as usize, inner)
         };
         (start, inner)
     }

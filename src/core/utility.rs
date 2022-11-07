@@ -50,6 +50,8 @@ pub fn try_fold_swap<T, S, C>(
                 // SAFETY:
                 // - `tail` must be greater than 0 before the decrement because of the `while` condition.
                 // - `head` and `tail` are always valid indices because of the safety explanation above.
+                debug_assert!(head < items.len());
+                debug_assert!(tail < items.len());
                 unsafe { items.swap_unchecked(head, tail) };
                 state
             }
@@ -94,6 +96,8 @@ pub fn fold_swap<T, S, C>(
                 // SAFETY:
                 // - `tail` must be greater than 0 before the decrement because of the `while` condition.
                 // - `head` and `tail` are always valid indices because of the safety explanation above.
+                debug_assert!(head < items.len());
+                debug_assert!(tail < items.len());
                 unsafe { items.swap_unchecked(head, tail) };
                 state
             }
