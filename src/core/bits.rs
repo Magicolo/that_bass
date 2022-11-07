@@ -1,3 +1,4 @@
+use super::utility::get_unchecked_mut;
 use std::{
     convert::TryInto,
     hash::Hash,
@@ -78,7 +79,7 @@ impl Bits {
     pub fn set(&mut self, index: usize, value: bool) -> bool {
         if value {
             self.ensure(index + 1);
-            let bucket = unsafe { self.buckets.get_unchecked_mut(index / Self::SIZE) };
+            let bucket = unsafe { get_unchecked_mut(&mut self.buckets, index / Self::SIZE) };
             let bit = 1 << (index % Self::SIZE);
             Self::map(bucket, |bucket| bucket | bit)
         } else if let Some(bucket) = self.buckets.get_mut(index / Self::SIZE) {

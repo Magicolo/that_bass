@@ -1,5 +1,5 @@
 use crate::{
-    core::utility::fold_swap,
+    core::utility::{fold_swap, get_unchecked, get_unchecked_mut},
     filter::Filter,
     key::{Key, Slot},
     resources::Global,
@@ -189,7 +189,7 @@ impl<'d, T: Template> Add<'d, T> {
                     lock(&state.inner.add, &mut self.columns, &inner, |columns| {
                         let context = ApplyContext::new(columns);
                         for (i, template) in state.templates.drain(..).enumerate() {
-                            let &(.., row) = unsafe { state.rows.get_unchecked(i) };
+                            let &(.., row) = unsafe { get_unchecked(&state.rows, i) };
                             debug_assert!(row < u32::MAX);
                             unsafe { template.apply(&state.inner.state, context.with(row as _)) };
                         }
@@ -248,7 +248,7 @@ impl<'d, T: Template> Add<'d, T> {
                         &state.inner.copy,
                     );
                     // Tag keys that are going to be removed such that removed keys and valid keys can be differentiated.
-                    unsafe { *keys.0.get_unchecked_mut(row as usize) = Key::NULL };
+                    unsafe { *get_unchecked_mut(keys.0, row as usize) = Key::NULL };
                 }
 
                 let mut cursor = head;
@@ -256,7 +256,7 @@ impl<'d, T: Template> Add<'d, T> {
                     let row = row as usize;
                     if row < head {
                         // Find the next valid row to move.
-                        while unsafe { *keys.0.get_unchecked(cursor) } == Key::NULL {
+                        while unsafe { *get_unchecked(keys.0, cursor) } == Key::NULL {
                             cursor += 1;
                         }
                         debug_assert!(cursor < head + count.get());
@@ -265,8 +265,8 @@ impl<'d, T: Template> Add<'d, T> {
                             unsafe { column.squash(cursor, row, NonZeroUsize::MIN) };
                         }
 
-                        let key = unsafe { *keys.0.get_unchecked_mut(cursor) };
-                        unsafe { *keys.0.get_unchecked_mut(row) = key };
+                        let key = unsafe { *get_unchecked_mut(keys.0, cursor) };
+                        unsafe { *get_unchecked_mut(keys.0, row) = key };
                         let slot = unsafe { self.database.keys().get_unchecked(key) };
                         slot.update(row as _);
                         cursor += 1;
@@ -280,7 +280,7 @@ impl<'d, T: Template> Add<'d, T> {
             } else {
                 for &index in state.inner.add.iter() {
                     // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
-                    let column = unsafe { target.columns.get_unchecked(index) };
+                    let column = unsafe { get_unchecked(&target.columns(), index) };
                     self.columns.push(unsafe { *column.data().data_ptr() });
                 }
 
@@ -360,7 +360,7 @@ impl<'d, T: Template> Add<'d, T> {
         while index > 0 {
             index -= 1;
 
-            let (key, slot, row) = unsafe { rows.get_unchecked_mut(index) };
+            let (key, slot, row) = unsafe { get_unchecked_mut(rows, index) };
             if let Ok(table_index) = slot.table(key.generation()) {
                 if table_index == table.index() {
                     // Duplicates must only be checked here where the key would be guaranteed to be added.
@@ -490,7 +490,7 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         if T::SIZE > 0 {
             for &index in state.inner.add.iter() {
                 // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
-                columns.push(unsafe { *target.columns.get_unchecked(index).data().data_ptr() });
+                columns.push(unsafe { *get_unchecked(&target.columns, index).data().data_ptr() });
             }
 
             let context = ApplyContext::new(columns);
@@ -593,8 +593,8 @@ fn copy(
     target.1[target.0..target.0 + count.get()]
         .copy_from_slice(&source.1[source.0..source.0 + count.get()]);
     for &indices in indices {
-        let source = (unsafe { source.2.get_unchecked_mut(indices.0) }, source.0);
-        let target = (unsafe { target.2.get_unchecked(indices.1) }, target.0);
+        let source = (unsafe { get_unchecked_mut(source.2, indices.0) }, source.0);
+        let target = (unsafe { get_unchecked(target.2, indices.1) }, target.0);
         unsafe { Column::copy_to(source, target, count) };
     }
 }
@@ -608,7 +608,7 @@ fn lock<T>(
 ) -> T {
     match indices.split_first() {
         Some((&index, rest)) => {
-            let column = unsafe { inner.columns.get_unchecked(index) };
+            let column = unsafe { get_unchecked(inner.columns(), index) };
             if column.meta().size == 0 {
                 columns.push(unsafe { *column.data().data_ptr() });
                 lock(rest, columns, inner, with)

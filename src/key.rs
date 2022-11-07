@@ -1,4 +1,4 @@
-use crate::Error;
+use crate::{core::utility::get_unchecked, Error};
 use parking_lot::RwLock;
 use std::{
     cell::UnsafeCell,
@@ -98,7 +98,7 @@ impl Keys {
         let chunk = &**chunks.get(chunk_index as usize).ok_or(Error::InvalidKey)?;
         // SAFETY: As soon as the `chunk` is dereferenced, the `count_read` lock is no longer needed.
         drop(read);
-        let slot = unsafe { chunk.get_unchecked(slot_index as usize) };
+        let slot = unsafe { get_unchecked(chunk, slot_index as usize) };
         // SAFETY: A shared reference to a slot can be returned safely without being tied to the lifetime of the read guard
         // because its address is stable and no mutable reference to it is ever given out.
         // The stability of the address is guaranteed by the fact that the `chunks` vector never drops its items other than
@@ -113,9 +113,9 @@ impl Keys {
         let (chunk_index, slot_index) = Self::decompose(key.index());
         // SAFETY: See `get`.
         let chunks = &**self.chunks.get();
-        let chunk = &**chunks.get_unchecked(chunk_index as usize);
+        let chunk = &**get_unchecked(chunks, chunk_index as usize);
         drop(read);
-        chunk.get_unchecked(slot_index as usize)
+        get_unchecked(chunk, slot_index as usize)
     }
 
     #[inline]
@@ -133,7 +133,7 @@ impl Keys {
             let Some(chunk) = chunks.get(chunk_index as usize) else {
                 return (key, Err(Error::InvalidKey));
             };
-            let slot = unsafe { chunk.get_unchecked(slot_index as usize) };
+            let slot = unsafe { get_unchecked(&**chunk, slot_index as usize) };
             match slot.table(key.generation()) {
                 Ok(table) => (key, Ok((slot, table))),
                 Err(error) => (key, Err(error)),
@@ -154,8 +154,8 @@ impl Keys {
             let (chunk_index, slot_index) = Keys::decompose(key.index());
             // SAFETY: See `get`.
             let chunks = unsafe { &**self.chunks.get() };
-            let chunk = unsafe { chunks.get_unchecked(chunk_index as usize) };
-            (key, unsafe { chunk.get_unchecked(slot_index as usize) })
+            let chunk = &**unsafe { get_unchecked(chunks, chunk_index as usize) };
+            (key, unsafe { get_unchecked(chunk, slot_index as usize) })
         })
     }
 
@@ -278,13 +278,8 @@ impl Slot {
     }
 
     #[inline]
-    pub fn indices(&self) -> (u32, u32) {
-        Self::decompose_indices(self.indices.load(Acquire))
-    }
-
-    #[inline]
     pub fn table(&self, generation: u32) -> Result<u32, Error> {
-        let indices = self.indices();
+        let indices = Self::decompose_indices(self.indices.load(Acquire));
         if indices.0 == generation && indices.1 < u32::MAX {
             Ok(indices.1)
         } else {

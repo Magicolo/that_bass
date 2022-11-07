@@ -1,6 +1,6 @@
 use crate::{
     core::{
-        utility::{fold_swap, try_fold_swap},
+        utility::{fold_swap, get_unchecked, get_unchecked_mut, try_fold_swap},
         FullIterator,
     },
     filter::Filter,
@@ -169,7 +169,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     state: row,
                     table,
                     indices,
-                } = unsafe { states.get_unchecked_mut(*index as usize) };
+                } = unsafe { get_unchecked_mut(states, *index as usize) };
                 let Some(inner) = table.inner.try_read() else {
                     return Err(state);
                 };
@@ -186,7 +186,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     state: row,
                     table,
                     indices,
-                } = unsafe { states.get_unchecked_mut(*index as usize) };
+                } = unsafe { get_unchecked_mut(states, *index as usize) };
                 let inner = table.inner.read();
                 let keys = inner.keys();
                 if keys.len() == 0 {
@@ -214,7 +214,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     state: row,
                     table,
                     indices,
-                } = unsafe { states.get_unchecked_mut(*index as usize) };
+                } = unsafe { get_unchecked_mut(states, *index as usize) };
                 let Some(inner) = table.inner.try_read() else {
                     return Err(state);
                 };
@@ -231,7 +231,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     state: row,
                     table,
                     indices,
-                } = unsafe { states.get_unchecked_mut(*index as usize) };
+                } = unsafe { get_unchecked_mut(states, *index as usize) };
                 let inner = table.inner.read();
                 let keys = inner.keys();
                 if keys.len() == 0 {
@@ -332,7 +332,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                     // Fold was interrupted. Clean up.
                     by.pairs.clear();
                     for index in by.indices.drain(..) {
-                        unsafe { by.slots.get_unchecked_mut(index as usize) }.clear();
+                        unsafe { get_unchecked_mut(&mut by.slots, index as usize) }.clear();
                     }
                     return state;
                 }
@@ -485,7 +485,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         swap(&mut self.indices, &mut by.indices);
         let state = self.guards(state, |mut state, index, row, table, keys, columns| {
             let context = ItemContext::new(keys, columns);
-            let slots = unsafe { by.slots.get_unchecked_mut(index as usize) };
+            let slots = unsafe { get_unchecked_mut(&mut by.slots, index as usize) };
             for (key, value, slot) in slots.drain(..) {
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
                 match slot.table(key.generation()) {
@@ -518,7 +518,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         // TODO: No need to lock the columns if `by.slots[index].is_empty()` after being filtered.
         let flow = self.try_guards(state, |mut state, index, row, table, keys, columns| {
             let context = ItemContext::new(keys, columns);
-            let slots = unsafe { by.slots.get_unchecked_mut(index as usize) };
+            let slots = unsafe { get_unchecked_mut(&mut by.slots, index as usize) };
             for (key, value, slot) in slots.drain(..) {
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
                 match slot.table(key.generation()) {
@@ -662,7 +662,7 @@ impl<R: Row, V> Iterator for Errors<'_, '_, R, V> {
         while let Some((key, value, slot, table)) = self.by.pairs.pop_front() {
             match find_state(self.states, table) {
                 Some((index, _)) => {
-                    let slots = unsafe { self.by.slots.get_unchecked_mut(index) };
+                    let slots = unsafe { get_unchecked_mut(&mut self.by.slots, index) };
                     if slots.len() == 0 {
                         self.by.indices.push(index as _);
                     }
@@ -681,7 +681,7 @@ fn find_state<'d, 'a, R: Row>(
     table: u32,
 ) -> Option<(usize, &'a mut State<'d, R>)> {
     match states.binary_search_by_key(&table, |state| state.table.index()) {
-        Ok(index) => Some((index, unsafe { states.get_unchecked_mut(index) })),
+        Ok(index) => Some((index, unsafe { get_unchecked_mut(states, index) })),
         Err(_) => None,
     }
 }
@@ -695,7 +695,7 @@ fn try_lock<T, S>(
 ) -> Result<T, S> {
     match indices.split_first() {
         Some((&(index, access), rest)) => {
-            let column = unsafe { inner.columns.get_unchecked(index) };
+            let column = unsafe { get_unchecked(inner.columns(), index) };
             debug_assert_eq!(access.identifier(), column.meta().identifier());
             if column.meta().size == 0 {
                 columns.push(unsafe { *column.data().data_ptr() });
@@ -741,7 +741,7 @@ fn lock<T>(
 ) -> T {
     match indices.split_first() {
         Some((&(index, access), rest)) => {
-            let column = unsafe { inner.columns.get_unchecked(index) };
+            let column = unsafe { get_unchecked(inner.columns(), index) };
             debug_assert_eq!(access.identifier(), column.meta().identifier());
             if column.meta().size == 0 {
                 columns.push(unsafe { *column.data().data_ptr() });

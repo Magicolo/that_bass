@@ -1,5 +1,5 @@
 use crate::{
-    core::utility::fold_swap,
+    core::utility::{fold_swap, get_unchecked, get_unchecked_mut},
     filter::Filter,
     key::{Key, Slot},
     table::{self, Column, Table},
@@ -128,7 +128,7 @@ impl<'d> Destroy<'d> {
             } else {
                 // Tag keys that are going to be removed such that removed keys and valid keys can be differentiated.
                 for &(.., row) in state.rows.iter() {
-                    *unsafe { keys.get_unchecked_mut(row as usize) } = Key::NULL;
+                    *unsafe { get_unchecked_mut(keys, row as usize) } = Key::NULL;
                 }
 
                 let mut index = 0;
@@ -141,7 +141,7 @@ impl<'d> Destroy<'d> {
 
                     if row < head {
                         // Find the next valid row to move.
-                        while unsafe { *keys.get_unchecked(cursor) } == Key::NULL {
+                        while unsafe { *get_unchecked(keys, cursor) } == Key::NULL {
                             cursor += 1;
                         }
                         debug_assert!(cursor < head + count.get());
@@ -169,7 +169,7 @@ impl<'d> Destroy<'d> {
             }
 
             for &(key, slot, row) in state.rows.iter() {
-                debug_assert_eq!(slot.indices(), (key.generation(), state.table.index()));
+                debug_assert_eq!(slot.table(key.generation()), Ok(state.table.index()));
                 debug_assert_eq!(slot.row(), row);
                 slot.release();
             }

@@ -724,7 +724,7 @@ mod tests {
             a = b;
             b = c;
         }
-        create.resolve();
+        create.resolve(); // TODO: Fix `resolve()` causes weird memory bugs...
 
         let mut swaps = database.query::<&Swap>()?;
         let mut sources = database.query::<&C>()?;
@@ -955,6 +955,8 @@ mod push_vec {
         sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::*},
     };
 
+    use crate::core::utility::get_unchecked;
+
     const SHIFT: usize = 8;
     const CHUNK: usize = 1 << SHIFT;
     const MASK: u32 = (CHUNK - 1) as u32;
@@ -979,7 +981,7 @@ mod push_vec {
             let chunks = self.chunks.load(Acquire);
             let chunk = unsafe { &**chunks.add(chunk as usize) };
             self.decrement_use(count - 1);
-            Some(unsafe { chunk.get_unchecked(item as usize).assume_init_ref() })
+            Some(unsafe { get_unchecked(chunk, item as usize).assume_init_ref() })
         }
 
         pub fn push(&self, item: T) {

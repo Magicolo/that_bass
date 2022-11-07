@@ -1,4 +1,28 @@
-use std::ops::ControlFlow::{self, *};
+use std::{
+    ops::ControlFlow::{self, *},
+    slice::SliceIndex,
+};
+
+#[inline(always)]
+pub unsafe fn get_unchecked<T, I: SliceIndex<[T]>>(items: &[T], index: I) -> &I::Output {
+    if cfg!(debug_assertions) {
+        items.get(index).unwrap()
+    } else {
+        unsafe { items.get_unchecked(index) }
+    }
+}
+
+#[inline(always)]
+pub unsafe fn get_unchecked_mut<T, I: SliceIndex<[T]>>(
+    items: &mut [T],
+    index: I,
+) -> &mut I::Output {
+    if cfg!(debug_assertions) {
+        items.get_mut(index).unwrap()
+    } else {
+        unsafe { items.get_unchecked_mut(index) }
+    }
+}
 
 pub fn try_fold_swap<T, S, C>(
     items: &mut [T],
@@ -13,7 +37,7 @@ pub fn try_fold_swap<T, S, C>(
         // SAFETY:
         // - `head` is only ever incremented and is always `< tail`.
         // - `tail` is only ever decremented and is always `< items.len() && > head`.
-        let item = unsafe { items.get_unchecked_mut(head) };
+        let item = unsafe { get_unchecked_mut(items, head) };
         state = match try_fold(state, &mut context, item) {
             Ok(state) => {
                 // Success: Move forward.
@@ -37,7 +61,7 @@ pub fn try_fold_swap<T, S, C>(
     while head < tail {
         // Decrement before accessing the item.
         tail -= 1;
-        let item = unsafe { items.get_unchecked_mut(tail) };
+        let item = unsafe { get_unchecked_mut(items, tail) };
         state = fold(state, &mut context, item)?
     }
 
@@ -57,7 +81,7 @@ pub fn fold_swap<T, S, C>(
         // SAFETY:
         // - `head` is only ever incremented and is always `< tail`.
         // - `tail` is only ever decremented and is always `< items.len() && > head`.
-        let item = unsafe { items.get_unchecked_mut(head) };
+        let item = unsafe { get_unchecked_mut(items, head) };
         state = match try_fold(state, &mut context, item) {
             Ok(state) => {
                 // Success: Move forward.
@@ -81,7 +105,7 @@ pub fn fold_swap<T, S, C>(
     while head < tail {
         // Decrement before accessing the item.
         tail -= 1;
-        let item = unsafe { items.get_unchecked_mut(tail) };
+        let item = unsafe { get_unchecked_mut(items, tail) };
         state = fold(state, &mut context, item)
     }
 

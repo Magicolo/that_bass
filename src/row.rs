@@ -1,4 +1,4 @@
-use crate::{key::Key, Datum, Error};
+use crate::{core::utility::get_unchecked, key::Key, Datum, Error};
 use std::{
     any::TypeId,
     collections::{HashMap, HashSet},
@@ -106,7 +106,7 @@ impl<'a, 'b> ItemContext<'a, 'b> {
 
     #[inline]
     pub fn key(&self) -> Key {
-        unsafe { *self.0.get_unchecked(self.row()) }
+        unsafe { *get_unchecked(self.0, self.row()) }
     }
 
     #[inline]
@@ -116,13 +116,13 @@ impl<'a, 'b> ItemContext<'a, 'b> {
 
     #[inline]
     pub fn read<D: Datum>(&self, state: &Read<D>) -> &'a D {
-        let data = unsafe { *self.1.get_unchecked(state.0) };
+        let data = unsafe { *get_unchecked(self.1, state.0) };
         unsafe { &*data.as_ptr().cast::<D>().add(self.2) }
     }
 
     #[inline]
     pub fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut D {
-        let data = unsafe { *self.1.get_unchecked(state.0) };
+        let data = unsafe { *get_unchecked(self.1, state.0) };
         unsafe { &mut *data.as_ptr().cast::<D>().add(self.2) }
     }
 }
@@ -140,13 +140,13 @@ impl<'a> ChunkContext<'a, '_> {
 
     #[inline]
     pub fn read<D: Datum>(&self, state: &Read<D>) -> &'a [D] {
-        let data = unsafe { *self.1.get_unchecked(state.0) };
+        let data = unsafe { *get_unchecked(self.1, state.0) };
         unsafe { from_raw_parts(data.as_ptr().cast::<D>(), self.0.len()) }
     }
 
     #[inline]
     pub fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut [D] {
-        let data = unsafe { *self.1.get_unchecked(state.0) };
+        let data = unsafe { *get_unchecked(self.1, state.0) };
         unsafe { from_raw_parts_mut(data.as_ptr().cast::<D>(), self.0.len()) }
     }
 }

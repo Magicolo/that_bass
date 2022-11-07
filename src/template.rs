@@ -1,4 +1,4 @@
-use crate::{Datum, Error, Meta};
+use crate::{core::utility::get_unchecked, Datum, Error, Meta};
 use std::{any::TypeId, collections::HashMap, marker::PhantomData, mem::size_of, ptr::NonNull};
 
 pub struct Apply<D>(usize, PhantomData<fn(D)>);
@@ -69,7 +69,7 @@ impl<'a> ApplyContext<'a> {
 
     #[inline]
     pub fn apply<D: Datum>(&self, state: &Apply<D>, value: D) {
-        let data = unsafe { *self.0.get_unchecked(state.0) };
+        let data = unsafe { *get_unchecked(self.0, state.0) };
         unsafe { data.as_ptr().cast::<D>().add(self.1).write(value) };
     }
 }

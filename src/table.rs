@@ -1,4 +1,8 @@
-use crate::{core::FullIterator, key::Key, Datum, Error, Meta};
+use crate::{
+    core::{utility::get_unchecked, FullIterator},
+    key::Key,
+    Datum, Error, Meta,
+};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
     any::TypeId,
@@ -155,7 +159,7 @@ impl Tables {
         let read = self.lock.read();
         let tables = &**self.tables.get();
         debug_assert!(index < tables.len());
-        let table = &**tables.get_unchecked(index);
+        let table = &**get_unchecked(tables, index);
         drop(read);
         table
     }
@@ -176,7 +180,7 @@ impl Tables {
         let read = self.lock.read();
         let tables = &**self.tables.get();
         debug_assert!(index < tables.len());
-        let table = tables.get_unchecked(index).clone();
+        let table = get_unchecked(tables, index).clone();
         drop(read);
         table
     }
@@ -219,7 +223,7 @@ impl Tables {
         // SAFETY: The lock has been upgraded before `tables` is mutated, which satisfy the requirement above.
         tables.push(table.clone());
         let read = RwLockWriteGuard::downgrade(write);
-        let table = unsafe { tables.get_unchecked(index) }.clone();
+        let table = unsafe { get_unchecked(tables, index) }.clone();
         drop(read);
         table
     }
@@ -295,9 +299,9 @@ impl Inner {
     pub fn keys(&self) -> &[Key] {
         let count = self.count() as usize;
         unsafe {
-            let keys = &*self.keys.get();
+            let keys = &**self.keys.get();
             debug_assert!(count <= keys.len());
-            keys.get_unchecked(..count)
+            get_unchecked(keys, ..count)
         }
     }
 
@@ -356,7 +360,7 @@ impl Inner {
         let add = Self::recompose_pending(0, count.get() as _);
         let pending = self.pending.fetch_add(add, Ordering::AcqRel);
         let (begun, ended) = Self::decompose_pending(pending);
-        debug_assert!(begun >= ended);
+        debug_assert!(begun > ended);
         if begun == ended + count.get() as u32 {
             self.count.fetch_max(begun, Ordering::Relaxed);
             true
