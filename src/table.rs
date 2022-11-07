@@ -10,6 +10,7 @@ use std::{
     collections::HashMap,
     num::NonZeroUsize,
     ptr::NonNull,
+    slice::from_raw_parts_mut,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
@@ -72,17 +73,18 @@ impl Column {
         );
     }
 
-    pub unsafe fn grow(&mut self, old_capacity: usize, new_capacity: usize) {
-        debug_assert!(old_capacity < new_capacity);
+    pub unsafe fn grow(&mut self, old_capacity: usize, new_capacity: NonZeroUsize) {
+        debug_assert!(old_capacity < new_capacity.get());
         let &Meta {
             new, free, copy, ..
         } = self.meta();
         let data = self.data.get_mut();
         let old_data = *data;
-        let new_data = new(new_capacity);
+        let new_data = new(new_capacity.get());
         if let Some(old_capacity) = NonZeroUsize::new(old_capacity) {
             copy((old_data, 0), (new_data, 0), old_capacity);
         }
+        // A count of 0 is sent to `free` because the values of `old_data` have been moved to `new_data`, so they must not be dropped.
         free(old_data, 0, old_capacity);
         *data = new_data;
     }
@@ -121,7 +123,22 @@ impl Column {
     }
 
     #[inline]
+    pub unsafe fn get<T: 'static>(&self, index: usize) -> &mut T {
+        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
+        let data = *self.data.data_ptr();
+        &mut *data.as_ptr().cast::<T>().add(index)
+    }
+
+    #[inline]
+    pub unsafe fn get_all<T: 'static>(&self, count: usize) -> &mut [T] {
+        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
+        let data = *self.data.data_ptr();
+        from_raw_parts_mut(data.as_ptr().cast::<T>(), count)
+    }
+
+    #[inline]
     pub unsafe fn set<T: 'static>(&self, index: usize, value: T) {
+        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
         let data = *self.data.data_ptr();
         data.as_ptr().cast::<T>().add(index).write(value);
     }
@@ -325,16 +342,14 @@ impl Inner {
             assert!(start < u32::MAX - count.get() as u32);
 
             let old_capacity = unsafe { &*inner.keys.get() }.len();
-            let new_capacity = start as usize + count.get();
-            let inner = if new_capacity <= old_capacity {
+            let new_capacity = count.saturating_add(start as _);
+            let inner = if new_capacity.get() <= old_capacity {
                 RwLockUpgradableReadGuard::downgrade(inner)
             } else {
                 let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
                 let keys = inner.keys.get_mut();
-                keys.resize(new_capacity, Key::NULL);
-                keys.resize(keys.capacity(), Key::NULL);
-                debug_assert_eq!(keys.len(), keys.capacity());
-                let new_capacity = keys.len();
+                keys.resize(new_capacity.get(), Key::NULL);
+                debug_assert_eq!(keys.len(), new_capacity.get());
                 for column in inner.columns.iter_mut() {
                     // CHECK
                     unsafe { column.grow(old_capacity, new_capacity) };
@@ -346,16 +361,14 @@ impl Inner {
         (start, inner)
     }
 
-    pub fn commit(&self, count: NonZeroUsize) -> bool {
+    pub fn commit(&self, count: NonZeroUsize) {
         let add = Self::recompose_pending(0, count.get() as _);
         let pending = self.pending.fetch_add(add, Ordering::AcqRel);
         let (begun, ended) = Self::decompose_pending(pending);
         debug_assert!(begun > ended);
         if begun == ended + count.get() as u32 {
+            // Only update `self.count` if it can be ensured that no other add operations are in progress.
             self.count.fetch_max(begun, Ordering::Relaxed);
-            true
-        } else {
-            false
         }
     }
 

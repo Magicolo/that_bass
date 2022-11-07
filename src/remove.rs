@@ -4,14 +4,13 @@ use crate::{
     template::{DeclareContext, Template},
     Database, Error,
 };
-use std::{any::TypeId, collections::HashMap, ptr::NonNull, sync::Arc};
+use std::{any::TypeId, collections::HashMap, sync::Arc};
 
 pub struct Remove<'d> {
     database: &'d Database,
     keys: HashMap<Key, u32>,
     pending: Vec<(Key, &'d Slot, u32)>,
     sorted: HashMap<(u32, TypeId), State<'d>>,
-    columns: Vec<NonNull<()>>,
 }
 
 struct State<'d> {
@@ -34,7 +33,6 @@ impl Database {
             keys: HashMap::new(),
             pending: Vec::new(),
             sorted: HashMap::new(),
-            columns: Vec::new(),
         })
     }
 }

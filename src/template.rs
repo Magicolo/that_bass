@@ -1,16 +1,22 @@
-use crate::{core::utility::get_unchecked, Datum, Error, Meta};
-use std::{any::TypeId, collections::HashMap, marker::PhantomData, mem::size_of, ptr::NonNull};
+use crate::{
+    core::utility::get_unchecked,
+    table::{Column, Table},
+    Datum, Error, Meta,
+};
+use std::{marker::PhantomData, mem::size_of};
 
 pub struct Apply<D>(usize, PhantomData<fn(D)>);
 pub struct DeclareContext<'a>(&'a mut Vec<&'static Meta>);
-pub struct InitializeContext<'a>(pub(crate) &'a HashMap<TypeId, usize>);
-pub struct ApplyContext<'a>(&'a [NonNull<()>], usize);
+pub struct InitializeContext<'a>(&'a Table);
+pub struct ApplyContext<'a>(&'a [Column], usize);
 
 pub unsafe trait Template: 'static {
     const SIZE: usize;
     type State: Send + Sync;
     fn declare(context: DeclareContext) -> Result<(), Error>;
     fn initialize(context: InitializeContext) -> Result<Self::State, Error>;
+    /// SAFETY: All proper column locks have to be held at the time of calling this method. Also, the index carried by
+    /// `ApplyContext` must be properly valid in every columns.
     unsafe fn apply(self, state: &Self::State, context: ApplyContext);
 }
 
@@ -38,22 +44,23 @@ impl DeclareContext<'_> {
     }
 }
 
-impl InitializeContext<'_> {
+impl<'a> InitializeContext<'a> {
+    pub fn new(table: &'a Table) -> Self {
+        Self(table)
+    }
+
     pub fn own(&self) -> Self {
         Self(self.0)
     }
 
     pub fn apply<D: Datum>(&self) -> Result<Apply<D>, Error> {
-        match self.0.get(&TypeId::of::<D>()) {
-            Some(&index) => Ok(Apply(index, PhantomData)),
-            None => Err(Error::MissingColumn),
-        }
+        Ok(Apply(self.0.column::<D>()?, PhantomData))
     }
 }
 
 impl<'a> ApplyContext<'a> {
     #[inline]
-    pub const fn new(columns: &'a [NonNull<()>]) -> Self {
+    pub const fn new(columns: &'a [Column]) -> Self {
         Self(columns, 0)
     }
 
@@ -70,8 +77,7 @@ impl<'a> ApplyContext<'a> {
     #[inline]
     pub fn apply<D: Datum>(&self, state: &Apply<D>, value: D) {
         // CHECK
-        let data = unsafe { *get_unchecked(self.0, state.0) };
-        unsafe { data.as_ptr().cast::<D>().add(self.1).write(value) };
+        unsafe { get_unchecked(self.0, state.0).set(state.0, value) };
     }
 }
 

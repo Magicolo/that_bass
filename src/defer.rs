@@ -7,7 +7,6 @@ use std::{
     any::{Any, TypeId},
     cell::RefCell,
     collections::HashMap,
-    ptr::NonNull,
 };
 
 /*
@@ -21,7 +20,6 @@ use std::{
 pub struct Defer<'d> {
     database: &'d Database,
     creates: RefCell<Creates>,
-    columns: Vec<NonNull<()>>,
 }
 
 pub(crate) struct Inner {}

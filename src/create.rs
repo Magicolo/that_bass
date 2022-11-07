@@ -5,7 +5,7 @@ use crate::{
     template::{ApplyContext, DeclareContext, InitializeContext, Template},
     Database, Error,
 };
-use std::{num::NonZeroUsize, ptr::NonNull, sync::Arc};
+use std::{num::NonZeroUsize, sync::Arc};
 
 pub struct Create<'d, T: Template> {
     database: &'d Database,
@@ -13,7 +13,6 @@ pub struct Create<'d, T: Template> {
     table: Arc<Table>,
     keys: Vec<Key>,
     templates: Vec<T>,
-    columns: Vec<NonNull<()>>,
 }
 
 struct Share<T: Template>(Arc<T::State>, Arc<Table>);
@@ -23,12 +22,7 @@ impl<T: Template> Share<T> {
         database.resources().try_global(|| {
             let metas = DeclareContext::metas::<T>()?;
             let table = database.tables().find_or_add(metas);
-            let indices = table
-                .types()
-                .enumerate()
-                .map(|pair| (pair.1, pair.0))
-                .collect();
-            let context = InitializeContext(&indices);
+            let context = InitializeContext::new(&table);
             let state = Arc::new(T::initialize(context)?);
             Ok(Share::<T>(state, table))
         })
@@ -45,7 +39,6 @@ impl Database {
             table: share.1.clone(),
             keys: Vec::new(),
             templates: Vec::new(),
-            columns: Vec::new(),
         })
     }
 }
@@ -134,23 +127,16 @@ impl<'d, T: Template> Create<'d, T> {
             // No data to initialize.
             self.templates.clear();
         } else {
-            debug_assert!(self.columns.is_empty());
-
-            // Initialize table rows.
-            for column in inner.columns() {
-                // SAFETY: This is safe as long as a table lock is held (to prevent reallocation of the pointer) and as long as only
-                // the rows reserved by `table::Inner::reserve` are used (`start..start + count`).
-                self.columns.push(unsafe { *column.data().data_ptr() });
-            }
-            let context = ApplyContext::new(&self.columns);
+            let context = ApplyContext::new(inner.columns());
             for (i, template) in self.templates.drain(..).enumerate() {
                 // SAFETY: This is safe by the guarantees of `T::apply` and by the fact that only the rows in the range
                 // `start..start + count` are modified.
                 let index = start + i;
                 debug_assert!(index < start + count.get());
+                // SAFETY: No locks are required because of the guarantee above and `index` is guaranteed to hold no previous
+                // valid data.
                 unsafe { template.apply(&self.state, context.with(index)) };
             }
-            self.columns.clear();
         }
 
         // Initialize table keys.
@@ -158,10 +144,6 @@ impl<'d, T: Template> Create<'d, T> {
             .keys()
             .initialize(keys, self.table.index(), start..start + count.get());
         inner.commit(count);
-
-        // Sanity checks.
-        debug_assert!(self.templates.is_empty());
-        debug_assert!(self.columns.is_empty());
     }
 
     #[inline]

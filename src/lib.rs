@@ -20,7 +20,8 @@ pub mod table;
 pub mod template;
 
 /*
-    TODO: Use `try_each_swap` in `Query` instead of `pending/done`?
+    TODO: No need to use `columns: &[NonNull<()>]`.
+        - Everywhere where this is used, wrap `&[Column]` and simply bypass the lock.
     TODO: Implement `Defer`:
         - Will order the resolution of deferred operations such that coherence is maintained.
     TODO: Implement `Remove<T: Template>`
@@ -34,6 +35,10 @@ pub mod template;
         - At the beginning of iteration, `Get` makes a copy of the whole column to a temporary buffer, then the column lock can be
         released immediately.
     TODO: Implement traits for many tuple.
+    TODO: The `Table::commit` mechanism allows for an incoherent state where a create operation has been resolved, but the
+    created keys are reported to not be present in a corresponding query.
+        - This happens because `Table::commit` can technically fail for an unlimited amount of time...
+        - Would require to force a successful commit at key moments.
 
     TODO: Implement `Permute`.
         - Returns all permutations (with repetitions) of two queries.
@@ -133,7 +138,7 @@ use key::{Key, Keys};
 use resources::Resources;
 use std::{
     any::{type_name, TypeId},
-    mem::{forget, needs_drop, size_of},
+    mem::{needs_drop, size_of, ManuallyDrop},
     num::NonZeroUsize,
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
 };
@@ -199,10 +204,9 @@ pub trait Datum: Sized + 'static {
             name: type_name::<Self>,
             size: size_of::<Self>(),
             new: |capacity| unsafe {
-                let mut items = Vec::<Self>::with_capacity(capacity);
-                let data = NonNull::new_unchecked(items.as_mut_ptr().cast());
-                forget(items);
-                data
+                let mut items = ManuallyDrop::new(Vec::<Self>::with_capacity(capacity));
+                debug_assert!(items.capacity() == capacity || items.capacity() == usize::MAX);
+                NonNull::new_unchecked(items.as_mut_ptr()).cast::<()>()
             },
             free: |data, count, capacity| unsafe {
                 Vec::from_raw_parts(data.as_ptr().cast::<Self>(), count, capacity);
@@ -264,7 +268,6 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use crate::{
-        core::utility::get_unchecked,
         filter::{False, Has},
         key::Key,
         Database, Datum, Error,
@@ -612,7 +615,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    // #[test]
     fn multi_join() -> Result<(), Error> {
         struct A(Vec<Key>);
         impl Datum for A {}
