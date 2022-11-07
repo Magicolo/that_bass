@@ -29,8 +29,8 @@ pub unsafe trait Row {
     fn declare(context: DeclareContext) -> Result<(), Error>;
     fn initialize(context: InitializeContext) -> Result<Self::State, Error>;
     fn read(state: Self::State) -> <Self::Read as Row>::State;
-    fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a>;
-    fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a>;
+    unsafe fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a>;
+    unsafe fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a>;
 }
 
 impl<D> Write<D> {
@@ -120,13 +120,13 @@ impl<'a> ItemContext<'a> {
     }
 
     #[inline]
-    pub fn read<D: Datum>(&self, state: &Read<D>) -> &'a D {
-        unsafe { get_unchecked(self.1, state.0).get(self.2) }
+    pub unsafe fn read<D: Datum>(&self, state: &Read<D>) -> &'a D {
+        get_unchecked(self.1, state.0).get(self.2)
     }
 
     #[inline]
-    pub fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut D {
-        unsafe { get_unchecked(self.1, state.0).get(self.2) }
+    pub unsafe fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut D {
+        get_unchecked(self.1, state.0).get(self.2)
     }
 }
 
@@ -147,13 +147,13 @@ impl<'a> ChunkContext<'a> {
     }
 
     #[inline]
-    pub fn read<D: Datum>(&self, state: &Read<D>) -> &'a [D] {
-        unsafe { get_unchecked(self.1, state.0).get_all(self.0.len()) }
+    pub unsafe fn read<D: Datum>(&self, state: &Read<D>) -> &'a [D] {
+        get_unchecked(self.1, state.0).get_all(self.0.len())
     }
 
     #[inline]
-    pub fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut [D] {
-        unsafe { get_unchecked(self.1, state.0).get_all(self.0.len()) }
+    pub unsafe fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut [D] {
+        get_unchecked(self.1, state.0).get_all(self.0.len())
     }
 }
 
@@ -173,11 +173,11 @@ unsafe impl Row for Key {
         state
     }
     #[inline]
-    fn item<'a>(_: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
+    unsafe fn item<'a>(_: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         context.key()
     }
     #[inline]
-    fn chunk<'a>(_: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
+    unsafe fn chunk<'a>(_: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         context.key()
     }
 }
@@ -198,11 +198,11 @@ unsafe impl<D: Datum> Row for &D {
         state
     }
     #[inline]
-    fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
+    unsafe fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         context.read(state)
     }
     #[inline]
-    fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
+    unsafe fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         context.read(state)
     }
 }
@@ -223,11 +223,11 @@ unsafe impl<'b, D: Datum> Row for &'b mut D {
         state.read()
     }
     #[inline]
-    fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
+    unsafe fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         context.write(state)
     }
     #[inline]
-    fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
+    unsafe fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         context.write(state)
     }
 }
@@ -241,22 +241,18 @@ unsafe impl<R: Row> Row for Option<R> {
     fn declare(context: DeclareContext) -> Result<(), Error> {
         R::declare(context)
     }
-
     fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
         Ok(R::initialize(context).ok())
     }
-
     fn read(state: Self::State) -> <Self::Read as Row>::State {
         Some(R::read(state?))
     }
-
     #[inline]
-    fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
+    unsafe fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         Some(R::item(state.as_mut()?, context))
     }
-
     #[inline]
-    fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
+    unsafe fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         Some(R::chunk(state.as_mut()?, context))
     }
 }
@@ -277,11 +273,11 @@ unsafe impl Row for () {
         ()
     }
     #[inline]
-    fn item<'a>(_: &'a mut Self::State, _: ItemContext<'a>) -> Self::Item<'a> {
+    unsafe fn item<'a>(_: &'a mut Self::State, _: ItemContext<'a>) -> Self::Item<'a> {
         ()
     }
     #[inline]
-    fn chunk<'a>(_: &'a mut Self::State, _: ChunkContext<'a>) -> Self::Chunk<'a> {
+    unsafe fn chunk<'a>(_: &'a mut Self::State, _: ChunkContext<'a>) -> Self::Chunk<'a> {
         ()
     }
 }
@@ -303,11 +299,11 @@ unsafe impl<R1: Row> Row for (R1,) {
         (R1::read(state.0),)
     }
     #[inline]
-    fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
+    unsafe fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         (R1::item(&mut state.0, context.own()),)
     }
     #[inline]
-    fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
+    unsafe fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         (R1::chunk(&mut state.0, context.own()),)
     }
 }
@@ -333,14 +329,14 @@ unsafe impl<R1: Row, R2: Row> Row for (R1, R2) {
         (R1::read(state.0), R2::read(state.1))
     }
     #[inline]
-    fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
+    unsafe fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         (
             R1::item(&mut state.0, context.own()),
             R2::item(&mut state.1, context.own()),
         )
     }
     #[inline]
-    fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
+    unsafe fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         (
             R1::chunk(&mut state.0, context.own()),
             R2::chunk(&mut state.1, context.own()),
@@ -371,7 +367,7 @@ unsafe impl<R1: Row, R2: Row, R3: Row> Row for (R1, R2, R3) {
         (R1::read(state.0), R2::read(state.1), R3::read(state.2))
     }
     #[inline]
-    fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
+    unsafe fn item<'a>(state: &'a mut Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         (
             R1::item(&mut state.0, context.own()),
             R2::item(&mut state.1, context.own()),
@@ -379,7 +375,7 @@ unsafe impl<R1: Row, R2: Row, R3: Row> Row for (R1, R2, R3) {
         )
     }
     #[inline]
-    fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
+    unsafe fn chunk<'a>(state: &'a mut Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         (
             R1::chunk(&mut state.0, context.own()),
             R2::chunk(&mut state.1, context.own()),

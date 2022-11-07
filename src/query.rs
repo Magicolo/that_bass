@@ -286,7 +286,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             debug_assert!(keys.len() > 0);
             let context = ItemContext::new(keys, columns);
             for i in 0..keys.len() {
-                state = fold(state, R::item(row, context.with(i as _)))?;
+                let item = unsafe { R::item(row, context.with(i as _)) };
+                state = fold(state, item)?;
             }
             Continue(state)
         });
@@ -330,7 +331,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             debug_assert!(keys.len() > 0);
             let context = ItemContext::new(keys, columns);
             for i in 0..keys.len() {
-                state = fold(state, R::item(row, context.with(i as _)));
+                let item = unsafe { R::item(row, context.with(i as _)) };
+                state = fold(state, item);
             }
             state
         })
@@ -439,7 +441,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                     let keys = inner.keys();
                     debug_assert_eq!(keys.get(row).copied(), Some(key));
                     let context = ItemContext::new(keys, inner.columns());
-                    find(Ok(R::item(state, context.with(row))))
+                    let item = unsafe { R::item(state, context.with(row)) };
+                    find(Ok(item))
                 });
             } else {
                 // The `key` has just been moved; try again with the new table.
@@ -471,7 +474,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
                 match slot.table(key.generation()) {
                     Ok(table_index) if table.index() == table_index => {
-                        let item = R::item(row, context.with(slot.row() as _));
+                        let item = unsafe { R::item(row, context.with(slot.row() as _)) };
                         state = fold(state, value, Ok(item));
                     }
                     // The key has moved to another table between the last moment the slot indices were read and now.
@@ -504,7 +507,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
                 match slot.table(key.generation()) {
                     Ok(table_index) if table.index() == table_index => {
-                        let item = R::item(row, context.with(slot.row() as _));
+                        let item = unsafe { R::item(row, context.with(slot.row() as _)) };
                         state = fold(state, value, Ok(item))?;
                     }
                     // The key has moved to another table between the last moment the slot indices were read and now.
@@ -548,7 +551,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
     ) -> S {
         self.update();
         let flow = self.try_guards(state, |state, _, row, _, keys, columns| {
-            fold(state, R::chunk(row, ChunkContext::new(keys, columns)))
+            let chunk = unsafe { R::chunk(row, ChunkContext::new(keys, columns)) };
+            fold(state, chunk)
         });
         match flow {
             Continue(state) => state,
@@ -560,7 +564,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
     pub fn fold<S, G: FnMut(S, R::Chunk<'_>) -> S>(&mut self, state: S, mut fold: G) -> S {
         self.update();
         self.guards(state, |state, _, row, _, keys, columns| {
-            fold(state, R::chunk(row, ChunkContext::new(keys, columns)))
+            let chunk = unsafe { R::chunk(row, ChunkContext::new(keys, columns)) };
+            fold(state, chunk)
         })
     }
 

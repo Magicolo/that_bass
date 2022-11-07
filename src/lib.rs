@@ -615,17 +615,15 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
+    #[test]
     fn multi_join() -> Result<(), Error> {
         struct A(Vec<Key>);
         impl Datum for A {}
 
         let database = Database::new();
-        let mut create = database.create()?;
-        let a = create.one(A(vec![]));
-        let b = create.one(A(vec![a, a, Key::NULL]));
-        create.one(A(vec![Key::NULL, Key::NULL, a, b]));
-        create.resolve();
+        let a = database.create()?.one(A(vec![]));
+        let b = database.create()?.one(A(vec![a, a, Key::NULL]));
+        database.create()?.one(A(vec![Key::NULL, Key::NULL, a, b]));
 
         let mut query = database.query::<&A>()?;
         assert_eq!(query.count(), 3);
@@ -634,8 +632,8 @@ mod tests {
         query.each(|a| {
             by.keys(a.0.iter().cloned());
         });
-        assert_eq!(query.count_by(&by), 4);
         assert_eq!(by.len(), 4);
+        assert_eq!(query.count_by(&by), 4);
 
         let mut query = database.query::<Key>()?;
         assert_eq!(query.count(), 3);
@@ -674,7 +672,7 @@ mod tests {
         Ok(())
     }
 
-    // #[test]
+    #[test]
     fn copy_from() -> Result<(), Error> {
         struct A(usize);
         struct CopyFrom(Key);
