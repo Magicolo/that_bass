@@ -1,5 +1,5 @@
 use crate::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut},
+    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
     filter::Filter,
     key::{Key, Slot},
     resources::Global,
@@ -239,7 +239,7 @@ impl<'d, T: Template> Add<'d, T> {
                     copy(
                         (row as usize, keys.0, &mut source.columns),
                         (start + i, keys.1, target.columns()),
-                        NonZeroUsize::MIN,
+                        ONE,
                         &state.inner.copy,
                     );
                     // Tag keys that are going to be removed such that removed keys and valid keys can be differentiated.
@@ -257,7 +257,7 @@ impl<'d, T: Template> Add<'d, T> {
                         debug_assert!(cursor < head + count.get());
 
                         for column in source.columns.iter_mut() {
-                            unsafe { column.squash(cursor, row, NonZeroUsize::MIN) };
+                            unsafe { column.squash(cursor, row, ONE) };
                         }
 
                         let key = unsafe { *get_unchecked_mut(keys.0, cursor) };

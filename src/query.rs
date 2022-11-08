@@ -11,10 +11,11 @@ use crate::{
 };
 use std::{
     any::TypeId,
-    collections::{HashSet, VecDeque},
+    collections::HashSet,
     marker::PhantomData,
     mem::swap,
     ops::ControlFlow::{self, *},
+    vec::Drain,
 };
 
 // TODO: Share some state... But how to `update` without locking when accessing `states`?
@@ -31,8 +32,8 @@ pub struct Item;
 pub struct Chunk;
 
 pub struct By<'d, V> {
-    database: &'d Database,
-    pairs: VecDeque<(Key, V, &'d Slot, u32)>,
+    pairs: Vec<(Key, V)>,
+    pending: Vec<(Key, V, &'d Slot, u32)>,
     slots: Vec<Vec<(Key, V, &'d Slot)>>,
     indices: Vec<u32>,
 }
@@ -44,8 +45,12 @@ struct State<'d, R: Row> {
 }
 
 struct Errors<'d, 'a, R: Row, V> {
+    database: &'d Database,
     states: &'a mut [State<'d, R>],
-    by: &'a mut By<'d, V>,
+    pairs: Drain<'a, (Key, V)>,
+    pending: Drain<'a, (Key, V, &'d Slot, u32)>,
+    slots: &'a mut Vec<Vec<(Key, V, &'d Slot)>>,
+    indices: &'a mut Vec<u32>,
 }
 
 impl Database {
@@ -58,15 +63,6 @@ impl Database {
             index: 0,
             _marker: PhantomData,
         })
-    }
-
-    pub fn by<V>(&self) -> By<V> {
-        By {
-            database: self,
-            pairs: VecDeque::new(),
-            slots: Vec::new(),
-            indices: Vec::new(),
-        }
     }
 }
 
@@ -268,10 +264,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     #[inline]
     pub fn count_by<V>(&mut self, by: &By<V>) -> usize {
         self.update();
-        by.pairs
-            .iter()
-            .filter(|&&(.., table)| find_state(&mut self.states, table).is_some())
-            .count()
+        by.pairs.iter().filter(|&&(key, ..)| self.has(key)).count()
     }
 
     #[inline]
@@ -304,7 +297,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         mut fold: G,
     ) -> S {
         self.update();
-        while by.pairs.len() > 0 {
+        loop {
             state = match self.try_fold_by_sorted(by, state, &mut fold) {
                 Continue(state) => {
                     by.indices.clear();
@@ -312,15 +305,17 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 }
                 Break(state) => {
                     // Fold was interrupted. Clean up.
-                    by.pairs.clear();
+                    by.pending.clear();
                     for index in by.indices.drain(..) {
                         unsafe { get_unchecked_mut(&mut by.slots, index as usize) }.clear();
                     }
-                    return state;
+                    break state;
                 }
+            };
+            if by.pending.len() == 0 {
+                break state;
             }
         }
-        state
     }
 
     #[inline]
@@ -345,11 +340,13 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         mut fold: G,
     ) -> S {
         self.update();
-        while by.pairs.len() > 0 {
+        loop {
             state = self.fold_by_sorted(by, state, &mut fold);
             by.indices.clear();
+            if by.pending.len() == 0 {
+                break state;
+            }
         }
-        state
     }
 
     #[inline]
@@ -461,8 +458,21 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         mut state: S,
         fold: &mut G,
     ) -> S {
-        for (value, error) in self.sort(by) {
-            state = fold(state, value, Err(error));
+        for (key, value) in by.pairs.drain(..) {
+            match self.database.keys().get(key) {
+                Ok((slot, table)) => match self.sort(&mut by.slots, key, value, slot, table) {
+                    Some((value, error)) => state = fold(state, value, Err(error)),
+                    None => {}
+                },
+                Err(error) => state = fold(state, value, Err(error)),
+            }
+        }
+
+        for (key, value, slot, table) in by.pending.drain(..) {
+            match self.sort(&mut by.slots, key, value, slot, table) {
+                Some((value, error)) => state = fold(state, value, Err(error)),
+                None => {}
+            }
         }
 
         swap(&mut self.indices, &mut by.indices);
@@ -477,7 +487,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                         state = fold(state, value, Ok(item));
                     }
                     // The key has moved to another table between the last moment the slot indices were read and now.
-                    Ok(table_index) => by.pairs.push_back((key, value, slot, table_index)),
+                    Ok(table_index) => by.pending.push((key, value, slot, table_index)),
                     Err(error) => state = fold(state, value, Err(error)),
                 }
             }
@@ -493,8 +503,21 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         mut state: S,
         fold: &mut G,
     ) -> ControlFlow<S, S> {
-        for (value, error) in self.sort(by) {
-            state = fold(state, value, Err(error))?;
+        for (key, value) in by.pairs.drain(..) {
+            match self.database.keys().get(key) {
+                Ok((slot, table)) => match self.sort(&mut by.slots, key, value, slot, table) {
+                    Some((value, error)) => state = fold(state, value, Err(error))?,
+                    None => {}
+                },
+                Err(error) => state = fold(state, value, Err(error))?,
+            }
+        }
+
+        for (key, value, slot, table) in by.pending.drain(..) {
+            match self.sort(&mut by.slots, key, value, slot, table) {
+                Some((value, error)) => state = fold(state, value, Err(error))?,
+                None => {}
+            }
         }
 
         swap(&mut self.indices, &mut by.indices);
@@ -510,7 +533,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                         state = fold(state, value, Ok(item))?;
                     }
                     // The key has moved to another table between the last moment the slot indices were read and now.
-                    Ok(table_index) => by.pairs.push_back((key, value, slot, table_index)),
+                    Ok(table_index) => by.pending.push((key, value, slot, table_index)),
                     Err(error) => state = fold(state, value, Err(error))?,
                 }
             }
@@ -522,14 +545,24 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
 
     /// Sorts keys by state index such that table locks can be used for (hopefully) more than one key at a time.
     #[inline]
-    fn sort<'a, V>(&'a mut self, by: &'a mut By<'d, V>) -> Errors<'d, 'a, R, V> {
-        while by.slots.len() < self.states.len() {
-            by.slots.push(Vec::new());
-        }
-        // Sort keys by state such that table locks can be used for (hopefully) more than one key at a time.
-        Errors {
-            states: &mut self.states,
-            by: by,
+    fn sort<V>(
+        &mut self,
+        slots: &mut Vec<Vec<(Key, V, &'d Slot)>>,
+        key: Key,
+        value: V,
+        slot: &'d Slot,
+        table: u32,
+    ) -> Option<(V, Error)> {
+        match find_state(&mut self.states, table) {
+            Some((index, _)) => {
+                let slots = unsafe { get_unchecked_mut(slots, index) };
+                if slots.len() == 0 {
+                    self.indices.push(index as _);
+                }
+                slots.push((key, value, slot));
+                None
+            }
+            None => Some((value, Error::KeyNotInQuery(key))),
         }
     }
 }
@@ -599,39 +632,40 @@ impl Access {
 
 impl By<'_, ()> {
     #[inline]
-    pub fn key(&mut self, key: Key) -> bool {
+    pub fn key(&mut self, key: Key) {
         self.pair(key, ())
     }
 
     #[inline]
-    pub fn keys<I: IntoIterator<Item = Key>>(&mut self, keys: I) -> usize {
+    pub fn keys<I: IntoIterator<Item = Key>>(&mut self, keys: I) {
         self.pairs(keys.into_iter().map(|key| (key, ())))
     }
 }
 
 impl<V> By<'_, V> {
     #[inline]
+    pub const fn new() -> Self {
+        By {
+            pairs: Vec::new(),
+            pending: Vec::new(),
+            slots: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
+
+    #[inline]
     pub fn len(&self) -> usize {
         self.pairs.len()
     }
 
     #[inline]
-    pub fn pair(&mut self, key: Key, value: V) -> bool {
-        match self.database.keys().get(key) {
-            Ok((slot, table)) => {
-                self.pairs.push_back((key, value, slot, table));
-                true
-            }
-            Err(_) => false,
-        }
+    pub fn pair(&mut self, key: Key, value: V) {
+        self.pairs.push((key, value));
     }
 
     #[inline]
-    pub fn pairs<I: IntoIterator<Item = (Key, V)>>(&mut self, pairs: I) -> usize {
-        pairs
-            .into_iter()
-            .filter_map(|(key, value)| self.pair(key, value).then_some(()))
-            .count()
+    pub fn pairs<I: IntoIterator<Item = (Key, V)>>(&mut self, pairs: I) {
+        self.pairs.extend(pairs);
     }
 
     #[inline]
@@ -640,20 +674,51 @@ impl<V> By<'_, V> {
     }
 }
 
+impl<V> Default for By<'_, V> {
+    fn default() -> Self {
+        Self {
+            pairs: Default::default(),
+            pending: Default::default(),
+            slots: Default::default(),
+            indices: Default::default(),
+        }
+    }
+}
+
+impl<'d, R: Row, V> Errors<'d, '_, R, V> {
+    fn find(&mut self, key: Key, value: V, slot: &'d Slot, table: u32) -> Option<(V, Error)> {
+        match find_state(self.states, table) {
+            Some((index, _)) => {
+                let slots = unsafe { get_unchecked_mut(&mut self.slots, index) };
+                if slots.len() == 0 {
+                    self.indices.push(index as _);
+                }
+                slots.push((key, value, slot));
+                None
+            }
+            None => Some((value, Error::KeyNotInQuery(key))),
+        }
+    }
+}
+
 impl<R: Row, V> Iterator for Errors<'_, '_, R, V> {
     type Item = (V, Error);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((key, value, slot, table)) = self.by.pairs.pop_front() {
-            match find_state(self.states, table) {
-                Some((index, _)) => {
-                    let slots = unsafe { get_unchecked_mut(&mut self.by.slots, index) };
-                    if slots.len() == 0 {
-                        self.by.indices.push(index as _);
-                    }
-                    slots.push((key, value, slot));
-                }
-                None => return Some((value, Error::KeyNotInQuery(key))),
+        while let Some((key, value)) = self.pairs.next() {
+            match self.database.keys().get(key) {
+                Ok((slot, table)) => match self.find(key, value, slot, table) {
+                    Some(pair) => return Some(pair),
+                    None => {}
+                },
+                Err(error) => return Some((value, error)),
+            }
+        }
+
+        while let Some((key, value, slot, table)) = self.pending.next() {
+            match self.find(key, value, slot, table) {
+                Some(pair) => return Some(pair),
+                None => {}
             }
         }
         None
@@ -671,61 +736,55 @@ fn find_state<'d, 'a, R: Row>(
     }
 }
 
-fn try_lock<T, S>(
+fn try_lock<T, S, F: FnOnce(S) -> T>(
     state: S,
-    indices: &[(usize, Access)],
+    mut indices: &[(usize, Access)],
     inner: &table::Inner,
-    with: impl FnOnce(S) -> T,
+    with: F,
 ) -> Result<T, S> {
-    match indices.split_first() {
-        Some((&(index, access), rest)) => {
-            let column = unsafe { get_unchecked(inner.columns(), index) };
-            debug_assert_eq!(access.identifier(), column.meta().identifier());
-            if column.meta().size == 0 {
-                // TODO: No need to recurse here.
-                try_lock(state, rest, inner, with)
-            } else {
-                match access {
-                    Access::Read(_) => {
-                        let Some(_guard) = column.data().try_read() else {
-                            return Err(state);
-                        };
-                        try_lock(state, rest, inner, with)
-                    }
-                    Access::Write(_) => {
-                        let Some(_guard) = column.data().try_write() else {
-                            return Err(state);
-                        };
-                        try_lock(state, rest, inner, with)
-                    }
-                }
-            }
+    while let Some((&(index, access), rest)) = indices.split_first() {
+        let column = unsafe { get_unchecked(inner.columns(), index) };
+        debug_assert_eq!(access.identifier(), column.meta().identifier());
+        if column.meta().size == 0 {
+            // No need to recurse since no lock needs to be accumulated.
+            indices = rest;
+            continue;
         }
-        None => Ok(with(state)),
+
+        match access {
+            Access::Read(_) => match column.data().try_read() {
+                Some(_guard) => return try_lock(state, rest, inner, with),
+                None => return Err(state),
+            },
+            Access::Write(_) => match column.data().try_write() {
+                Some(_guard) => return try_lock(state, rest, inner, with),
+                None => return Err(state),
+            },
+        }
     }
+    Ok(with(state))
 }
 
-fn lock<T>(indices: &[(usize, Access)], inner: &table::Inner, with: impl FnOnce() -> T) -> T {
-    match indices.split_first() {
-        Some((&(index, access), rest)) => {
-            let column = unsafe { get_unchecked(inner.columns(), index) };
-            debug_assert_eq!(access.identifier(), column.meta().identifier());
-            if column.meta().size == 0 {
-                // TODO: No need to recurse here.
-                lock(rest, inner, with)
-            } else {
-                match access {
-                    Access::Read(_) => {
-                        let _guard = column.data().read();
-                        lock(rest, inner, with)
-                    }
-                    Access::Write(_) => {
-                        let _guard = column.data().write();
-                        lock(rest, inner, with)
-                    }
-                }
+fn lock<T, F: FnOnce() -> T>(mut indices: &[(usize, Access)], inner: &table::Inner, with: F) -> T {
+    while let Some((&(index, access), rest)) = indices.split_first() {
+        let column = unsafe { get_unchecked(inner.columns(), index) };
+        debug_assert_eq!(access.identifier(), column.meta().identifier());
+        if column.meta().size == 0 {
+            // No need to recurse since no lock needs to be accumulated.
+            indices = rest;
+            continue;
+        }
+
+        match access {
+            Access::Read(_) => {
+                let _guard = column.data().read();
+                return lock(rest, inner, with);
+            }
+            Access::Write(_) => {
+                let _guard = column.data().write();
+                return lock(rest, inner, with);
             }
         }
-        None => with(),
     }
+    with()
 }

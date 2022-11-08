@@ -1,7 +1,11 @@
 use std::{
+    num::NonZeroUsize,
     ops::ControlFlow::{self, *},
+    ptr::swap,
     slice::SliceIndex,
 };
+
+pub const ONE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(1) };
 
 #[inline(always)]
 pub unsafe fn get_unchecked<T, I: SliceIndex<[T]>>(items: &[T], index: I) -> &I::Output {
@@ -21,6 +25,16 @@ pub unsafe fn get_unchecked_mut<T, I: SliceIndex<[T]>>(
         items.get_mut(index).unwrap()
     } else {
         unsafe { items.get_unchecked_mut(index) }
+    }
+}
+
+#[inline(always)]
+pub unsafe fn swap_unchecked<T>(items: &mut [T], a: usize, b: usize) {
+    if cfg!(debug_assertions) {
+        items.swap(a, b);
+    } else {
+        let pointer = items.as_mut_ptr();
+        swap(pointer.add(a), pointer.add(b));
     }
 }
 
@@ -52,7 +66,7 @@ pub fn try_fold_swap<T, S, C>(
                 // - `head` and `tail` are always valid indices because of the safety explanation above.
                 debug_assert!(head < items.len());
                 debug_assert!(tail < items.len());
-                unsafe { items.swap_unchecked(head, tail) };
+                unsafe { swap_unchecked(items, head, tail) };
                 state
             }
         };
@@ -98,7 +112,7 @@ pub fn fold_swap<T, S, C>(
                 // - `head` and `tail` are always valid indices because of the safety explanation above.
                 debug_assert!(head < items.len());
                 debug_assert!(tail < items.len());
-                unsafe { items.swap_unchecked(head, tail) };
+                unsafe { swap_unchecked(items, head, tail) };
                 state
             }
         };

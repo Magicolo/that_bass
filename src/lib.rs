@@ -1,10 +1,3 @@
-#![feature(type_alias_impl_trait)]
-#![feature(auto_traits)]
-#![feature(negative_impls)]
-#![feature(portable_simd)]
-#![feature(slice_swap_unchecked)]
-#![feature(nonzero_min_max)]
-
 pub mod add;
 pub mod core;
 pub mod create;
@@ -20,8 +13,8 @@ pub mod table;
 pub mod template;
 
 /*
-    TODO: No need to use `columns: &[NonNull<()>]`.
-        - Everywhere where this is used, wrap `&[Column]` and simply bypass the lock.
+    TODO: Allow `Query` to be split in parts which will each be responsible for operating on one table.
+        - This is meant to allow executing parts of the query one different threads.
     TODO: Implement `Defer`:
         - Will order the resolution of deferred operations such that coherence is maintained.
     TODO: Implement `Remove<T: Template>`
@@ -270,12 +263,10 @@ mod tests {
     use crate::{
         filter::{False, Has},
         key::Key,
+        query::By,
         Database, Datum, Error,
     };
-    use std::{
-        collections::HashSet,
-        simd::{f32x16, f32x2, f32x4, f32x8},
-    };
+    use std::collections::HashSet;
 
     #[derive(Debug, Clone, Copy)]
     struct A;
@@ -627,12 +618,10 @@ mod tests {
 
         let mut query = database.query::<&A>()?;
         assert_eq!(query.count(), 3);
-        let mut by = database.by();
+        let mut by = By::new();
         assert_eq!(by.len(), 0);
-        query.each(|a| {
-            by.keys(a.0.iter().copied());
-        });
-        assert_eq!(by.len(), 4);
+        query.each(|a| by.keys(a.0.iter().copied()));
+        assert_eq!(by.len(), 7);
         assert_eq!(query.count_by(&by), 4);
 
         let mut query = database.query::<Key>()?;
@@ -661,10 +650,8 @@ mod tests {
 
         let mut sources = database.query::<(&C, &CopyTo)>()?;
         let mut targets = database.query::<&mut C>()?;
-        let mut by = database.by();
-        sources.each(|(c, copy)| {
-            by.pair(copy.0, c.0);
-        });
+        let mut by = By::new();
+        sources.each(|(c, copy)| by.pair(copy.0, c.0));
         targets.each_by_ok(&mut by, |value, c| c.0 = value);
         // TODO: Add assertions.
         Ok(())
@@ -687,15 +674,11 @@ mod tests {
         let mut copies = database.query::<(Key, &CopyFrom)>()?;
         let mut sources = database.query::<&C>()?;
         let mut targets = database.query::<&mut C>()?;
-        let mut by_source = database.by();
-        let mut by_target = database.by();
+        let mut by_source = By::new();
+        let mut by_target = By::new();
 
-        copies.each(|(key, copy)| {
-            by_source.pair(copy.0, key);
-        });
-        sources.each_by_ok(&mut by_source, |target, c| {
-            by_target.pair(target, c.0);
-        });
+        copies.each(|(key, copy)| by_source.pair(copy.0, key));
+        sources.each_by_ok(&mut by_source, |target, c| by_target.pair(target, c.0));
         targets.each_by_ok(&mut by_target, |value, c| c.0 = value);
 
         assert_eq!(copies.count(), COUNT);
@@ -727,224 +710,109 @@ mod tests {
         let mut swaps = database.query::<&Swap>()?;
         let mut sources = database.query::<&C>()?;
         let mut targets = database.query::<&mut C>()?;
-        let mut by_source = database.by();
-        let mut by_target = database.by();
-        swaps.each(|swap| {
-            by_source.pairs([(swap.0, swap.1), (swap.1, swap.0)]);
-        });
-        sources.each_by_ok(&mut by_source, |target, c| {
-            by_target.pair(target, c.0);
-        });
+        let mut by_source = By::new();
+        let mut by_target = By::new();
+        swaps.each(|swap| by_source.pairs([(swap.0, swap.1), (swap.1, swap.0)]));
+        sources.each_by_ok(&mut by_source, |target, c| by_target.pair(target, c.0));
         targets.each_by_ok(&mut by_target, |value, c| c.0 = value);
         // TODO: Add assertions.
         Ok(())
     }
-
-    // #[test]
-    fn simd_add() -> Result<(), Error> {
-        #[repr(transparent)]
-        #[derive(Clone, Copy)]
-        struct A(f32);
-        #[repr(transparent)]
-        #[derive(Clone, Copy)]
-        struct B(f32);
-        impl Datum for A {}
-        impl Datum for B {}
-
-        let database = Database::new();
-        database.create()?.all_n([(A(0.0), B(1.0)); 100]);
-        database.query::<(&mut A, &B)>()?.chunk().each(|(a, b)| {
-            debug_assert_eq!(a.len(), b.len());
-
-            #[inline]
-            unsafe fn add16(source: *const f32, target: *mut f32) {
-                *(target as *mut f32x16) += *(source as *mut f32x16);
-            }
-            #[inline]
-            unsafe fn add8(source: *const f32, target: *mut f32) {
-                *(target as *mut f32x8) += *(source as *mut f32x8);
-            }
-            #[inline]
-            unsafe fn add4(source: *const f32, target: *mut f32) {
-                *(target as *mut f32x4) += *(source as *mut f32x4);
-            }
-            #[inline]
-            unsafe fn add2(source: *const f32, target: *mut f32) {
-                *(target as *mut f32x2) += *(source as *mut f32x2);
-            }
-            #[inline]
-            unsafe fn add1(source: *const f32, target: *mut f32) {
-                *target += *source
-            }
-            unsafe fn add(source: *const f32, target: *mut f32, count: usize) {
-                match count {
-                    0 => {}
-                    1 => add1(source, target),
-                    2 => add2(source, target),
-                    3 => {
-                        add2(source, target);
-                        add1(source.add(2), target.add(2));
-                    }
-                    4 => add4(source, target),
-                    5 => {
-                        add4(source, target);
-                        add1(source.add(4), target.add(4));
-                    }
-                    6 => {
-                        add4(source, target);
-                        add2(source.add(4), target.add(4));
-                    }
-                    7 => {
-                        add4(source, target);
-                        add2(source.add(4), target.add(4));
-                        add1(source.add(6), target.add(6));
-                    }
-                    8 => add8(source, target),
-                    9 => {
-                        add8(source, target);
-                        add1(source.add(8), target.add(8));
-                    }
-                    10 => {
-                        add8(source, target);
-                        add2(source.add(8), target.add(8));
-                    }
-                    11 => {
-                        add8(source, target);
-                        add2(source.add(8), target.add(8));
-                        add1(source.add(10), target.add(10));
-                    }
-                    12 => {
-                        add8(source, target);
-                        add4(source.add(8), target.add(8));
-                    }
-                    13 => {
-                        add8(source, target);
-                        add4(source.add(8), target.add(8));
-                        add1(source.add(12), target.add(12));
-                    }
-                    14 => {
-                        add8(source, target);
-                        add4(source.add(8), target.add(8));
-                        add2(source.add(12), target.add(12));
-                    }
-                    15 => {
-                        add8(source, target);
-                        add4(source.add(8), target.add(8));
-                        add2(source.add(12), target.add(12));
-                        add1(source.add(14), target.add(14));
-                    }
-                    _ => unreachable!(),
-                }
-            }
-
-            let count = a.len();
-            let mut source = b.as_ptr() as _;
-            let mut target = a.as_mut_ptr() as _;
-            for _ in 0..count / 16 {
-                unsafe { add16(source, target) };
-                unsafe { source = source.add(16) };
-                unsafe { target = target.add(16) };
-            }
-            unsafe { add(source, target, count % 16) };
-        });
-
-        Ok(())
-    }
 }
 
-mod locks {
-    use std::marker::PhantomData;
+// mod locks {
+//     use std::marker::PhantomData;
 
-    pub trait Datum {}
-    pub trait Item {}
-    impl<D: Datum> Item for &D {}
-    impl<D: Datum> Item for &mut D {}
-    impl Item for () {}
-    impl<I1: Item> Item for (I1,) {}
-    impl<I1: Item, I2: Item + Allow<I1>> Item for (I1, I2) {}
-    impl<I1: Item, I2: Item + Allow<I1>, I3: Item + Allow<I1> + Allow<I2>> Item for (I1, I2, I3) {}
-    impl Datum for bool {}
-    impl Datum for char {}
+//     pub trait Datum {}
+//     pub trait Item {}
+//     impl<D: Datum> Item for &D {}
+//     impl<D: Datum> Item for &mut D {}
+//     impl Item for () {}
+//     impl<I1: Item> Item for (I1,) {}
+//     impl<I1: Item, I2: Item + Allow<I1>> Item for (I1, I2) {}
+//     impl<I1: Item, I2: Item + Allow<I1>, I3: Item + Allow<I1> + Allow<I2>> Item for (I1, I2, I3) {}
+//     impl Datum for bool {}
+//     impl Datum for char {}
 
-    pub auto trait Safe {}
-    impl<T, U> Safe for (&T, &U) {}
-    impl<T> !Safe for (&mut T, &T) {}
-    impl<T> !Safe for (&mut T, &mut T) {}
-    impl<T> !Safe for (&T, &mut T) {}
+//     pub auto trait Safe {}
+//     impl<T, U> Safe for (&T, &U) {}
+//     impl<T> !Safe for (&mut T, &T) {}
+//     impl<T> !Safe for (&mut T, &mut T) {}
+//     impl<T> !Safe for (&T, &mut T) {}
 
-    pub trait Allow<T> {}
-    impl<T, U> Allow<U> for &T where for<'a> (&'a T, U): Safe {}
-    impl<T, U> Allow<U> for &mut T where for<'a> (&'a mut T, U): Safe {}
-    impl<U> Allow<U> for () {}
-    impl<T1, U: Allow<T1>> Allow<U> for (T1,) {}
-    impl<T1, T2, U: Allow<T1> + Allow<T2>> Allow<U> for (T1, T2) {}
-    impl<T1, T2, T3, U: Allow<T1> + Allow<T2> + Allow<T3>> Allow<U> for (T1, T2, T3) {}
+//     pub trait Allow<T> {}
+//     impl<T, U> Allow<U> for &T where for<'a> (&'a T, U): Safe {}
+//     impl<T, U> Allow<U> for &mut T where for<'a> (&'a mut T, U): Safe {}
+//     impl<U> Allow<U> for () {}
+//     impl<T1, U: Allow<T1>> Allow<U> for (T1,) {}
+//     impl<T1, T2, U: Allow<T1> + Allow<T2>> Allow<U> for (T1, T2) {}
+//     impl<T1, T2, T3, U: Allow<T1> + Allow<T2> + Allow<T3>> Allow<U> for (T1, T2, T3) {}
 
-    struct Query<I: Item>(PhantomData<I>);
-    impl<I: Item, U: Allow<I>> Allow<U> for Query<I> {}
-    impl<I: Item> Query<I> {
-        pub fn new() -> Self {
-            todo!()
-        }
-        pub fn each(&mut self, each: impl FnMut(I) + 'static) {}
-        pub fn each_with<S: Allow<I>>(&mut self, state: S, each: impl FnMut(I, S) + 'static) {}
-    }
+//     struct Query<I: Item>(PhantomData<I>);
+//     impl<I: Item, U: Allow<I>> Allow<U> for Query<I> {}
+//     impl<I: Item> Query<I> {
+//         pub fn new() -> Self {
+//             todo!()
+//         }
+//         pub fn each(&mut self, each: impl FnMut(I) + 'static) {}
+//         pub fn each_with<S: Allow<I>>(&mut self, state: S, each: impl FnMut(I, S) + 'static) {}
+//     }
 
-    fn boba<T, U>(a: T, b: U)
-    where
-        (T, U): Item,
-    {
-    }
-    fn jango<T: Item>(a: T) {}
-    fn karl(mut query1: Query<&mut bool>) {
-        let a = &mut 'a';
-        let c = &mut true;
-        let e = true;
-        let query2 = Query::<&mut char>::new();
-        query1.each(move |b| *b = e);
-        query1.each_with(a, move |b, c| *b = *c == '0');
-        query1.each_with(query2, move |b, mut query| {
-            query.each_with(b, |c, b| *b = *c == '0')
-        });
-        // query.each_with(c, move |b, c| *b = *c);
-        // query.each(|b| *b = *c);
-        // karl([a], move |b: &bool, a| {
-        //     *a[0] = *b;
-        //     // *c = *a;
-        //     d += 1;
-        // });
-    }
-    fn fett<T: Datum>(value: &T) {
-        // Succeed
+//     fn boba<T, U>(a: T, b: U)
+//     where
+//         (T, U): Item,
+//     {
+//     }
+//     fn jango<T: Item>(a: T) {}
+//     fn karl(mut query1: Query<&mut bool>) {
+//         let a = &mut 'a';
+//         let c = &mut true;
+//         let e = true;
+//         let query2 = Query::<&mut char>::new();
+//         query1.each(move |b| *b = e);
+//         query1.each_with(a, move |b, c| *b = *c == '0');
+//         query1.each_with(query2, move |b, mut query| {
+//             query.each_with(b, |c, b| *b = *c == '0')
+//         });
+//         // query.each_with(c, move |b, c| *b = *c);
+//         // query.each(|b| *b = *c);
+//         // karl([a], move |b: &bool, a| {
+//         //     *a[0] = *b;
+//         //     // *c = *a;
+//         //     d += 1;
+//         // });
+//     }
+//     fn fett<T: Datum>(value: &T) {
+//         // Succeed
 
-        jango(&true);
-        jango(&mut true);
-        jango((&true, &true));
-        jango((&mut 'a', &true));
-        jango((&true, &mut 'a'));
+//         jango(&true);
+//         jango(&mut true);
+//         jango((&true, &true));
+//         jango((&mut 'a', &true));
+//         jango((&true, &mut 'a'));
 
-        boba(value, &true);
-        boba(&'a', &mut true);
-        boba(&mut 'a', &mut true);
-        boba(&true, (&'a', &true));
-        boba((&'a', &true), &true);
-        boba(value, value);
+//         boba(value, &true);
+//         boba(&'a', &mut true);
+//         boba(&mut 'a', &mut true);
+//         boba(&true, (&'a', &true));
+//         boba((&'a', &true), &true);
+//         boba(value, value);
 
-        // Fail
-        // boba(&mut 'a', value);
-        // jango(((&true, ((),)), (&mut 'a', (), &mut true)));
-        // jango((&mut true, &true));
-        // jango((&true, &mut true));
-        // jango((&mut true, &mut true));
-        // boba(&false, &mut true);
-        // boba(&mut false, &true);
-        // boba(&true, (&mut 'b', &mut true));
-        // boba(
-        //     (&'a', (&true, &'b', ((), ()))),
-        //     ((), &'b', (&'a', (&mut true, ((), ())))),
-        // );
-    }
-}
+//         // Fail
+//         // boba(&mut 'a', value);
+//         // jango(((&true, ((),)), (&mut 'a', (), &mut true)));
+//         // jango((&mut true, &true));
+//         // jango((&true, &mut true));
+//         // jango((&mut true, &mut true));
+//         // boba(&false, &mut true);
+//         // boba(&mut false, &true);
+//         // boba(&true, (&mut 'b', &mut true));
+//         // boba(
+//         //     (&'a', (&true, &'b', ((), ()))),
+//         //     ((), &'b', (&'a', (&mut true, ((), ())))),
+//         // );
+//     }
+// }
 
 mod push_vec {
     use std::{

@@ -161,6 +161,17 @@ impl Tables {
     }
 
     #[inline]
+    pub fn iter(&self) -> impl FullIterator<Item = &Table> {
+        let read = self.lock.read();
+        unsafe { &**self.tables.get() }.iter().map(move |table| {
+            // Keep the read guard alive.
+            // SAFETY: Consumer of the iterator may keep references to tables since their address is guaranteed to remain stable.
+            let _read = &read;
+            &**table
+        })
+    }
+
+    #[inline]
     pub fn get(&self, index: usize) -> Result<&Table, Error> {
         let read = self.lock.read();
         let table = &**unsafe { &**self.tables.get() }
@@ -242,21 +253,6 @@ impl Tables {
 
 unsafe impl Send for Tables {}
 unsafe impl Sync for Tables {}
-
-impl<'a> IntoIterator for &'a Tables {
-    type Item = &'a Table;
-    type IntoIter = impl FullIterator<Item = Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        let read = self.lock.read();
-        unsafe { &**self.tables.get() }.iter().map(move |table| {
-            // Keep the read guard alive.
-            // SAFETY: Consumer of the iterator may keep references to tables since their address is guaranteed to remain stable.
-            let _read = &read;
-            &**table
-        })
-    }
-}
 
 impl Table {
     #[inline]

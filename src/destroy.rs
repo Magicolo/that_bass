@@ -1,5 +1,5 @@
 use crate::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut},
+    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
     filter::Filter,
     key::{Key, Slot},
     table::{self, Column, Table},
@@ -145,7 +145,7 @@ impl<'d> Destroy<'d> {
                             cursor += 1;
                         }
                         debug_assert!(cursor < head + count.get());
-                        let one = NonZeroUsize::MIN;
+                        let one = ONE;
                         squash(self.database, keys, &mut inner.columns, cursor, row, one);
                         cursor += 1;
                     } else {
