@@ -40,7 +40,7 @@ pub struct By<'d, V> {
 struct State<'d, R: Row> {
     state: R::State,
     table: &'d Table,
-    indices: Vec<(usize, Access)>,
+    indices: Box<[(usize, Access)]>,
 }
 
 struct Errors<'d, 'a, R: Row, V> {
@@ -243,14 +243,13 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             // The sorting of indices ensures that there cannot be a deadlock between `Rows` when locking multiple columns as long as this
             // happens while holding at most 1 table lock.
             indices.sort_unstable_by_key(|&(index, _)| index);
-            indices.shrink_to_fit();
 
             let index = self.states.len() as _;
             self.indices.push(index);
             self.states.push(State {
                 state,
                 table,
-                indices,
+                indices: indices.into_boxed_slice(),
             });
             Ok(())
         } else {

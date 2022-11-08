@@ -208,10 +208,10 @@ impl Tables {
         // before any mutation to `self.tables`.
         let tables = unsafe { &*self.tables.get() };
         for table in tables.iter() {
-            if table.types.len() == metas.len()
-                && metas.iter().all(|meta| table.has_with(meta.identifier()))
-            {
-                return table.clone();
+            if table.types.len() == metas.len() {
+                if metas.iter().all(|meta| table.has_with(meta.identifier())) {
+                    return table.clone();
+                }
             }
         }
 
@@ -225,7 +225,6 @@ impl Tables {
             keys: Vec::new().into(),
             columns,
         };
-
         let table = Arc::new(Table {
             index: index as _,
             types,

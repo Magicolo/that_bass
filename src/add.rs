@@ -16,7 +16,7 @@ pub struct Add<'d, T: Template> {
     keys: HashMap<Key, u32>,
     pending: Vec<(Key, &'d Slot, T, u32)>,
     sorted: HashMap<u32, State<'d, T>>,
-    metas: Arc<Vec<&'static Meta>>,
+    metas: Arc<Box<[&'static Meta]>>,
 }
 
 /// Adds template `T` to all keys in tables that satisfy the filter `F`.
@@ -24,7 +24,7 @@ pub struct AddAll<'d, T: Template, F: Filter> {
     database: &'d Database,
     index: usize,
     states: Vec<StateAll<T>>,
-    metas: Arc<Vec<&'static Meta>>,
+    metas: Arc<Box<[&'static Meta]>>,
     _marker: PhantomData<fn(F)>,
 }
 
@@ -45,12 +45,12 @@ struct StateAll<T: Template> {
 
 struct Inner<T: Template> {
     state: T::State,
-    add: Vec<usize>,
+    add: Box<[usize]>,
     // TODO: A `Vec<usize>` should suffice here where its indices map to its values `source_column -> target_column`.
-    copy: Vec<(usize, usize)>,
+    copy: Box<[(usize, usize)]>,
 }
 
-struct ShareMetas<T: Template>(Arc<Vec<&'static Meta>>, PhantomData<fn(T)>);
+struct ShareMetas<T: Template>(Arc<Box<[&'static Meta]>>, PhantomData<fn(T)>);
 
 struct ShareTable<T: Template> {
     source: Arc<Table>,
@@ -303,7 +303,7 @@ impl<'d, T: Template> Add<'d, T> {
         slot: &'d Slot,
         template: T,
         table: u32,
-        metas: &Vec<&'static Meta>,
+        metas: &Box<[&'static Meta]>,
         sorted: &mut HashMap<u32, State<'d, T>>,
         database: &'d Database,
     ) -> Result<(), Error> {
@@ -519,7 +519,10 @@ impl<T: Template> ShareMetas<T> {
             let mut metas = DeclareContext::metas::<T>()?;
             // Must sort here since the order of these metas is used to lock columns in target tables.
             metas.sort_unstable_by_key(|meta| meta.identifier());
-            Ok(ShareMetas::<T>(Arc::new(metas), PhantomData))
+            Ok(ShareMetas::<T>(
+                Arc::new(metas.into_boxed_slice()),
+                PhantomData,
+            ))
         })
     }
 }
@@ -527,12 +530,12 @@ impl<T: Template> ShareMetas<T> {
 impl<T: Template> ShareTable<T> {
     pub fn from(
         table: u32,
-        metas: &Vec<&'static Meta>,
+        metas: &Box<[&'static Meta]>,
         database: &Database,
     ) -> Result<Global<Self>, Error> {
         database.resources().try_global_with(table, || {
             let source = database.tables().get_shared(table as usize)?;
-            let mut target_metas = metas.clone();
+            let mut target_metas = metas.to_vec();
             target_metas.extend(source.inner.read().columns().iter().map(Column::meta));
             let target = database.tables().find_or_add(target_metas);
             let state = T::initialize(InitializeContext::new(&target))?;
@@ -553,7 +556,11 @@ impl<T: Template> ShareTable<T> {
             Ok(ShareTable::<T> {
                 source,
                 target,
-                inner: Arc::new(Inner { state, add, copy }),
+                inner: Arc::new(Inner {
+                    state,
+                    add: add.into_boxed_slice(),
+                    copy: copy.into_boxed_slice(),
+                }),
             })
         })
     }

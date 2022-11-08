@@ -25,7 +25,6 @@ impl DeclareContext<'_> {
         let mut metas = Vec::new();
         let context = DeclareContext(&mut metas);
         T::declare(context)?;
-        metas.shrink_to_fit();
         Ok(metas)
     }
 
