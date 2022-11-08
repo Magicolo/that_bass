@@ -1,5 +1,5 @@
 use crate::{
-    core::utility::get_unchecked,
+    core::{tuples, utility::get_unchecked},
     table::{Column, Table},
     Datum, Error, Meta,
 };
@@ -97,65 +97,26 @@ unsafe impl<D: Datum> Template for D {
     }
 }
 
-unsafe impl Template for () {
-    const SIZE: usize = 0;
-    type State = ();
-    fn declare(_: DeclareContext) -> Result<(), Error> {
-        Ok(())
-    }
-    fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
-        Ok(())
-    }
-    #[inline]
-    unsafe fn apply(self, _: &Self::State, _: ApplyContext) {}
+macro_rules! tuple {
+    ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
+        unsafe impl<$($t: Template,)*> Template for ($($t,)*) {
+            const SIZE: usize = 0 $(+ $t::SIZE)*;
+            type State = ($($t::State,)*);
+
+            fn declare(mut _context: DeclareContext) -> Result<(), Error> {
+                $($t::declare(_context.own())?;)*
+                Ok(())
+            }
+
+            fn initialize(_context: InitializeContext) -> Result<Self::State, Error> {
+                Ok(($($t::initialize(_context.own())?,)*))
+            }
+
+            #[inline]
+            unsafe fn apply(self, _state: &Self::State, _context: ApplyContext) {
+                $(self.$i.apply(&_state.$i, _context.own());)*
+            }
+        }
+    };
 }
-
-unsafe impl<T1: Template, T2: Template> Template for (T1, T2) {
-    const SIZE: usize = T1::SIZE + T2::SIZE;
-    type State = (T1::State, T2::State);
-
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
-        T1::declare(context.own())?;
-        T2::declare(context)
-    }
-
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
-        Ok((
-            T1::initialize(context.own())?,
-            T2::initialize(context.own())?,
-        ))
-    }
-
-    #[inline]
-    unsafe fn apply(self, state: &Self::State, context: ApplyContext) {
-        self.0.apply(&state.0, context.own());
-        self.1.apply(&state.1, context.own());
-    }
-}
-
-unsafe impl<T1: Template, T2: Template, T3: Template> Template for (T1, T2, T3) {
-    const SIZE: usize = T1::SIZE + T2::SIZE + T3::SIZE;
-    type State = (T1::State, T2::State, T3::State);
-
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
-        T1::declare(context.own())?;
-        T2::declare(context.own())?;
-        T3::declare(context.own())?;
-        Ok(())
-    }
-
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
-        Ok((
-            T1::initialize(context.own())?,
-            T2::initialize(context.own())?,
-            T3::initialize(context.own())?,
-        ))
-    }
-
-    #[inline]
-    unsafe fn apply(self, state: &Self::State, context: ApplyContext) {
-        self.0.apply(&state.0, context.own());
-        self.1.apply(&state.1, context.own());
-        self.2.apply(&state.2, context.own());
-    }
-}
+tuples!(tuple);

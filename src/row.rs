@@ -1,5 +1,5 @@
 use crate::{
-    core::utility::get_unchecked,
+    core::{tuples, utility::get_unchecked},
     key::Key,
     table::{Column, Table},
     Datum, Error,
@@ -267,129 +267,36 @@ unsafe impl<R: Row> Row for Option<R> {
     }
 }
 
-unsafe impl Row for () {
-    type State = ();
-    type Read = ();
-    type Item<'a> = ();
-    type Chunk<'a> = ();
+macro_rules! tuple {
+    ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
+        unsafe impl<$($t: Row,)*> Row for ($($t,)*) {
+            type State = ($($t::State,)*);
+            type Read = ($($t::Read,)*);
+            type Item<'a> = ($($t::Item<'a>,)*);
+            type Chunk<'a> = ($($t::Chunk<'a>,)*);
 
-    fn declare(_: DeclareContext) -> Result<(), Error> {
-        Ok(())
-    }
-    fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
-        Ok(())
-    }
-    fn read(_: &Self::State) -> <Self::Read as Row>::State {
-        ()
-    }
-    #[inline]
-    unsafe fn item<'a>(_: &'a Self::State, _: ItemContext<'a>) -> Self::Item<'a> {
-        ()
-    }
-    #[inline]
-    unsafe fn chunk<'a>(_: &'a Self::State, _: ChunkContext<'a>) -> Self::Chunk<'a> {
-        ()
-    }
+            fn declare(mut _context: DeclareContext) -> Result<(), Error> {
+                $($t::declare(_context.own())?;)*
+                Ok(())
+            }
+            fn initialize(_context: InitializeContext) -> Result<Self::State, Error> {
+                Ok(($($t::initialize(_context.own())?,)*))
+            }
+            fn read(_state: &Self::State) -> <Self::Read as Row>::State {
+                ($($t::read(&_state.$i),)*)
+            }
+            #[inline]
+            unsafe fn item<'a>(_state: &'a Self::State, _context: ItemContext<'a>) -> Self::Item<'a> {
+                ($($t::item(&_state.$i, _context.own()),)*)
+            }
+            #[inline]
+            unsafe fn chunk<'a>(
+                _state: &'a Self::State,
+                _context: ChunkContext<'a>,
+            ) -> Self::Chunk<'a> {
+                ($($t::chunk(&_state.$i, _context.own()),)*)
+            }
+        }
+    };
 }
-
-unsafe impl<R1: Row> Row for (R1,) {
-    type State = (R1::State,);
-    type Read = (R1::Read,);
-    type Item<'a> = (R1::Item<'a>,);
-    type Chunk<'a> = (R1::Chunk<'a>,);
-
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
-        R1::declare(context.own())?;
-        Ok(())
-    }
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
-        Ok((R1::initialize(context.own())?,))
-    }
-    fn read(state: &Self::State) -> <Self::Read as Row>::State {
-        (R1::read(&state.0),)
-    }
-    #[inline]
-    unsafe fn item<'a>(state: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
-        (R1::item(&state.0, context.own()),)
-    }
-    #[inline]
-    unsafe fn chunk<'a>(state: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
-        (R1::chunk(&state.0, context.own()),)
-    }
-}
-
-unsafe impl<R1: Row, R2: Row> Row for (R1, R2) {
-    type State = (R1::State, R2::State);
-    type Read = (R1::Read, R2::Read);
-    type Item<'a> = (R1::Item<'a>, R2::Item<'a>);
-    type Chunk<'a> = (R1::Chunk<'a>, R2::Chunk<'a>);
-
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
-        R1::declare(context.own())?;
-        R2::declare(context.own())?;
-        Ok(())
-    }
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
-        Ok((
-            R1::initialize(context.own())?,
-            R2::initialize(context.own())?,
-        ))
-    }
-    fn read(state: &Self::State) -> <Self::Read as Row>::State {
-        (R1::read(&state.0), R2::read(&state.1))
-    }
-    #[inline]
-    unsafe fn item<'a>(state: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
-        (
-            R1::item(&state.0, context.own()),
-            R2::item(&state.1, context.own()),
-        )
-    }
-    #[inline]
-    unsafe fn chunk<'a>(state: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
-        (
-            R1::chunk(&state.0, context.own()),
-            R2::chunk(&state.1, context.own()),
-        )
-    }
-}
-
-unsafe impl<R1: Row, R2: Row, R3: Row> Row for (R1, R2, R3) {
-    type State = (R1::State, R2::State, R3::State);
-    type Read = (R1::Read, R2::Read, R3::Read);
-    type Item<'a> = (R1::Item<'a>, R2::Item<'a>, R3::Item<'a>);
-    type Chunk<'a> = (R1::Chunk<'a>, R2::Chunk<'a>, R3::Chunk<'a>);
-
-    fn declare(mut context: DeclareContext) -> Result<(), Error> {
-        R1::declare(context.own())?;
-        R2::declare(context.own())?;
-        R3::declare(context.own())?;
-        Ok(())
-    }
-    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
-        Ok((
-            R1::initialize(context.own())?,
-            R2::initialize(context.own())?,
-            R3::initialize(context.own())?,
-        ))
-    }
-    fn read(state: &Self::State) -> <Self::Read as Row>::State {
-        (R1::read(&state.0), R2::read(&state.1), R3::read(&state.2))
-    }
-    #[inline]
-    unsafe fn item<'a>(state: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
-        (
-            R1::item(&state.0, context.own()),
-            R2::item(&state.1, context.own()),
-            R3::item(&state.2, context.own()),
-        )
-    }
-    #[inline]
-    unsafe fn chunk<'a>(state: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
-        (
-            R1::chunk(&state.0, context.own()),
-            R2::chunk(&state.1, context.own()),
-            R3::chunk(&state.2, context.own()),
-        )
-    }
-}
+tuples!(tuple);

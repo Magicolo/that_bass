@@ -1,7 +1,7 @@
 use crate::{
     core::{
+        iterate::FullIterator,
         utility::{fold_swap, get_unchecked, get_unchecked_mut, try_fold_swap},
-        FullIterator,
     },
     filter::Filter,
     key::{Key, Slot},

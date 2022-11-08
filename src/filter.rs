@@ -1,4 +1,4 @@
-use crate::{create, table::Table, template::Template, Database};
+use crate::{core::tuples, create, table::Table, template::Template, Database};
 use std::marker::PhantomData;
 
 pub trait Filter: Sized {
@@ -31,38 +31,19 @@ impl<F: Filter> Filter for Not<F> {
     }
 }
 
-impl Filter for () {
-    fn filter(_: &Table, _: &Database) -> bool {
-        true
-    }
-}
+macro_rules! tuple {
+    ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
+        impl<$($t: Filter,)*> Filter for ($($t,)*) {
+            fn filter(_table: &Table, _database: &Database) -> bool {
+                true $(&& $t::filter(_table, _database))*
+            }
+        }
 
-impl<F1: Filter> Filter for (F1,) {
-    fn filter(table: &Table, database: &Database) -> bool {
-        F1::filter(table, database)
-    }
+        impl<$($t: Filter,)*> Filter for Any<($($t,)*)> {
+            fn filter(_table: &Table, _database: &Database) -> bool {
+                false $(|| $t::filter(_table, _database))*
+            }
+        }
+    };
 }
-
-impl<F1: Filter, F2: Filter> Filter for (F1, F2) {
-    fn filter(table: &Table, database: &Database) -> bool {
-        F1::filter(table, database) && F2::filter(table, database)
-    }
-}
-
-impl Filter for Any<()> {
-    fn filter(_: &Table, _: &Database) -> bool {
-        false
-    }
-}
-
-impl<F1: Filter> Filter for Any<(F1,)> {
-    fn filter(table: &Table, database: &Database) -> bool {
-        F1::filter(table, database)
-    }
-}
-
-impl<F1: Filter, F2: Filter> Filter for Any<(F1, F2)> {
-    fn filter(table: &Table, database: &Database) -> bool {
-        F1::filter(table, database) || F2::filter(table, database)
-    }
-}
+tuples!(tuple);

@@ -1,5 +1,5 @@
 use crate::{
-    core::{utility::get_unchecked, FullIterator},
+    core::{iterate::FullIterator, utility::get_unchecked},
     key::Key,
     Datum, Error, Meta,
 };

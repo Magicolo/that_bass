@@ -30,7 +30,6 @@ pub mod template;
     TODO: Implement `Row` for `Get<D: Datum + Copy>`:
         - At the beginning of iteration, `Get` makes a copy of the whole column to a temporary buffer, then the column lock can be
         released immediately.
-    TODO: Implement traits for many tuple.
     TODO: The `Table::commit` mechanism allows for an incoherent state where a create operation has been resolved, but the
     created keys are reported to not be present in a corresponding query.
         - This happens because `Table::commit` can technically fail for an unlimited amount of time...
