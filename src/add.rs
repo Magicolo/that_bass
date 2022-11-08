@@ -538,7 +538,7 @@ impl<T: Template> ShareTable<T> {
             let state = T::initialize(InitializeContext::new(&target))?;
 
             let mut copy = Vec::new();
-            for (source, identifier) in source.types().enumerate() {
+            for (source, &identifier) in source.types().iter().enumerate() {
                 copy.push((source, target.column_with(identifier)?));
             }
 

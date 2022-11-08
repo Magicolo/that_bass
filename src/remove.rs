@@ -92,7 +92,7 @@ impl<'d> Remove<'d> {
                     let target = database.tables().find_or_add(target_metas);
 
                     let mut copy = Vec::new();
-                    for (target, identifier) in target.types().enumerate() {
+                    for (target, &identifier) in target.types().iter().enumerate() {
                         copy.push((source.column_with(identifier)?, target));
                     }
 

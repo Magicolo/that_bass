@@ -76,7 +76,6 @@ impl<'a> ApplyContext<'a> {
 
     #[inline]
     pub fn apply<D: Datum>(&self, state: &Apply<D>, value: D) {
-        // CHECK
         unsafe { get_unchecked(self.0, state.0).set(state.0, value) };
     }
 }

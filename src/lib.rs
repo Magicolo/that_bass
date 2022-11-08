@@ -146,30 +146,30 @@ use table::Tables;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Error {
-    DuplicateMeta,
-    ReadWriteConflict,
-    WriteWriteConflict,
     AddRemoveConflict,
-    WouldBlock,
-    WouldDeadlock,
-    InvalidKey,
-    InvalidType,
-    InvalidGuard,
-    InsufficientGuard,
-    WrongGeneration,
-    WrongGenerationOrTable,
-    WrongRow,
-    FailedToLockTable,
+    DuplicateMeta,
     FailedToLockColumns,
+    FailedToLockTable,
+    InsufficientGuard,
+    Invalid,
+    InvalidGuard,
+    InvalidKey,
+    InvalidTable,
+    InvalidType,
     KeyNotInQuery(Key),
     KeysMustDiffer(Key),
-    QueryConflict,
-    Invalid,
     MissingColumn,
     MissingIndex,
     MissingJoinKey,
-    InvalidTable,
     MissingTable,
+    QueryConflict,
+    ReadWriteConflict,
+    WouldBlock,
+    WouldDeadlock,
+    WriteWriteConflict,
+    WrongGeneration,
+    WrongGenerationOrTable,
+    WrongRow,
 }
 
 pub struct Database {
@@ -648,67 +648,63 @@ mod tests {
 
     #[test]
     fn copy_to() -> Result<(), Error> {
-        struct A(usize);
         struct CopyTo(Key);
-        impl Datum for A {}
         impl Datum for CopyTo {}
 
         let database = Database::new();
-        let mut a = database.create()?.one(A(1));
+        let mut a = database.create()?.one(C(1));
         let mut create = database.create()?;
         for i in 0..100 {
-            a = create.one((A(i), CopyTo(a)));
+            a = create.one((C(i), CopyTo(a)));
         }
         create.resolve();
 
-        let mut sources = database.query::<(&A, &CopyTo)>()?;
-        let mut targets = database.query::<&mut A>()?;
+        let mut sources = database.query::<(&C, &CopyTo)>()?;
+        let mut targets = database.query::<&mut C>()?;
         let mut by = database.by();
-        sources.each(|(a, copy)| {
-            by.pair(copy.0, a.0);
+        sources.each(|(c, copy)| {
+            by.pair(copy.0, c.0);
         });
-        targets.each_by_ok(&mut by, |value, a| a.0 = value);
+        targets.each_by_ok(&mut by, |value, c| c.0 = value);
         // TODO: Add assertions.
         Ok(())
     }
 
     #[test]
     fn copy_from() -> Result<(), Error> {
-        struct A(usize);
         struct CopyFrom(Key);
-        impl Datum for A {}
         impl Datum for CopyFrom {}
         const COUNT: usize = 10;
 
         let database = Database::new();
-        let a = database.create()?.one(A(1));
+        let a = database.create()?.one(C(1));
         let mut create = database.create()?;
         for i in 0..COUNT {
-            create.one((A(i), CopyFrom(a)));
+            create.one((C(i), CopyFrom(a)));
         }
         create.resolve();
 
         let mut copies = database.query::<(Key, &CopyFrom)>()?;
-        let mut sources = database.query::<&A>()?;
-        let mut targets = database.query::<&mut A>()?;
+        let mut sources = database.query::<&C>()?;
+        let mut targets = database.query::<&mut C>()?;
         let mut by_source = database.by();
         let mut by_target = database.by();
 
         copies.each(|(key, copy)| {
             by_source.pair(copy.0, key);
         });
-        sources.each_by_ok(&mut by_source, |target, a| {
-            by_target.pair(target, a.0);
+        sources.each_by_ok(&mut by_source, |target, c| {
+            by_target.pair(target, c.0);
         });
-        targets.each_by_ok(&mut by_target, |value, a| a.0 = value);
+        targets.each_by_ok(&mut by_target, |value, c| c.0 = value);
 
         assert_eq!(copies.count(), COUNT);
         assert_eq!(sources.count(), COUNT + 1);
         assert_eq!(targets.count(), COUNT + 1);
         assert_eq!(by_source.len(), 0);
         assert_eq!(by_target.len(), 0);
-        sources.each(|a| assert_eq!(a.0, 1));
-        targets.each(|a| assert_eq!(a.0, 1));
+        sources.each(|c| assert_eq!(c.0, 1));
+        targets.each(|c| assert_eq!(c.0, 1));
         Ok(())
     }
 

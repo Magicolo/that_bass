@@ -173,7 +173,8 @@ pub(crate) fn has<T: Template>(table: &Table, database: &Database) -> bool {
             .read()
             .1
             .types()
-            .all(|identifier| table.has_with(identifier)),
+            .iter()
+            .all(|&identifier| table.has_with(identifier)),
         Err(_) => false,
     }
 }

@@ -7,7 +7,6 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWrit
 use std::{
     any::TypeId,
     cell::UnsafeCell,
-    collections::HashMap,
     num::NonZeroUsize,
     ptr::NonNull,
     slice::from_raw_parts_mut,
@@ -19,7 +18,7 @@ use std::{
 
 pub struct Table {
     index: u32,
-    indices: HashMap<TypeId, usize>,
+    types: Box<[TypeId]>,
     pub(crate) inner: RwLock<Inner>,
 }
 
@@ -209,7 +208,7 @@ impl Tables {
         // before any mutation to `self.tables`.
         let tables = unsafe { &*self.tables.get() };
         for table in tables.iter() {
-            if table.indices.len() == metas.len()
+            if table.types.len() == metas.len()
                 && metas.iter().all(|meta| table.has_with(meta.identifier()))
             {
                 return table.clone();
@@ -217,12 +216,8 @@ impl Tables {
         }
 
         metas.sort_unstable_by_key(|meta| meta.identifier());
-        let columns: Box<[Column]> = metas.into_iter().map(|meta| Column::new(meta, 0)).collect();
-        let indices = columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| (column.meta().identifier(), index))
-            .collect();
+        let columns = metas.iter().map(|&meta| Column::new(meta, 0)).collect();
+        let types = metas.iter().map(|&meta| meta.identifier()).collect();
         let index = tables.len();
         let inner = Inner {
             count: 0.into(),
@@ -233,7 +228,7 @@ impl Tables {
 
         let table = Arc::new(Table {
             index: index as _,
-            indices,
+            types,
             inner: RwLock::new(inner),
         });
         let write = RwLockUpgradableReadGuard::upgrade(upgrade);
@@ -271,18 +266,18 @@ impl Table {
     }
 
     #[inline]
+    pub fn types(&self) -> &[TypeId] {
+        &self.types
+    }
+
+    #[inline]
     pub fn has<D: Datum>(&self) -> bool {
         self.has_with(TypeId::of::<D>())
     }
 
     #[inline]
     pub fn has_with(&self, identifier: TypeId) -> bool {
-        self.indices.contains_key(&identifier)
-    }
-
-    #[inline]
-    pub fn types(&self) -> impl ExactSizeIterator<Item = TypeId> + '_ {
-        self.indices.keys().copied()
+        self.types.binary_search(&identifier).is_ok()
     }
 
     #[inline]
@@ -292,10 +287,9 @@ impl Table {
 
     #[inline]
     pub fn column_with(&self, identifier: TypeId) -> Result<usize, Error> {
-        self.indices
-            .get(&identifier)
-            .copied()
-            .ok_or(Error::MissingColumn)
+        self.types
+            .binary_search(&identifier)
+            .map_err(|_| Error::MissingColumn)
     }
 }
 
@@ -351,7 +345,6 @@ impl Inner {
                 keys.resize(new_capacity.get(), Key::NULL);
                 debug_assert_eq!(keys.len(), new_capacity.get());
                 for column in inner.columns.iter_mut() {
-                    // CHECK
                     unsafe { column.grow(old_capacity, new_capacity) };
                 }
                 RwLockWriteGuard::downgrade(inner)
