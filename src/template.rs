@@ -132,3 +132,30 @@ unsafe impl<T1: Template, T2: Template> Template for (T1, T2) {
         self.1.apply(&state.1, context.own());
     }
 }
+
+unsafe impl<T1: Template, T2: Template, T3: Template> Template for (T1, T2, T3) {
+    const SIZE: usize = T1::SIZE + T2::SIZE + T3::SIZE;
+    type State = (T1::State, T2::State, T3::State);
+
+    fn declare(mut context: DeclareContext) -> Result<(), Error> {
+        T1::declare(context.own())?;
+        T2::declare(context.own())?;
+        T3::declare(context.own())?;
+        Ok(())
+    }
+
+    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
+        Ok((
+            T1::initialize(context.own())?,
+            T2::initialize(context.own())?,
+            T3::initialize(context.own())?,
+        ))
+    }
+
+    #[inline]
+    unsafe fn apply(self, state: &Self::State, context: ApplyContext) {
+        self.0.apply(&state.0, context.own());
+        self.1.apply(&state.1, context.own());
+        self.2.apply(&state.2, context.own());
+    }
+}

@@ -13,6 +13,9 @@ pub mod table;
 pub mod template;
 
 /*
+    TODO: Queries don't prevent visiting a key twice if another thread resolves a move operation from a visited table to an unvisited
+    one while the query is iterating.
+        - It may be resonnable to require from users (or a scheduler) to resolve deferred operations at an appropriate time.
     TODO: Allow `Query` to be split in parts which will each be responsible for operating on one table.
         - This is meant to allow executing parts of the query one different threads.
     TODO: Implement `Defer`:
@@ -150,6 +153,7 @@ pub enum Error {
     InvalidTable,
     InvalidType,
     KeyNotInQuery(Key),
+    KeyNotInSplit(Key),
     KeysMustDiffer(Key),
     MissingColumn,
     MissingIndex,
@@ -266,7 +270,7 @@ mod tests {
         query::By,
         Database, Datum, Error,
     };
-    use std::collections::HashSet;
+    use std::{collections::HashSet, thread::scope};
 
     #[derive(Debug, Clone, Copy)]
     struct A;
@@ -603,6 +607,55 @@ mod tests {
         assert_eq!(query.find(key1, |a| a.is_some()), Ok(false));
         assert_eq!(query.find(key2, |a| a.is_some()), Ok(true));
         assert_eq!(query.chunk().count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn query_split_item_on_multiple_threads() -> Result<(), Error> {
+        let database = Database::new();
+        database.create()?.all_n([C(0); 25]);
+        database.create()?.all_n([(A, C(0)); 50]);
+        database.create()?.all_n([(B, C(0)); 75]);
+        database.create()?.all_n([(A, B, C(0)); 100]);
+        let mut query = database.query::<&mut C>()?;
+        assert_eq!(query.split().len(), 4);
+        assert!(query
+            .split()
+            .enumerate()
+            .all(|(i, split)| split.count() == (i + 1) * 25));
+
+        scope(|scope| {
+            for split in query.split() {
+                scope.spawn(move || split.each(|c| c.0 += 1));
+            }
+        });
+        query.each(|c| assert_eq!(c.0, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn query_split_chunk_on_multiple_threads() -> Result<(), Error> {
+        let database = Database::new();
+        database.create()?.all_n([C(0); 25]);
+        database.create()?.all_n([(A, C(0)); 50]);
+        database.create()?.all_n([(B, C(0)); 75]);
+        database.create()?.all_n([(A, B, C(0)); 100]);
+        let mut query = database.query::<&mut C>()?.chunk();
+        assert_eq!(query.count(), 4);
+        assert_eq!(query.split().len(), 4);
+
+        scope(|scope| {
+            for split in query.split() {
+                scope.spawn(move || {
+                    let value = split.map(|c| {
+                        for c in c {
+                            c.0 += 1;
+                        }
+                    });
+                    assert!(value.is_some());
+                });
+            }
+        });
         Ok(())
     }
 
