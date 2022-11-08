@@ -630,7 +630,7 @@ mod tests {
         let mut by = database.by();
         assert_eq!(by.len(), 0);
         query.each(|a| {
-            by.keys(a.0.iter().cloned());
+            by.keys(a.0.iter().copied());
         });
         assert_eq!(by.len(), 4);
         assert_eq!(query.count_by(&by), 4);
