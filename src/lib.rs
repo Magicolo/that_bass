@@ -678,8 +678,12 @@ mod tests {
         let mut by_target = By::new();
 
         copies.each(|(key, copy)| by_source.pair(copy.0, key));
+        assert_eq!(by_source.len(), COUNT);
         sources.each_by_ok(&mut by_source, |target, c| by_target.pair(target, c.0));
+        assert_eq!(by_source.len(), 0);
+        assert_eq!(by_target.len(), COUNT);
         targets.each_by_ok(&mut by_target, |value, c| c.0 = value);
+        assert_eq!(by_target.len(), 0);
 
         assert_eq!(copies.count(), COUNT);
         assert_eq!(sources.count(), COUNT + 1);

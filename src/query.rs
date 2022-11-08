@@ -458,18 +458,24 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         mut state: S,
         fold: &mut G,
     ) -> S {
+        while by.slots.len() < self.states.len() {
+            by.slots.push(Vec::new());
+        }
+
         for (key, value) in by.pairs.drain(..) {
             match self.database.keys().get(key) {
-                Ok((slot, table)) => match self.sort(&mut by.slots, key, value, slot, table) {
-                    Some((value, error)) => state = fold(state, value, Err(error)),
-                    None => {}
-                },
+                Ok((slot, table)) => {
+                    match self.sort(&mut by.slots, &mut by.indices, key, value, slot, table) {
+                        Some((value, error)) => state = fold(state, value, Err(error)),
+                        None => {}
+                    }
+                }
                 Err(error) => state = fold(state, value, Err(error)),
             }
         }
 
         for (key, value, slot, table) in by.pending.drain(..) {
-            match self.sort(&mut by.slots, key, value, slot, table) {
+            match self.sort(&mut by.slots, &mut by.indices, key, value, slot, table) {
                 Some((value, error)) => state = fold(state, value, Err(error)),
                 None => {}
             }
@@ -503,18 +509,24 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         mut state: S,
         fold: &mut G,
     ) -> ControlFlow<S, S> {
+        while by.slots.len() < self.states.len() {
+            by.slots.push(Vec::new());
+        }
+
         for (key, value) in by.pairs.drain(..) {
             match self.database.keys().get(key) {
-                Ok((slot, table)) => match self.sort(&mut by.slots, key, value, slot, table) {
-                    Some((value, error)) => state = fold(state, value, Err(error))?,
-                    None => {}
-                },
+                Ok((slot, table)) => {
+                    match self.sort(&mut by.slots, &mut by.indices, key, value, slot, table) {
+                        Some((value, error)) => state = fold(state, value, Err(error))?,
+                        None => {}
+                    }
+                }
                 Err(error) => state = fold(state, value, Err(error))?,
             }
         }
 
         for (key, value, slot, table) in by.pending.drain(..) {
-            match self.sort(&mut by.slots, key, value, slot, table) {
+            match self.sort(&mut by.slots, &mut by.indices, key, value, slot, table) {
                 Some((value, error)) => state = fold(state, value, Err(error))?,
                 None => {}
             }
@@ -548,6 +560,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     fn sort<V>(
         &mut self,
         slots: &mut Vec<Vec<(Key, V, &'d Slot)>>,
+        indices: &mut Vec<u32>,
         key: Key,
         value: V,
         slot: &'d Slot,
@@ -557,7 +570,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             Some((index, _)) => {
                 let slots = unsafe { get_unchecked_mut(slots, index) };
                 if slots.len() == 0 {
-                    self.indices.push(index as _);
+                    indices.push(index as _);
                 }
                 slots.push((key, value, slot));
                 None
