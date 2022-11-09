@@ -438,9 +438,6 @@ impl<T: Template> ShareTable<T> {
                 }
             }
 
-            debug_assert_eq!(source.metas().len(), copy.len());
-            debug_assert_eq!(target.metas().len(), copy.len() + apply.len());
-
             Ok(ShareTable::<T> {
                 source,
                 target,

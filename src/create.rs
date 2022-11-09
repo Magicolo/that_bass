@@ -113,9 +113,9 @@ impl<'d, T: Template> Create<'d, T> {
     ///
     /// In order to prevent deadlocks, **do not call this method while using a `Query`** unless you can
     /// guarantee that there are no overlaps in table usage between this `Create` and the `Query`.
-    pub fn resolve(&mut self) {
+    pub fn resolve(&mut self) -> usize {
         let Some(count) = NonZeroUsize::new(self.templates.len()) else {
-            return;
+            return 0;
         };
 
         let (start, inner) = table::Inner::reserve(self.table.inner.upgradable_read(), count);
@@ -139,9 +139,9 @@ impl<'d, T: Template> Create<'d, T> {
             .keys()
             .initialize(keys, self.table.index(), start..start + count.get());
         inner.commit(count);
+        count.get()
     }
 
-    #[inline]
     pub fn clear(&mut self) {
         let keys = self.database.keys();
         keys.recycle(self.keys[..self.templates.len()].iter().copied());
@@ -151,7 +151,7 @@ impl<'d, T: Template> Create<'d, T> {
 
 impl<T: Template> Drop for Create<'_, T> {
     fn drop(&mut self) {
-        self.resolve();
+        self.clear();
     }
 }
 
@@ -168,9 +168,5 @@ pub(crate) fn has<T: Template>(table: &Table, database: &Database) -> bool {
         return false;
     };
     let share = share.read();
-    share
-        .1
-        .metas()
-        .iter()
-        .all(|&meta| table.has_with(meta.identifier()))
+    table.has_all(share.1.metas().iter().map(|meta| meta.identifier()))
 }

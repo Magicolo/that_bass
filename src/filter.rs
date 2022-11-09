@@ -28,9 +28,11 @@ pub const fn has<T: Template>() -> Has<T> {
     Has(PhantomData)
 }
 
-#[inline]
 pub fn has_with<I: IntoIterator<Item = TypeId>>(types: I) -> HasWith {
-    HasWith(types.into_iter().collect())
+    let mut types: Vec<_> = types.into_iter().collect();
+    types.sort_unstable();
+    types.dedup();
+    HasWith(types.into_boxed_slice())
 }
 
 #[inline]
@@ -38,9 +40,11 @@ pub const fn is<T: Template>() -> Is<T> {
     Is(PhantomData)
 }
 
-#[inline]
 pub fn is_with<I: IntoIterator<Item = TypeId>>(types: I) -> IsWith {
-    IsWith(types.into_iter().collect())
+    let mut types: Vec<_> = types.into_iter().collect();
+    types.sort_unstable();
+    types.dedup();
+    IsWith(types.into_boxed_slice())
 }
 
 impl Filter for bool {
@@ -69,18 +73,22 @@ impl<T: Template> Filter for Is<T> {
 
 impl Filter for IsWith {
     fn filter(&self, table: &Table, _: &Database) -> bool {
-        // TODO: What to do about duplicates.
-        if table.metas().len() == self.0.len() {
-            self.0.iter().all(|&identifier| table.has_with(identifier))
-        } else {
-            false
-        }
+        self.0
+            .iter()
+            .copied()
+            .eq(table.metas().iter().map(|meta| meta.identifier()))
     }
 }
 
 impl<F: Filter> Filter for Not<F> {
     fn filter(&self, table: &Table, database: &Database) -> bool {
         !self.0.filter(table, database)
+    }
+}
+
+impl<F: Fn(&Table, &Database) -> bool> Filter for F {
+    fn filter(&self, table: &Table, database: &Database) -> bool {
+        self(table, database)
     }
 }
 

@@ -22,6 +22,7 @@ pub unsafe trait Template: 'static {
 pub(crate) struct ShareMeta<T>(Arc<Box<[&'static Meta]>>, PhantomData<fn(T)>);
 
 impl DeclareContext<'_> {
+    /// Returned `metas` are ordered by `meta.identifier()` and deduplicated.
     pub fn metas<T: Template>() -> Result<Vec<&'static Meta>, Error> {
         let mut metas = Vec::new();
         let context = DeclareContext(&mut metas);
@@ -30,12 +31,16 @@ impl DeclareContext<'_> {
     }
 
     pub fn apply<D: Datum>(&mut self) -> Result<(), Error> {
-        let meta = D::meta();
-        if self.0.contains(&meta) {
-            Err(Error::DuplicateMeta)
-        } else {
-            self.0.push(meta);
-            Ok(())
+        self.apply_with(D::meta())
+    }
+
+    pub fn apply_with(&mut self, meta: &'static Meta) -> Result<(), Error> {
+        match self
+            .0
+            .binary_search_by_key(&meta.identifier(), |meta| meta.identifier())
+        {
+            Ok(_) => Err(Error::DuplicateMeta),
+            Err(index) => Ok(self.0.insert(index, meta)),
         }
     }
 
@@ -83,9 +88,7 @@ impl<'a> ApplyContext<'a> {
 impl<T: Template> ShareMeta<T> {
     pub fn from(database: &Database) -> Result<Arc<Box<[&'static Meta]>>, Error> {
         let share = database.resources().try_global(|| {
-            let mut metas = DeclareContext::metas::<T>()?;
-            // Must sort here since the order of these metas is used to lock columns in target tables.
-            metas.sort_unstable_by_key(|meta| meta.identifier());
+            let metas = DeclareContext::metas::<T>()?;
             Ok(Self(Arc::new(metas.into_boxed_slice()), PhantomData))
         })?;
         let share = share.read();

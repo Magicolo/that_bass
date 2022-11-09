@@ -238,19 +238,19 @@ impl Tables {
     /// Caller must ensure that there are no duplicates in `metas`.
     #[inline]
     pub(crate) fn find_or_add(&self, mut metas: Vec<&'static Meta>) -> Arc<Table> {
+        metas.sort_unstable_by_key(|meta| meta.identifier());
+        metas.dedup_by_key(|meta| meta.identifier());
+
         let upgrade = self.lock.upgradable_read();
         // SAFETY: `self.tables` can be read since an upgrade lock is held. The lock will need to be upgraded
         // before any mutation to `self.tables`.
         let tables = unsafe { &*self.tables.get() };
         for table in tables.iter() {
-            if table.metas.len() == metas.len() {
-                if metas.iter().all(|meta| table.has_with(meta.identifier())) {
-                    return table.clone();
-                }
+            if table.is_all(metas.iter().map(|meta| meta.identifier())) {
+                return table.clone();
             }
         }
 
-        metas.sort_unstable_by_key(|meta| meta.identifier());
         let columns = metas.iter().map(|&meta| Column::new(meta, 0)).collect();
         let index = tables.len();
         let inner = Inner {
@@ -304,6 +304,34 @@ impl Table {
         self.metas
             .binary_search_by_key(&identifier, |meta| meta.identifier())
             .is_ok()
+    }
+
+    /// `types` must be ordered and deduplicated.
+    pub(crate) fn is_all(&self, types: impl IntoIterator<Item = TypeId>) -> bool {
+        let mut types = types.into_iter();
+        for meta in self.metas() {
+            if let Some(identifier) = types.next() {
+                if meta.identifier() == identifier {
+                    continue;
+                }
+            }
+            return false;
+        }
+        return types.next().is_none();
+    }
+
+    /// `types` must be ordered and deduplicated.
+    pub(crate) fn has_all(&self, types: impl IntoIterator<Item = TypeId>) -> bool {
+        let mut types = types.into_iter();
+        for meta in self.metas() {
+            while let Some(identifier) = types.next() {
+                if meta.identifier() == identifier {
+                    continue;
+                }
+            }
+            return false;
+        }
+        return true;
     }
 
     pub(crate) fn column<D: Datum>(&self) -> Result<(usize, &'static Meta), Error> {

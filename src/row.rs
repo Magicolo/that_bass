@@ -76,7 +76,10 @@ impl DeclareContext<'_> {
     }
 
     pub fn read<D: Datum>(&mut self) -> Result<(), Error> {
-        let identifier = TypeId::of::<D>();
+        self.read_with(TypeId::of::<D>())
+    }
+
+    pub fn read_with(&mut self, identifier: TypeId) -> Result<(), Error> {
         if self.0.contains(&Access::Write(identifier)) {
             Err(Error::ReadWriteConflict)
         } else {
@@ -86,7 +89,10 @@ impl DeclareContext<'_> {
     }
 
     pub fn write<D: Datum>(&mut self) -> Result<(), Error> {
-        let identifier = TypeId::of::<D>();
+        self.write_with(TypeId::of::<D>())
+    }
+
+    pub fn write_with(&mut self, identifier: TypeId) -> Result<(), Error> {
         if self.0.contains(&Access::Read(identifier)) {
             Err(Error::ReadWriteConflict)
         } else if self.0.insert(Access::Write(identifier)) {

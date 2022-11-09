@@ -288,7 +288,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use crate::{filter::has, key::Key, query::By, Database, Datum, Error};
+    use crate::{filter::has, key::Key, query::By, template::Template, Database, Datum, Error};
     use std::{collections::HashSet, thread::scope};
 
     #[derive(Debug, Clone, Copy)]
@@ -300,6 +300,36 @@ mod tests {
     impl Datum for A {}
     impl Datum for B {}
     impl Datum for C {}
+
+    fn create_one(database: &Database, template: impl Template) -> Result<Key, Error> {
+        let mut create = database.create()?;
+        let key = create.one(template);
+        assert_eq!(create.resolve(), 1);
+        Ok(key)
+    }
+
+    fn create_n<const N: usize>(
+        database: &Database,
+        templates: [impl Template; N],
+    ) -> Result<[Key; N], Error> {
+        let mut create = database.create()?;
+        let keys = create.all_n(templates);
+        assert_eq!(create.resolve(), N);
+        Ok(keys)
+    }
+
+    fn destroy_one(database: &Database, key: Key) -> Result<(), Error> {
+        let mut destroy = database.destroy();
+        destroy.one(key)?;
+        assert_eq!(destroy.resolve(), 1);
+        Ok(())
+    }
+
+    fn destroy_all(database: &Database, keys: &[Key]) {
+        let mut destroy = database.destroy();
+        assert_eq!(destroy.all(keys.iter().copied()), keys.len());
+        assert_eq!(destroy.resolve(), keys.len());
+    }
 
     #[test]
     fn create_adds_a_table() -> Result<(), Error> {
@@ -334,14 +364,14 @@ mod tests {
     #[test]
     fn create_one_returns_non_null_key() -> Result<(), Error> {
         let database = Database::new();
-        assert_ne!(database.create()?.one(()), Key::NULL);
+        assert_ne!(create_one(&database, ())?, Key::NULL);
         Ok(())
     }
 
     #[test]
     fn create_all_returns_no_null_key() -> Result<(), Error> {
         let database = Database::new();
-        assert!(database.create()?.all([(); 1000]).iter().all(Key::valid));
+        assert!(create_n(&database, [(); 1000])?.iter().all(Key::valid));
         Ok(())
     }
 
@@ -364,9 +394,9 @@ mod tests {
     #[test]
     fn create_destroy_create_reuses_key_index() -> Result<(), Error> {
         let database = Database::new();
-        let key1 = database.create()?.one(());
-        assert_eq!(database.destroy().one(key1), Ok(()));
-        let key2 = database.create()?.one(());
+        let key1 = create_one(&database, ())?;
+        assert_eq!(destroy_one(&database, key1), Ok(()));
+        let key2 = create_one(&database, ())?;
         assert_eq!(key1.index(), key2.index());
         assert_ne!(key1.generation(), key2.generation());
         Ok(())
@@ -391,7 +421,7 @@ mod tests {
     #[test]
     fn destroy_one_true_with_create_one() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create::<()>()?.one(());
+        let key = create_one(&database, ())?;
         let mut destroy = database.destroy();
         assert!(database.keys().get(key).is_ok());
         assert_eq!(destroy.one(key), Ok(()));
@@ -412,7 +442,7 @@ mod tests {
                 .count()
         };
 
-        let keys = database.create::<()>()?.all_n([(); 1000]);
+        let keys = create_n(&database, [(); 1000])?;
         let mut destroy = database.destroy();
         assert_eq!(count(&keys), 1000);
         assert_eq!(destroy.all(keys.clone()), 1000);
@@ -432,7 +462,7 @@ mod tests {
     #[test]
     fn add_no_double_resolve() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(());
+        let key = create_one(&database, ())?;
         let mut add = database.add()?;
         assert_eq!(add.one(key, A), Ok(()));
         assert_eq!(add.resolve(), 1);
@@ -443,7 +473,7 @@ mod tests {
     #[test]
     fn add_simple_template() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(());
+        let key = create_one(&database, ())?;
         let mut add = database.add()?;
         assert_eq!(add.one(key, A), Ok(()));
         assert!(!database.query::<&A>()?.has(key));
@@ -455,7 +485,7 @@ mod tests {
     #[test]
     fn add_simple_template_twice() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(());
+        let key = create_one(&database, ())?;
         let mut add_a = database.add()?;
         let mut add_b = database.add()?;
 
@@ -483,9 +513,8 @@ mod tests {
     #[test]
     fn add_composite_template() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(());
+        let key = create_one(&database, ())?;
         let mut add = database.add()?;
-
         assert_eq!(add.one(key, (A, B)), Ok(()));
         assert!(!database.query::<&A>()?.has(key));
         assert!(!database.query::<&B>()?.has(key));
@@ -508,7 +537,8 @@ mod tests {
     #[test]
     fn remove_no_double_resolve() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(A);
+        let key = create_one(&database, A)?;
+
         let mut remove = database.remove::<A>()?;
         assert_eq!(remove.one(key), Ok(()));
         assert_eq!(remove.resolve(), 1);
@@ -519,7 +549,7 @@ mod tests {
     #[test]
     fn remove_simple_template() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(A);
+        let key = create_one(&database, A)?;
         let mut remove = database.remove::<A>()?;
         assert_eq!(remove.one(key), Ok(()));
         assert!(database.query::<&A>()?.has(key));
@@ -531,7 +561,7 @@ mod tests {
     #[test]
     fn remove_simple_template_twice() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one((A, B));
+        let key = create_one(&database, (A, B))?;
         let mut remove_a = database.remove::<A>()?;
         let mut remove_b = database.remove::<B>()?;
 
@@ -559,7 +589,7 @@ mod tests {
     #[test]
     fn remove_composite_template() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one((A, B));
+        let key = create_one(&database, (A, B))?;
         let mut remove = database.remove::<(A, B)>()?;
 
         assert_eq!(remove.one(key), Ok(()));
@@ -586,7 +616,7 @@ mod tests {
     #[test]
     fn destroy_all_resolve_100() -> Result<(), Error> {
         let database = Database::new();
-        database.create()?.all_n([(); 100]);
+        create_n(&database, [(); 100])?;
         assert_eq!(database.destroy_all().resolve(), 100);
         Ok(())
     }
@@ -594,8 +624,8 @@ mod tests {
     #[test]
     fn destroy_all_filter() -> Result<(), Error> {
         let database = Database::new();
-        database.create()?.all_n([(); 100]);
-        database.create()?.all_n([A; 100]);
+        create_n(&database, [(); 100])?;
+        create_n(&database, [A; 100])?;
         assert_eq!(database.destroy_all().filter(has::<A>()).resolve(), 100);
         assert_eq!(database.destroy_all().resolve(), 100);
         Ok(())
@@ -604,7 +634,7 @@ mod tests {
     #[test]
     fn query_is_some_create_one_key() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(());
+        let key = create_one(&database, ())?;
         assert!(database.query::<()>()?.has(key));
         assert_eq!(database.query::<()>()?.find(key, |_| true), Ok(true));
         Ok(())
@@ -613,8 +643,8 @@ mod tests {
     #[test]
     fn query_is_none_destroy_one_key() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(());
-        database.destroy().one(key)?;
+        let key = create_one(&database, ())?;
+        destroy_one(&database, key)?;
         let mut query = database.query::<()>()?;
         assert_eq!(query.find(key, |_| {}).err(), Some(Error::InvalidKey));
         Ok(())
@@ -623,7 +653,7 @@ mod tests {
     #[test]
     fn query_is_some_all_create_all() -> Result<(), Error> {
         let database = Database::new();
-        let keys = database.create()?.all_n([(); 1000]);
+        let keys = create_n(&database, [(); 1000])?;
         let mut query = database.query::<()>()?;
         assert!(keys.iter().all(|&key| query.find(key, |_| {}).is_ok()));
         Ok(())
@@ -632,8 +662,8 @@ mod tests {
     #[test]
     fn query_is_some_remain_destroy_all() -> Result<(), Error> {
         let database = Database::new();
-        let keys = database.create()?.all_n([(); 1000]);
-        database.destroy().all(keys[..500].iter().copied());
+        let keys = create_n(&database, [(); 1000])?;
+        destroy_all(&database, &keys[..500]);
         let mut query = database.query::<()>()?;
         assert!(keys[..500]
             .iter()
@@ -671,7 +701,7 @@ mod tests {
         let database = Database::new();
         let mut query = database.query::<()>()?.filter(false);
         assert_eq!(query.count(), 0);
-        let key = database.create()?.one(());
+        let key = create_one(&database, ())?;
         assert_eq!(query.count(), 0);
         assert_eq!(
             query.find(key, |_| {}).err(),
@@ -683,7 +713,7 @@ mod tests {
     #[test]
     fn query_reads_same_datum_as_create_one() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(C(1));
+        let key = create_one(&database, C(1))?;
         assert_eq!(database.query::<&C>()?.find(key, |c| c.0), Ok(1));
         Ok(())
     }
@@ -691,7 +721,7 @@ mod tests {
     #[test]
     fn query1_reads_datum_written_by_query2() -> Result<(), Error> {
         let database = Database::new();
-        let key = database.create()?.one(C(1));
+        let key = create_one(&database, C(1))?;
         database.query::<&mut C>()?.find(key, |c| c.0 += 1)?;
         assert_eq!(database.query::<&C>()?.find(key, |c| c.0), Ok(2));
         Ok(())
@@ -700,8 +730,8 @@ mod tests {
     #[test]
     fn query_option_read() -> Result<(), Error> {
         let database = Database::new();
-        let key1 = database.create()?.one(());
-        let key2 = database.create()?.one(A);
+        let key1 = create_one(&database, ())?;
+        let key2 = create_one(&database, A)?;
         let mut query = database.query::<Option<&A>>()?;
         assert_eq!(query.count(), 2);
         assert_eq!(query.find(key1, |a| a.is_some()), Ok(false));
@@ -713,10 +743,10 @@ mod tests {
     #[test]
     fn query_split_item_on_multiple_threads() -> Result<(), Error> {
         let database = Database::new();
-        database.create()?.all_n([C(0); 25]);
-        database.create()?.all_n([(A, C(0)); 50]);
-        database.create()?.all_n([(B, C(0)); 75]);
-        database.create()?.all_n([(A, B, C(0)); 100]);
+        create_n(&database, [C(0); 25])?;
+        create_n(&database, [(A, C(0)); 50])?;
+        create_n(&database, [(B, C(0)); 75])?;
+        create_n(&database, [(A, B, C(0)); 100])?;
         let mut query = database.query::<&mut C>()?;
         assert_eq!(query.split().len(), 4);
         assert!(query
@@ -736,10 +766,10 @@ mod tests {
     #[test]
     fn query_split_chunk_on_multiple_threads() -> Result<(), Error> {
         let database = Database::new();
-        database.create()?.all_n([C(0); 25]);
-        database.create()?.all_n([(A, C(0)); 50]);
-        database.create()?.all_n([(B, C(0)); 75]);
-        database.create()?.all_n([(A, B, C(0)); 100]);
+        create_n(&database, [C(0); 25])?;
+        create_n(&database, [(A, C(0)); 50])?;
+        create_n(&database, [(B, C(0)); 75])?;
+        create_n(&database, [(A, B, C(0)); 100])?;
         let mut query = database.query::<&mut C>()?.chunk();
         assert_eq!(query.count(), 4);
         assert_eq!(query.split().len(), 4);
@@ -765,9 +795,9 @@ mod tests {
         impl Datum for A {}
 
         let database = Database::new();
-        let a = database.create()?.one(A(vec![]));
-        let b = database.create()?.one(A(vec![a, a, Key::NULL]));
-        database.create()?.one(A(vec![Key::NULL, Key::NULL, a, b]));
+        let a = create_one(&database, A(vec![]))?;
+        let b = create_one(&database, A(vec![a, a, Key::NULL]))?;
+        create_one(&database, A(vec![Key::NULL, Key::NULL, a, b]))?;
 
         let mut query = database.query::<&A>()?;
         assert_eq!(query.count(), 3);
@@ -792,14 +822,15 @@ mod tests {
     fn copy_to() -> Result<(), Error> {
         struct CopyTo(Key);
         impl Datum for CopyTo {}
+        const COUNT: usize = 10;
 
         let database = Database::new();
-        let mut a = database.create()?.one(C(1));
+        let mut a = create_one(&database, C(1))?;
         let mut create = database.create()?;
-        for i in 0..100 {
+        for i in 0..COUNT {
             a = create.one((C(i), CopyTo(a)));
         }
-        create.resolve();
+        assert_eq!(create.resolve(), COUNT);
 
         let mut sources = database.query::<(&C, &CopyTo)>()?;
         let mut targets = database.query::<&mut C>()?;
@@ -817,12 +848,12 @@ mod tests {
         const COUNT: usize = 10;
 
         let database = Database::new();
-        let a = database.create()?.one(C(1));
+        let a = create_one(&database, C(1))?;
         let mut create = database.create()?;
         for i in 0..COUNT {
             create.one((C(i), CopyFrom(a)));
         }
-        create.resolve();
+        assert_eq!(create.resolve(), COUNT);
 
         let mut copies = database.query::<(Key, &CopyFrom)>()?;
         let mut sources = database.query::<&C>()?;
@@ -852,17 +883,18 @@ mod tests {
     fn swap() -> Result<(), Error> {
         struct Swap(Key, Key);
         impl Datum for Swap {}
+        const COUNT: usize = 10;
 
         let database = Database::new();
-        let mut a = database.create()?.one(C(1));
-        let mut b = database.create()?.one(C(2));
+        let mut a = create_one(&database, C(1))?;
+        let mut b = create_one(&database, C(2))?;
         let mut create = database.create()?;
-        for i in 0..100 {
+        for i in 0..COUNT {
             let c = create.one((C(i), Swap(a, b)));
             a = b;
             b = c;
         }
-        create.resolve();
+        assert_eq!(create.resolve(), COUNT);
 
         let mut swaps = database.query::<&Swap>()?;
         let mut sources = database.query::<&C>()?;
