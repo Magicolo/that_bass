@@ -88,6 +88,29 @@ impl Column {
         *data = new_data;
     }
 
+    pub unsafe fn shrink(&mut self, old_capacity: NonZeroUsize, new_capacity: usize) {
+        debug_assert!(old_capacity.get() > new_capacity);
+        let &Meta {
+            new,
+            free,
+            copy,
+            drop,
+            ..
+        } = self.meta();
+        let data = self.data.get_mut();
+        let old_data = *data;
+        let new_data = new(new_capacity);
+        if let Some(new_capacity) = NonZeroUsize::new(new_capacity) {
+            copy((old_data, 0), (new_data, 0), new_capacity);
+        }
+        if let Some(over) = NonZeroUsize::new(old_capacity.get() - new_capacity) {
+            drop(old_data, new_capacity, over);
+        }
+        // A count of 0 is sent to `free` because the values of `old_data` have been moved to `new_data`, so they must not be dropped.
+        free(old_data, 0, old_capacity.get());
+        *data = new_data;
+    }
+
     /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the column.
     /// The ranges 'source_index..source_index + count' and 'target_index..target_index + count' must not overlap.
     #[inline]
@@ -249,6 +272,12 @@ impl Tables {
         drop(read);
         table
     }
+
+    pub fn shrink(&self) {
+        for table in self.iter() {
+            table.inner.write().shrink();
+        }
+    }
 }
 
 unsafe impl Send for Tables {}
@@ -372,6 +401,27 @@ impl Inner {
         *current -= count.get() as u32;
         *pending = Self::recompose_pending(begun - count.get() as u32, ended - count.get() as u32);
         *current as usize
+    }
+
+    pub fn shrink(&mut self) {
+        let keys = self.keys.get_mut();
+        let Some(old_capacity) = NonZeroUsize::new(keys.len()) else {
+            return;
+        };
+        let new_capacity = *self.count.get_mut() as usize;
+        if new_capacity == old_capacity.get() {
+            return;
+        }
+        debug_assert!(new_capacity <= old_capacity.get());
+
+        keys.truncate(new_capacity as _);
+        keys.shrink_to_fit();
+        debug_assert_eq!(keys.len(), new_capacity);
+
+        let new_capacity = keys.len();
+        for column in self.columns.iter_mut() {
+            unsafe { column.shrink(old_capacity, new_capacity) };
+        }
     }
 }
 

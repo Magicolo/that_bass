@@ -54,19 +54,15 @@ impl Database {
 
 impl<'d> Destroy<'d> {
     #[inline]
-    pub fn one(&mut self, key: Key) -> bool {
-        match self.database.keys().get(key) {
-            Ok((slot, table)) => {
-                Self::sort(key, slot, table, &mut self.sorted, self.database).is_ok()
-            }
-            Err(_) => false,
-        }
+    pub fn one(&mut self, key: Key) -> Result<(), Error> {
+        let (slot, table) = self.database.keys().get(key)?;
+        Self::sort(key, slot, table, &mut self.sorted, self.database)
     }
 
     #[inline]
     pub fn all<I: IntoIterator<Item = Key>>(&mut self, keys: I) -> usize {
         keys.into_iter()
-            .filter_map(|key| self.one(key).then_some(()))
+            .filter_map(|key| self.one(key).ok())
             .count()
     }
 

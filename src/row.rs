@@ -2,9 +2,9 @@ use crate::{
     core::{tuples, utility::get_unchecked},
     key::Key,
     table::{Column, Table},
-    Datum, Error,
+    Database, Datum, Error,
 };
-use std::{any::TypeId, collections::HashSet, marker::PhantomData};
+use std::{any::TypeId, collections::HashSet, marker::PhantomData, sync::Arc};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Access {
@@ -20,7 +20,7 @@ pub struct InitializeContext<'a>(&'a Table);
 pub struct ItemContext<'a>(&'a [Key], &'a [Column], usize);
 pub struct ChunkContext<'a>(&'a [Key], &'a [Column]);
 
-pub unsafe trait Row {
+pub unsafe trait Row: 'static {
     type State;
     type Read: Row;
     type Item<'a>;
@@ -32,6 +32,8 @@ pub unsafe trait Row {
     unsafe fn item<'a>(state: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a>;
     unsafe fn chunk<'a>(state: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a>;
 }
+
+pub(crate) struct ShareAccess<R>(Arc<HashSet<Access>>, PhantomData<fn(R)>);
 
 impl<D> Write<D> {
     pub fn read(&self) -> Read<D> {
@@ -169,6 +171,18 @@ impl<'a> ChunkContext<'a> {
     }
 }
 
+impl<R: Row> ShareAccess<R> {
+    pub fn from(database: &Database) -> Result<Arc<HashSet<Access>>, Error> {
+        let share = database.resources().try_global(|| {
+            let mut accesses = DeclareContext::accesses::<R>()?;
+            accesses.shrink_to_fit();
+            Ok(Self(Arc::new(accesses), PhantomData))
+        })?;
+        let share = share.read();
+        Ok(share.0.clone())
+    }
+}
+
 unsafe impl Row for Key {
     type State = ();
     type Read = Self;
@@ -192,7 +206,7 @@ unsafe impl Row for Key {
     }
 }
 
-unsafe impl<D: Datum> Row for &D {
+unsafe impl<D: Datum> Row for &'static D {
     type State = Read<D>;
     type Read = Self;
     type Item<'a> = &'a D;
@@ -217,9 +231,9 @@ unsafe impl<D: Datum> Row for &D {
     }
 }
 
-unsafe impl<'b, D: Datum> Row for &'b mut D {
+unsafe impl<D: Datum> Row for &'static mut D {
     type State = Write<D>;
-    type Read = &'b D;
+    type Read = &'static D;
     type Item<'a> = &'a mut D;
     type Chunk<'a> = &'a mut [D];
 

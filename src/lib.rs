@@ -1,23 +1,23 @@
 pub mod add;
 pub mod core;
 pub mod create;
-pub mod defer;
+mod defer;
 pub mod destroy;
 pub mod filter;
 pub mod key;
 pub mod query;
-pub mod remove;
+mod remove;
 pub mod resources;
 pub mod row;
 pub mod table;
 pub mod template;
 
 /*
+    TODO: Remove empty tables when calling `Tables::shrink`.
+        - Requires to stop using `Table::index`.
     TODO: Queries don't prevent visiting a key twice if another thread resolves a move operation from a visited table to an unvisited
     one while the query is iterating.
         - It may be resonnable to require from users (or a scheduler) to resolve deferred operations at an appropriate time.
-    TODO: Allow `Query` to be split in parts which will each be responsible for operating on one table.
-        - This is meant to allow executing parts of the query one different threads.
     TODO: Implement `Defer`:
         - Will order the resolution of deferred operations such that coherence is maintained.
     TODO: Implement `Remove<T: Template>`
@@ -34,7 +34,9 @@ pub mod template;
     created keys are reported to not be present in a corresponding query.
         - This happens because `Table::commit` can technically fail for an unlimited amount of time...
         - Would require to force a successful commit at key moments.
-
+    TODO: Allow creating with a struct with a `#[derive(Template)]`. All members will need to implement `Template`.
+    TODO: Allow querying with a struct or enum with a `#[derive(Row)]`. All members will need to implement `Item`.
+    TODO: Allow filtering with a struct or enum with a `#[derive(Filter)]`. All members will need to implement `Filter`.
     TODO: Implement `Permute`.
         - Returns all permutations (with repetitions) of two queries.
         - Order of items matters, so (A, B) is considered different than (B, A), thus both will be returned.
@@ -45,7 +47,27 @@ pub mod template;
         - Use a filter similar to `A.key() < B.key()` to eliminate duplicates.
     TODO: Implement compile-time checking of `Columns`, if possible.
     TODO: Prevent using a query within a query using an auto trait `Nest` that is negatively implemented for `Query`.
+    TODO: Test the database with generative tests.
 
+    TODO (POSTPONED): Add an option to split large table stores in chunks of fixed size.
+        - Large stores have better locality but might cause more contention on their locks.
+        - Small stores cause less contention but have worse locality.
+        - Imposes a design dillema on the user:
+            - Use more static templates with dynamic values (larger stores).
+            - Use more dynamic templates (using `Add/Remove` operations) with static datum (smaller stores).
+        - Tables may have a `size: u32` that defaults to `u32::MAX` that defines the maximum store size.
+        - After the first chunk has grown to full size (ex: 1024), change growing strategy to allocating
+        full chunks with separate locks.
+        - This removes the dillema from the user in favor of more static templates since they'll have similar
+        locality and parallelism properties compared to more dynamic templates, but in the dynamic case, there'll be more
+        move operations.
+        - Should offer some benefits in terms in parallelism (parallelise more granularly by chunk).
+        - Should offer some opportunities when moving/destroying rows such that only one chunk will need to be locked.
+            - Each chunk may have its own `count` such that `squash` can be used within a chunk.
+        - This solution will add a lot of complexity.
+        - Will this require table + chunk + column locks vs table + column locks (currently)?
+        *** It seems that locality should be prioritise since it allows work on columns do be completed sooner which reduces
+        contention. Locality also allows a more efficient use of SIMD instructions.
     TODO (POSTPONED): Implement `Row` for `Add<T: Template>`?
         - The added constraints on `Query`, the added locks, the added complexity and the added confusion in the API tend
         to outweigh the potential benefits of being able to make more assumptions about queued keys...
@@ -92,24 +114,18 @@ pub mod template;
 */
 
 /*
-TODO: There is no need to take a `Table` lock when querying as long as the column locks are always taken from left to right.
-    - By declaring used metas in `Item` it should be possible to pass the `Column`.
-    - The `Lock` might need specialized methods
-        `fn read_lock() -> Self::ReadGuard`
-        `fn read_chunk() -> Self::ReadChunk`
-        `fn read_item() -> Self::ReadItem`
-        `fn write_lock() -> Self::WriteGuard`
-        `fn write_chunk() -> Self::WriteChunk`
-        `fn write_item() -> Self::WriteItem`
-TODO: Allow creating with a struct with a `#[derive(Template)]`. All members will need to implement `Template`.
-TODO: Allow querying with a struct or enum with a `#[derive(Row)]`. All members will need to implement `Item`.
-TODO: Allow filtering with a struct or enum with a `#[derive(Filter)]`. All members will need to implement `Filter`.
-
-
 Scheduler library:
     - Can be completely independent from this library.
     - A `Run<I, O>` holds an `fn(I) -> O` where `I: Depend`.
     - With depend, the scheduler will be able to parallelize efficiently and maintain a chosen level of coherence.
+    - A scheduler will need to decide when to resolve deferred operations such as `Create/Destroy/Add/Remove`.
+    - A scheduler would be allowed to reorder chunks of work to minimize contention as long as coherence is maintained.
+    - Might need to prevent combining operations that require a dynamic ordering to define a proper outcome:
+        - `Create` operations are always resolved first (compatible with all other operations).
+        - `Destroy` operations are always resolved second (compatible with all other operations).
+        - `Add<T>` and `Remove<U>` operations must be dynamically ordered if `T` overlaps `U` (otherwise compatible).
+        - `Add` and `Add` don't require a resolve order.
+        - `Remove` and `Remove` don't require a resolve order.
 
     let database = Database::new();
     // Scheduler::new(): Scheduler<()>
@@ -121,7 +137,7 @@ Scheduler library:
 
     fn a_system(database: &Database) -> Run<impl Depend> {
         Run::new(
-            (database.create(), database.query()), // impl Depend
+            (database.create(), database.query()), // impl Depend; declares dependencies to the scheduler
             |(create, query)| {
                 let key = create.one(());
                 query.find(key, |item| {});
@@ -345,7 +361,7 @@ mod tests {
     fn create_destroy_create_reuses_key_index() -> Result<(), Error> {
         let database = Database::new();
         let key1 = database.create()?.one(());
-        assert_eq!(database.destroy().one(key1), true);
+        assert_eq!(database.destroy().one(key1), Ok(()));
         let key2 = database.create()?.one(());
         assert_eq!(key1.index(), key2.index());
         assert_ne!(key1.generation(), key2.generation());
@@ -360,7 +376,7 @@ mod tests {
             database.keys().get(Key::NULL).err(),
             Some(Error::InvalidKey)
         );
-        assert_eq!(destroy.one(Key::NULL), false);
+        assert_eq!(destroy.one(Key::NULL), Err(Error::InvalidKey));
         assert_eq!(destroy.resolve(), 0);
         assert_eq!(
             database.keys().get(Key::NULL).err(),
@@ -374,7 +390,7 @@ mod tests {
         let key = database.create::<()>()?.one(());
         let mut destroy = database.destroy();
         assert!(database.keys().get(key).is_ok());
-        assert_eq!(destroy.one(key), true);
+        assert_eq!(destroy.one(key), Ok(()));
         assert!(database.keys().get(key).is_ok());
         assert_eq!(destroy.resolve(), 1);
         assert_eq!(database.keys().get(key).err(), Some(Error::InvalidKey));
@@ -414,7 +430,7 @@ mod tests {
         let database = Database::new();
         let key = database.create()?.one(());
         let mut add = database.add()?;
-        assert!(add.one(key, A));
+        assert_eq!(add.one(key, A), Ok(()));
         assert_eq!(add.resolve(), 1);
         assert_eq!(add.resolve(), 0);
         Ok(())
@@ -425,7 +441,7 @@ mod tests {
         let database = Database::new();
         let key = database.create()?.one(());
         let mut add = database.add()?;
-        assert!(add.one(key, A));
+        assert_eq!(add.one(key, A), Ok(()));
         assert!(!database.query::<&A>()?.has(key));
         assert_eq!(add.resolve(), 1);
         assert!(database.query::<&A>()?.has(key));
@@ -439,18 +455,21 @@ mod tests {
         let mut add_a = database.add()?;
         let mut add_b = database.add()?;
 
-        assert!(add_a.one(key, A));
-        assert!(add_b.one(key, B));
+        assert_eq!(add_a.one(key, A), Ok(()));
+        assert_eq!(add_b.one(key, B), Ok(()));
+        assert!(database.query::<()>()?.has(key));
         assert!(!database.query::<&A>()?.has(key));
         assert!(!database.query::<&B>()?.has(key));
         assert!(!database.query::<(&A, &B)>()?.has(key));
 
         assert_eq!(add_a.resolve(), 1);
+        assert!(database.query::<()>()?.has(key));
         assert!(database.query::<&A>()?.has(key));
         assert!(!database.query::<&B>()?.has(key));
         assert!(!database.query::<(&A, &B)>()?.has(key));
 
         assert_eq!(add_b.resolve(), 1);
+        assert!(database.query::<()>()?.has(key));
         assert!(database.query::<&A>()?.has(key));
         assert!(database.query::<&B>()?.has(key));
         assert!(database.query::<(&A, &B)>()?.has(key));
@@ -463,7 +482,7 @@ mod tests {
         let key = database.create()?.one(());
         let mut add = database.add()?;
 
-        assert!(add.one(key, (A, B)));
+        assert_eq!(add.one(key, (A, B)), Ok(()));
         assert!(!database.query::<&A>()?.has(key));
         assert!(!database.query::<&B>()?.has(key));
         assert!(!database.query::<(&A, &B)>()?.has(key));
@@ -472,6 +491,84 @@ mod tests {
         assert!(database.query::<&A>()?.has(key));
         assert!(database.query::<&B>()?.has(key));
         assert!(database.query::<(&A, &B)>()?.has(key));
+        Ok(())
+    }
+
+    #[test]
+    fn remove_resolve_is_0() -> Result<(), Error> {
+        let database = Database::new();
+        assert_eq!(database.add::<()>()?.resolve(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_no_double_resolve() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(A);
+        let mut remove = database.remove::<A>()?;
+        assert_eq!(remove.one(key), Ok(()));
+        assert_eq!(remove.resolve(), 1);
+        assert_eq!(remove.resolve(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_simple_template() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one(A);
+        let mut remove = database.remove::<A>()?;
+        assert_eq!(remove.one(key), Ok(()));
+        assert!(database.query::<&A>()?.has(key));
+        assert_eq!(remove.resolve(), 1);
+        assert!(!database.query::<&A>()?.has(key));
+        Ok(())
+    }
+
+    #[test]
+    fn remove_simple_template_twice() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one((A, B));
+        let mut remove_a = database.remove::<A>()?;
+        let mut remove_b = database.remove::<B>()?;
+
+        assert_eq!(remove_a.one(key), Ok(()));
+        assert_eq!(remove_b.one(key), Ok(()));
+        assert!(database.query::<()>()?.has(key));
+        assert!(database.query::<&A>()?.has(key));
+        assert!(database.query::<&B>()?.has(key));
+        assert!(database.query::<(&A, &B)>()?.has(key));
+
+        assert_eq!(remove_a.resolve(), 1);
+        assert!(database.query::<()>()?.has(key));
+        assert!(!database.query::<&A>()?.has(key));
+        assert!(database.query::<&B>()?.has(key));
+        assert!(!database.query::<(&A, &B)>()?.has(key));
+
+        assert_eq!(remove_b.resolve(), 1);
+        assert!(database.query::<()>()?.has(key));
+        assert!(!database.query::<&A>()?.has(key));
+        assert!(!database.query::<&B>()?.has(key));
+        assert!(!database.query::<(&A, &B)>()?.has(key));
+        Ok(())
+    }
+
+    #[test]
+    fn remove_composite_template() -> Result<(), Error> {
+        let database = Database::new();
+        let key = database.create()?.one((A, B));
+        let mut remove = database.remove::<(A, B)>()?;
+
+        assert_eq!(remove.one(key), Ok(()));
+        assert!(database.query::<()>()?.has(key));
+        assert!(database.query::<&A>()?.has(key));
+        assert!(database.query::<&B>()?.has(key));
+        assert!(database.query::<(&A, &B)>()?.has(key));
+
+        assert_eq!(remove.resolve(), 1);
+        assert!(database.query::<()>()?.has(key));
+        assert!(!database.query::<&A>()?.has(key));
+        assert!(!database.query::<&B>()?.has(key));
+        assert!(!database.query::<(&A, &B)>()?.has(key));
         Ok(())
     }
 
@@ -513,7 +610,7 @@ mod tests {
     fn query_is_none_destroy_one_key() -> Result<(), Error> {
         let database = Database::new();
         let key = database.create()?.one(());
-        database.destroy().one(key);
+        database.destroy().one(key)?;
         let mut query = database.query::<()>()?;
         assert_eq!(query.find(key, |_| {}).err(), Some(Error::InvalidKey));
         Ok(())
@@ -870,136 +967,136 @@ mod tests {
 //     }
 // }
 
-mod push_vec {
-    use std::{
-        mem::{forget, MaybeUninit},
-        ptr::{copy_nonoverlapping, null_mut},
-        sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::*},
-    };
+// mod push_vec {
+//     use std::{
+//         mem::{forget, MaybeUninit},
+//         ptr::{copy_nonoverlapping, null_mut},
+//         sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering::*},
+//     };
 
-    use crate::core::utility::get_unchecked;
+//     use crate::core::utility::get_unchecked;
 
-    const SHIFT: usize = 8;
-    const CHUNK: usize = 1 << SHIFT;
-    const MASK: u32 = (CHUNK - 1) as u32;
+//     const SHIFT: usize = 8;
+//     const CHUNK: usize = 1 << SHIFT;
+//     const MASK: u32 = (CHUNK - 1) as u32;
 
-    pub struct PushVec<T> {
-        count: AtomicU64,
-        uses: AtomicUsize,
-        chunks: AtomicPtr<Box<[MaybeUninit<T>; CHUNK]>>,
-        pending: AtomicPtr<Box<[MaybeUninit<T>; CHUNK]>>,
-    }
+//     pub struct PushVec<T> {
+//         count: AtomicU64,
+//         uses: AtomicUsize,
+//         chunks: AtomicPtr<Box<[MaybeUninit<T>; CHUNK]>>,
+//         pending: AtomicPtr<Box<[MaybeUninit<T>; CHUNK]>>,
+//     }
 
-    impl<T> PushVec<T> {
-        pub fn get(&self, index: u32) -> Option<&T> {
-            let (count, _, _) = decompose_count(self.count.load(Acquire));
-            if index >= count as _ {
-                return None;
-            }
+//     impl<T> PushVec<T> {
+//         pub fn get(&self, index: u32) -> Option<&T> {
+//             let (count, _, _) = decompose_count(self.count.load(Acquire));
+//             if index >= count as _ {
+//                 return None;
+//             }
 
-            let (chunk, item) = decompose_index(index);
-            let (count, _) = decompose_index(count);
-            self.increment_use(count - 1);
-            let chunks = self.chunks.load(Acquire);
-            let chunk = unsafe { &**chunks.add(chunk as usize) };
-            self.decrement_use(count - 1);
-            Some(unsafe { get_unchecked(chunk, item as usize).assume_init_ref() })
-        }
+//             let (chunk, item) = decompose_index(index);
+//             let (count, _) = decompose_index(count);
+//             self.increment_use(count - 1);
+//             let chunks = self.chunks.load(Acquire);
+//             let chunk = unsafe { &**chunks.add(chunk as usize) };
+//             self.decrement_use(count - 1);
+//             Some(unsafe { get_unchecked(chunk, item as usize).assume_init_ref() })
+//         }
 
-        pub fn push(&self, item: T) {
-            let (mut count, ended, begun) = decompose_count(self.count.fetch_add(1, AcqRel));
-            let index = count + ended as u32 + begun as u32;
-            let (mut old_count, _) = decompose_index(count);
-            let new_count = decompose_index(index);
-            self.increment_use(old_count);
-            let mut old_chunks = self.chunks.load(Acquire);
+//         pub fn push(&self, item: T) {
+//             let (mut count, ended, begun) = decompose_count(self.count.fetch_add(1, AcqRel));
+//             let index = count + ended as u32 + begun as u32;
+//             let (mut old_count, _) = decompose_index(count);
+//             let new_count = decompose_index(index);
+//             self.increment_use(old_count);
+//             let mut old_chunks = self.chunks.load(Acquire);
 
-            debug_assert_eq!(new_count.0 - old_count, 1);
-            if old_count < new_count.0 {
-                // TODO: Re-read the count here? In a loop?
-                let new_chunks = {
-                    let mut chunks = Vec::with_capacity(new_count.0 as usize);
-                    let new_chunks = chunks.as_mut_ptr();
-                    unsafe { copy_nonoverlapping(old_chunks, new_chunks, old_count as usize) };
-                    forget(chunks);
-                    new_chunks
-                };
+//             debug_assert_eq!(new_count.0 - old_count, 1);
+//             if old_count < new_count.0 {
+//                 // TODO: Re-read the count here? In a loop?
+//                 let new_chunks = {
+//                     let mut chunks = Vec::with_capacity(new_count.0 as usize);
+//                     let new_chunks = chunks.as_mut_ptr();
+//                     unsafe { copy_nonoverlapping(old_chunks, new_chunks, old_count as usize) };
+//                     forget(chunks);
+//                     new_chunks
+//                 };
 
-                match self
-                    .chunks
-                    .compare_exchange(old_chunks, new_chunks, AcqRel, Acquire)
-                {
-                    Ok(chunks) => {
-                        let chunk = Box::new([(); CHUNK].map(|_| MaybeUninit::<T>::uninit()));
-                        unsafe { new_chunks.add(old_count as usize).write(chunk) };
-                        // It should be extremely unlikely that this call returns `true`.
-                        self.try_free(old_count, old_chunks);
-                        old_chunks = chunks;
-                    }
-                    Err(chunks) => {
-                        // Another thread won the race; free this allocation.
-                        drop(unsafe { Vec::from_raw_parts(new_chunks, 0, new_count.0 as usize) });
-                        old_chunks = chunks;
-                    }
-                }
-                (count, _, _) = decompose_count(self.count.load(Acquire));
-                (old_count, _) = decompose_index(count);
-            }
+//                 match self
+//                     .chunks
+//                     .compare_exchange(old_chunks, new_chunks, AcqRel, Acquire)
+//                 {
+//                     Ok(chunks) => {
+//                         let chunk = Box::new([(); CHUNK].map(|_| MaybeUninit::<T>::uninit()));
+//                         unsafe { new_chunks.add(old_count as usize).write(chunk) };
+//                         // It should be extremely unlikely that this call returns `true`.
+//                         self.try_free(old_count, old_chunks);
+//                         old_chunks = chunks;
+//                     }
+//                     Err(chunks) => {
+//                         // Another thread won the race; free this allocation.
+//                         drop(unsafe { Vec::from_raw_parts(new_chunks, 0, new_count.0 as usize) });
+//                         old_chunks = chunks;
+//                     }
+//                 }
+//                 (count, _, _) = decompose_count(self.count.load(Acquire));
+//                 (old_count, _) = decompose_index(count);
+//             }
 
-            let chunk = unsafe { &mut **old_chunks.add(new_count.0 as usize) };
-            self.decrement_use(old_count - 1);
-            let item = MaybeUninit::new(item);
-            unsafe { chunk.as_mut_ptr().add(new_count.1 as usize).write(item) };
-            let result = self.count.fetch_update(AcqRel, Acquire, |count| {
-                let (count, ended, begun) = decompose_count(count);
-                Some(if begun == 1 {
-                    recompose_count(count + ended as u32 + begun as u32, 0, 0)
-                } else {
-                    debug_assert!(begun > 1);
-                    recompose_count(count, ended + 1, begun - 1)
-                })
-            });
-            debug_assert!(result.is_ok());
-        }
+//             let chunk = unsafe { &mut **old_chunks.add(new_count.0 as usize) };
+//             self.decrement_use(old_count - 1);
+//             let item = MaybeUninit::new(item);
+//             unsafe { chunk.as_mut_ptr().add(new_count.1 as usize).write(item) };
+//             let result = self.count.fetch_update(AcqRel, Acquire, |count| {
+//                 let (count, ended, begun) = decompose_count(count);
+//                 Some(if begun == 1 {
+//                     recompose_count(count + ended as u32 + begun as u32, 0, 0)
+//                 } else {
+//                     debug_assert!(begun > 1);
+//                     recompose_count(count, ended + 1, begun - 1)
+//                 })
+//             });
+//             debug_assert!(result.is_ok());
+//         }
 
-        #[inline]
-        fn increment_use(&self, count: u32) {
-            if self.uses.fetch_add(1, Relaxed) == 0 {
-                self.try_free(count, null_mut());
-            }
-        }
+//         #[inline]
+//         fn increment_use(&self, count: u32) {
+//             if self.uses.fetch_add(1, Relaxed) == 0 {
+//                 self.try_free(count, null_mut());
+//             }
+//         }
 
-        #[inline]
-        fn decrement_use(&self, count: u32) {
-            if self.uses.fetch_sub(1, Relaxed) == 1 {
-                self.try_free(count, null_mut());
-            }
-        }
+//         #[inline]
+//         fn decrement_use(&self, count: u32) {
+//             if self.uses.fetch_sub(1, Relaxed) == 1 {
+//                 self.try_free(count, null_mut());
+//             }
+//         }
 
-        #[inline]
-        fn try_free(&self, count: u32, swap: *mut Box<[MaybeUninit<T>; CHUNK]>) -> bool {
-            let pending = self.pending.swap(swap, AcqRel);
-            if pending.is_null() {
-                false
-            } else {
-                drop(unsafe { Vec::from_raw_parts(pending, 0, count as usize) });
-                true
-            }
-        }
-    }
+//         #[inline]
+//         fn try_free(&self, count: u32, swap: *mut Box<[MaybeUninit<T>; CHUNK]>) -> bool {
+//             let pending = self.pending.swap(swap, AcqRel);
+//             if pending.is_null() {
+//                 false
+//             } else {
+//                 drop(unsafe { Vec::from_raw_parts(pending, 0, count as usize) });
+//                 true
+//             }
+//         }
+//     }
 
-    #[inline]
-    const fn decompose_index(index: u32) -> (u32, u32) {
-        (index >> SHIFT, index & MASK)
-    }
+//     #[inline]
+//     const fn decompose_index(index: u32) -> (u32, u32) {
+//         (index >> SHIFT, index & MASK)
+//     }
 
-    #[inline]
-    const fn recompose_count(count: u32, ended: u16, begun: u16) -> u64 {
-        (count as u64) << 32 | (ended as u64) << 16 | (begun as u64)
-    }
+//     #[inline]
+//     const fn recompose_count(count: u32, ended: u16, begun: u16) -> u64 {
+//         (count as u64) << 32 | (ended as u64) << 16 | (begun as u64)
+//     }
 
-    #[inline]
-    const fn decompose_count(count: u64) -> (u32, u16, u16) {
-        ((count >> 32) as u32, (count >> 16) as u16, count as u16)
-    }
-}
+//     #[inline]
+//     const fn decompose_count(count: u64) -> (u32, u16, u16) {
+//         ((count >> 32) as u32, (count >> 16) as u16, count as u16)
+//     }
+// }

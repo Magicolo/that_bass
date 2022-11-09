@@ -1,9 +1,9 @@
 use crate::{
     core::{tuples, utility::get_unchecked},
     table::{Column, Table},
-    Datum, Error, Meta,
+    Database, Datum, Error, Meta,
 };
-use std::{marker::PhantomData, mem::size_of};
+use std::{marker::PhantomData, mem::size_of, sync::Arc};
 
 pub struct Apply<D>(usize, PhantomData<fn(D)>);
 pub struct DeclareContext<'a>(&'a mut Vec<&'static Meta>);
@@ -19,6 +19,8 @@ pub unsafe trait Template: 'static {
     /// `ApplyContext` must be properly valid in every columns.
     unsafe fn apply(self, state: &Self::State, context: ApplyContext);
 }
+
+pub(crate) struct ShareMeta<T>(Arc<Box<[&'static Meta]>>, PhantomData<fn(T)>);
 
 impl DeclareContext<'_> {
     pub fn metas<T: Template>() -> Result<Vec<&'static Meta>, Error> {
@@ -76,6 +78,19 @@ impl<'a> ApplyContext<'a> {
     #[inline]
     pub fn apply<D: Datum>(&self, state: &Apply<D>, value: D) {
         unsafe { get_unchecked(self.0, state.0).set(self.1, value) };
+    }
+}
+
+impl<T: Template> ShareMeta<T> {
+    pub fn from(database: &Database) -> Result<Arc<Box<[&'static Meta]>>, Error> {
+        let share = database.resources().try_global(|| {
+            let mut metas = DeclareContext::metas::<T>()?;
+            // Must sort here since the order of these metas is used to lock columns in target tables.
+            metas.sort_unstable_by_key(|meta| meta.identifier());
+            Ok(Self(Arc::new(metas.into_boxed_slice()), PhantomData))
+        })?;
+        let share = share.read();
+        Ok(share.0.clone())
     }
 }
 

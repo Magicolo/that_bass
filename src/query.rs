@@ -5,13 +5,12 @@ use crate::{
     },
     filter::Filter,
     key::{Key, Slot},
-    row::{Access, ChunkContext, DeclareContext, InitializeContext, ItemContext, Row},
+    row::{Access, ChunkContext, InitializeContext, ItemContext, Row, ShareAccess},
     table::{self, Column, Table},
     Database, Error,
 };
 use std::{
     any::TypeId,
-    collections::HashSet,
     marker::PhantomData,
     mem::swap,
     ops::ControlFlow::{self, *},
@@ -24,7 +23,6 @@ pub struct Query<'d, R: Row, F = (), I = Item> {
     index: usize,
     indices: Vec<u32>,         // May be reordered.
     states: Vec<State<'d, R>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
-    accesses: HashSet<Access>,
     _marker: PhantomData<fn(F, I)>,
 }
 
@@ -61,11 +59,11 @@ struct Errors<'d, 'a, R: Row, V> {
 
 impl Database {
     pub fn query<R: Row>(&self) -> Result<Query<'_, R>, Error> {
+        ShareAccess::<R>::from(self)?;
         Ok(Query {
             database: self,
             indices: Vec::new(),
             states: Vec::new(),
-            accesses: DeclareContext::accesses::<R>()?,
             index: 0,
             _marker: PhantomData,
         })
@@ -104,7 +102,6 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                         .collect(),
                 })
                 .collect(),
-            accesses: self.accesses.iter().map(|access| access.read()).collect(),
             index: self.index,
             _marker: PhantomData,
         }
@@ -119,7 +116,6 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             database: self.database,
             indices: self.indices,
             states: self.states,
-            accesses: self.accesses,
             index: self.index,
             _marker: PhantomData,
         }
@@ -228,7 +224,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             // Initialize first to save some work if it fails.
             let state = R::initialize(InitializeContext::new(table))?;
             let mut indices = Vec::new();
-            for &access in self.accesses.iter() {
+            for &access in ShareAccess::<R>::from(self.database)?.iter() {
                 if let Ok(index) = table.column_with(access.identifier()) {
                     indices.push((index, access));
                 }
@@ -257,7 +253,6 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             database: self.database,
             indices: self.indices,
             states: self.states,
-            accesses: self.accesses,
             index: self.index,
             _marker: PhantomData,
         }
@@ -594,7 +589,6 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
             database: self.database,
             indices: self.indices,
             states: self.states,
-            accesses: self.accesses,
             index: self.index,
             _marker: PhantomData,
         }

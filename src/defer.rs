@@ -29,6 +29,13 @@ struct Creates {
     resolvers: Vec<Resolver>,
 }
 
+trait Resolve {
+    fn resolve_create();
+    fn resolve_destroy();
+    fn resolve_non_ordered_move();
+    fn resolve_ordered_move();
+}
+
 // struct Destroys {
 //     keys: HashSet<Key>,
 //     pending: Vec<(Key, &'d Slot, u32)>,
