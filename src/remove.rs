@@ -12,20 +12,20 @@ use crate::{
 };
 use std::{collections::HashMap, marker::PhantomData, num::NonZeroUsize, sync::Arc};
 
-pub struct Remove<'d, T: Template> {
+pub struct Remove<'d, T: Template, F: Filter = ()> {
     database: &'d Database,
     keys: HashMap<Key, u32>,
     pending: Vec<(Key, &'d Slot, u32)>,
-    sorted: HashMap<u32, State<'d>>,
-    _marker: PhantomData<fn(T)>,
+    sorted: HashMap<u32, Option<State<'d>>>,
+    _marker: PhantomData<fn(T, F)>,
 }
 
 /// Removes template `T` to all keys in tables that satisfy the filter `F`.
-pub struct RemoveAll<'d, T: Template, F: Filter> {
+pub struct RemoveAll<'d, T: Template, F: Filter = ()> {
     database: &'d Database,
     index: usize,
-    states: Vec<StateAll<T>>,
-    _marker: PhantomData<fn(F)>,
+    states: Vec<StateAll>,
+    _marker: PhantomData<fn(T, F)>,
 }
 
 struct State<'d> {
@@ -35,11 +35,10 @@ struct State<'d> {
     rows: Vec<(Key, &'d Slot, u32)>,
 }
 
-struct StateAll<T: Template> {
+struct StateAll {
     source: Arc<Table>,
     target: Arc<Table>,
     inner: Arc<Inner>,
-    _marker: PhantomData<fn(T)>,
 }
 
 struct Inner {
@@ -66,7 +65,7 @@ impl Database {
         })
     }
 
-    pub fn remove_all<T: Template, F: Filter>(&self) -> Result<RemoveAll<T, F>, Error> {
+    pub fn remove_all<T: Template>(&self) -> Result<RemoveAll<T>, Error> {
         // Validate metas here, but there is no need to store them.
         ShareMeta::<T>::from(self).map(|_| RemoveAll {
             database: self,
@@ -77,7 +76,7 @@ impl Database {
     }
 }
 
-impl<'d, T: Template> Remove<'d, T> {
+impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
     #[inline]
     pub fn one(&mut self, key: Key) -> Result<(), Error> {
         let (slot, table) = self.database.keys().get(key)?;
@@ -89,6 +88,30 @@ impl<'d, T: Template> Remove<'d, T> {
         keys.into_iter()
             .filter_map(|key| self.one(key).ok())
             .count()
+    }
+
+    pub fn filter<G: Filter>(mut self) -> Remove<'d, T, (F, G)> {
+        debug_assert_eq!(self.keys.len(), 0);
+        debug_assert_eq!(self.pending.len(), 0);
+        self.sorted.retain(|_, state| match state {
+            Some(state) => G::filter(&state.source, self.database),
+            None => true,
+        });
+        Remove {
+            database: self.database,
+            keys: self.keys,
+            pending: self.pending,
+            sorted: self.sorted,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        debug_assert_eq!(self.keys.len(), 0);
+        debug_assert_eq!(self.pending.len(), 0);
+        for state in self.sorted.values_mut().flatten() {
+            state.rows.clear();
+        }
     }
 
     pub fn resolve(&mut self) -> usize {
@@ -108,7 +131,7 @@ impl<'d, T: Template> Remove<'d, T> {
     }
 
     fn resolve_sorted(&mut self) {
-        for state in self.sorted.values_mut() {
+        for state in self.sorted.values_mut().flatten() {
             move_to(
                 (),
                 self.database,
@@ -117,7 +140,7 @@ impl<'d, T: Template> Remove<'d, T> {
                 &mut state.rows,
                 &state.inner.copy,
                 &state.inner.drop,
-                |_, rows| Self::filter(&state.source, &mut self.keys, rows, &mut self.pending),
+                |_, rows| Self::retain(&state.source, &mut self.keys, rows, &mut self.pending),
                 |_, rows| rows.clear(),
                 |_, _, _| {},
             );
@@ -131,30 +154,35 @@ impl<'d, T: Template> Remove<'d, T> {
         key: Key,
         slot: &'d Slot,
         table: u32,
-        sorted: &mut HashMap<u32, State<'d>>,
+        sorted: &mut HashMap<u32, Option<State<'d>>>,
         database: &'d Database,
     ) -> Result<(), Error> {
         match sorted.get_mut(&table) {
-            Some(state) => Ok(state.rows.push((key, slot, u32::MAX))),
+            Some(state) => match state {
+                Some(state) => Ok(state.rows.push((key, slot, u32::MAX))),
+                None => Err(Error::FilterDoesNotMatch),
+            },
             None => {
                 let share = ShareTable::<T>::from(table, database)?;
                 let share = share.read();
-                sorted.insert(
-                    table,
-                    State {
+                let state = if F::filter(&share.source, database) {
+                    Some(State {
                         source: share.source.clone(),
                         target: share.target.clone(),
                         inner: share.inner.clone(),
                         rows: vec![(key, slot, u32::MAX)],
-                    },
-                );
+                    })
+                } else {
+                    None
+                };
+                sorted.insert(table, state);
                 Ok(())
             }
         }
     }
 
     /// Call this while holding a lock on `table`.
-    fn filter<'a>(
+    fn retain<'a>(
         table: &'a Table,
         keys: &mut HashMap<Key, u32>,
         rows: &mut Vec<(Key, &'d Slot, u32)>,
@@ -202,24 +230,32 @@ impl<'d, T: Template> Remove<'d, T> {
     }
 }
 
-impl<T: Template> Drop for Remove<'_, T> {
-    fn drop(&mut self) {
-        self.resolve();
+impl<'d, T: Template, F: Filter> RemoveAll<'d, T, F> {
+    pub fn filter<G: Filter>(mut self) -> RemoveAll<'d, T, (F, G)> {
+        self.states
+            .retain(|state| G::filter(&state.source, self.database));
+        RemoveAll {
+            database: self.database,
+            index: self.index,
+            states: self.states,
+            _marker: PhantomData,
+        }
     }
-}
 
-impl<T: Template, F: Filter> RemoveAll<'_, T, F> {
     pub fn resolve(&mut self) -> usize {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
-            if let Ok(share) = ShareTable::<T>::from(table.index(), self.database) {
-                let share = share.read();
-                self.states.push(StateAll {
-                    source: share.source.clone(),
-                    target: share.target.clone(),
-                    inner: share.inner.clone(),
-                    _marker: PhantomData,
-                });
+            if F::filter(table, self.database) {
+                if let Ok(share) = ShareTable::<T>::from(table.index(), self.database) {
+                    let share = share.read();
+                    if share.source.index() != share.target.index() {
+                        self.states.push(StateAll {
+                            source: share.source.clone(),
+                            target: share.target.clone(),
+                            inner: share.inner.clone(),
+                        });
+                    }
+                }
             }
         }
 
@@ -260,7 +296,7 @@ impl<T: Template, F: Filter> RemoveAll<'_, T, F> {
     fn resolve_tables(
         mut source: RwLockWriteGuard<table::Inner>,
         target: RwLockUpgradableReadGuard<table::Inner>,
-        state: &StateAll<T>,
+        state: &StateAll,
         database: &Database,
     ) -> usize {
         let Some(count) = NonZeroUsize::new(*source.count.get_mut() as _) else {

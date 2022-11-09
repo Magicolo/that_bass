@@ -277,9 +277,9 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         mut fold: G,
     ) -> S {
         self.update();
-        let flow = self.try_guards(state, |mut state, _, row, _, keys, columns| {
+        let flow = self.try_guards(state, |mut state, _, row, table, keys, columns| {
             debug_assert!(keys.len() > 0);
-            let context = ItemContext::new(keys, columns);
+            let context = ItemContext::new(table, keys, columns);
             for i in 0..keys.len() {
                 let item = unsafe { R::item(row, context.with(i as _)) };
                 state = fold(state, item)?;
@@ -324,9 +324,9 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     #[inline]
     pub fn fold<S, G: FnMut(S, R::Item<'_>) -> S>(&mut self, state: S, mut fold: G) -> S {
         self.update();
-        self.guards(state, |mut state, _, row, _, keys, columns| {
+        self.guards(state, |mut state, _, row, table, keys, columns| {
             debug_assert!(keys.len() > 0);
-            let context = ItemContext::new(keys, columns);
+            let context = ItemContext::new(table, keys, columns);
             for i in 0..keys.len() {
                 let item = unsafe { R::item(row, context.with(i as _)) };
                 state = fold(state, item);
@@ -439,7 +439,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                     let row = slot.row() as usize;
                     let keys = inner.keys();
                     debug_assert_eq!(keys.get(row).copied(), Some(key));
-                    let context = ItemContext::new(keys, inner.columns());
+                    let context = ItemContext::new(table, keys, inner.columns());
                     let item = unsafe { R::item(state, context.with(row)) };
                     find(Ok(item))
                 });
@@ -486,7 +486,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
 
         swap(&mut self.indices, &mut by.indices);
         let state = self.guards(state, |mut state, index, row, table, keys, columns| {
-            let context = ItemContext::new(keys, columns);
+            let context = ItemContext::new(table, keys, columns);
             let slots = unsafe { get_unchecked_mut(&mut by.slots, index as usize) };
             for (key, value, slot) in slots.drain(..) {
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
@@ -538,7 +538,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         swap(&mut self.indices, &mut by.indices);
         // TODO: No need to lock the columns if `by.slots[index].is_empty()` after being filtered.
         let flow = self.try_guards(state, |mut state, index, row, table, keys, columns| {
-            let context = ItemContext::new(keys, columns);
+            let context = ItemContext::new(table, keys, columns);
             let slots = unsafe { get_unchecked_mut(&mut by.slots, index as usize) };
             for (key, value, slot) in slots.drain(..) {
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
@@ -608,8 +608,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
         mut fold: G,
     ) -> S {
         self.update();
-        let flow = self.try_guards(state, |state, _, row, _, keys, columns| {
-            let chunk = unsafe { R::chunk(row, ChunkContext::new(keys, columns)) };
+        let flow = self.try_guards(state, |state, _, row, table, keys, columns| {
+            let chunk = unsafe { R::chunk(row, ChunkContext::new(table, keys, columns)) };
             fold(state, chunk)
         });
         match flow {
@@ -621,8 +621,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
     #[inline]
     pub fn fold<S, G: FnMut(S, R::Chunk<'_>) -> S>(&mut self, state: S, mut fold: G) -> S {
         self.update();
-        self.guards(state, |state, _, row, _, keys, columns| {
-            let chunk = unsafe { R::chunk(row, ChunkContext::new(keys, columns)) };
+        self.guards(state, |state, _, row, table, keys, columns| {
+            let chunk = unsafe { R::chunk(row, ChunkContext::new(table, keys, columns)) };
             fold(state, chunk)
         })
     }
@@ -677,7 +677,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
         let keys = inner.keys();
         if keys.len() > 0 {
             Ok(lock(indices, &inner, || {
-                let context = ItemContext::new(keys, inner.columns());
+                let context = ItemContext::new(table, keys, inner.columns());
                 for i in 0..keys.len() {
                     let item = unsafe { R::item(row, context.with(i)) };
                     state = match fold(state, item) {
@@ -707,7 +707,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
         let keys = inner.keys();
         if keys.len() > 0 {
             Ok(lock(indices, &inner, || {
-                let context = ItemContext::new(keys, inner.columns());
+                let context = ItemContext::new(table, keys, inner.columns());
                 for i in 0..keys.len() {
                     let item = unsafe { R::item(row, context.with(i)) };
                     state = fold(state, item);
@@ -751,7 +751,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
             let row = slot.row() as usize;
             let keys = inner.keys();
             debug_assert_eq!(keys.get(row).copied(), Some(key));
-            let context = ItemContext::new(keys, inner.columns());
+            let context = ItemContext::new(table, keys, inner.columns());
             let item = unsafe { R::item(state, context.with(row)) };
             find(Ok(item))
         })
@@ -775,7 +775,7 @@ impl<'d, R: Row> Split<'d, '_, R, Chunk> {
         let keys = inner.keys();
         if keys.len() > 0 {
             Some(lock(indices, &inner, || {
-                let context = ChunkContext::new(keys, inner.columns());
+                let context = ChunkContext::new(table, keys, inner.columns());
                 map(unsafe { R::chunk(row, context) })
             }))
         } else {

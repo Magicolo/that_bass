@@ -12,11 +12,12 @@ use std::{
     num::NonZeroUsize,
 };
 
-pub struct Destroy<'d> {
+pub struct Destroy<'d, F: Filter = ()> {
     database: &'d Database,
     keys: HashSet<Key>,
     pending: Vec<(Key, &'d Slot, u32)>,
-    sorted: HashMap<u32, State<'d>>,
+    sorted: HashMap<u32, Option<State<'d>>>,
+    _marker: PhantomData<fn(F)>,
 }
 
 /// Destroys all keys in tables that satisfy the filter `F`.
@@ -39,6 +40,7 @@ impl Database {
             keys: HashSet::new(),
             pending: Vec::new(),
             sorted: HashMap::new(),
+            _marker: PhantomData,
         }
     }
 
@@ -52,7 +54,7 @@ impl Database {
     }
 }
 
-impl<'d> Destroy<'d> {
+impl<'d, F: Filter> Destroy<'d, F> {
     #[inline]
     pub fn one(&mut self, key: Key) -> Result<(), Error> {
         let (slot, table) = self.database.keys().get(key)?;
@@ -64,6 +66,20 @@ impl<'d> Destroy<'d> {
         keys.into_iter()
             .filter_map(|key| self.one(key).ok())
             .count()
+    }
+
+    pub fn filter<G: Filter>(mut self) -> Destroy<'d, (F, G)> {
+        self.sorted.retain(|_, state| match state {
+            Some(state) => G::filter(state.table, self.database),
+            None => true,
+        });
+        Destroy {
+            database: self.database,
+            keys: self.keys,
+            pending: self.pending,
+            sorted: self.sorted,
+            _marker: PhantomData,
+        }
     }
 
     pub fn resolve(&mut self) -> usize {
@@ -81,15 +97,16 @@ impl<'d> Destroy<'d> {
     }
 
     pub fn clear(&mut self) {
-        self.pending.clear();
-        for state in self.sorted.values_mut() {
+        debug_assert_eq!(self.keys.len(), 0);
+        debug_assert_eq!(self.pending.len(), 0);
+        for state in self.sorted.values_mut().flatten() {
             state.rows.clear();
         }
     }
 
     fn resolve_sorted(&mut self) {
-        for state in self.sorted.values_mut() {
-            let (mut inner, low, high) = Self::filter(
+        for state in self.sorted.values_mut().flatten() {
+            let (mut inner, low, high) = Self::retain(
                 state.table,
                 &mut state.rows,
                 &mut self.keys,
@@ -176,25 +193,29 @@ impl<'d> Destroy<'d> {
         key: Key,
         slot: &'d Slot,
         table: u32,
-        sorted: &mut HashMap<u32, State<'d>>,
+        sorted: &mut HashMap<u32, Option<State<'d>>>,
         database: &'d Database,
     ) -> Result<(), Error> {
         match sorted.get_mut(&table) {
-            Some(state) => state.rows.push((key, slot, u32::MAX)),
+            Some(state) => match state {
+                Some(state) => Ok(state.rows.push((key, slot, u32::MAX))),
+                None => Err(Error::FilterDoesNotMatch),
+            },
             None => {
-                sorted.insert(
-                    table,
-                    State {
-                        table: unsafe { database.tables().get_unchecked(table as _) },
-                        rows: vec![(key, slot, u32::MAX)],
-                    },
-                );
+                let table = unsafe { database.tables().get_unchecked(table as _) };
+                let state = if F::filter(table, database) {
+                    let rows = vec![(key, slot, u32::MAX)];
+                    Some(State { table, rows })
+                } else {
+                    None
+                };
+                sorted.insert(table.index(), state);
+                Ok(())
             }
         }
-        Ok(())
     }
 
-    fn filter<'a>(
+    fn retain<'a>(
         table: &'a Table,
         rows: &mut Vec<(Key, &'d Slot, u32)>,
         keys: &mut HashSet<Key>,
@@ -226,12 +247,6 @@ impl<'d> Destroy<'d> {
             }
         }
         (inner, low, high)
-    }
-}
-
-impl Drop for Destroy<'_> {
-    fn drop(&mut self) {
-        self.resolve();
     }
 }
 

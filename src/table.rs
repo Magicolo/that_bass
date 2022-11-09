@@ -305,12 +305,12 @@ impl Table {
     }
 
     #[inline]
-    pub fn column<D: Datum>(&self) -> Result<usize, Error> {
+    pub(crate) fn column<D: Datum>(&self) -> Result<usize, Error> {
         self.column_with(TypeId::of::<D>())
     }
 
     #[inline]
-    pub fn column_with(&self, identifier: TypeId) -> Result<usize, Error> {
+    pub(crate) fn column_with(&self, identifier: TypeId) -> Result<usize, Error> {
         self.types
             .binary_search(&identifier)
             .map_err(|_| Error::MissingColumn)

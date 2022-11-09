@@ -13,6 +13,14 @@ pub mod table;
 pub mod template;
 
 /*
+    TODO: A mechanism to detect `OnAdd<T>/OnRemove<T>/OnCreate<T>`:
+        - An additional hidden datum `Added/Removed/Created` would be added to rows when....
+        - What to do about `OnDestroy`.
+    TODO: `Add<T>/AddAll<T>` could provide a `resolve_with` that takes an `F: FnMut(Key, T::Item<'_>)` that would be called for
+    each newly added item...
+        - This may be deadlock sensitive and costly in terms of contention since both the `source` and `target` locks need to
+        be held at that moment.
+        - Perhaps another mechanism?
     TODO: Remove empty tables when calling `Tables::shrink`.
         - Requires to stop using `Table::index`.
     TODO: Queries don't prevent visiting a key twice if another thread resolves a move operation from a visited table to an unvisited
@@ -182,6 +190,7 @@ pub enum Error {
     WrongGeneration,
     WrongGenerationOrTable,
     WrongRow,
+    FilterDoesNotMatch,
 }
 
 pub struct Database {

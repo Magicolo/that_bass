@@ -17,8 +17,17 @@ pub struct Write<D>(usize, PhantomData<fn(D)>);
 
 pub struct DeclareContext<'a>(&'a mut HashSet<Access>);
 pub struct InitializeContext<'a>(&'a Table);
-pub struct ItemContext<'a>(&'a [Key], &'a [Column], usize);
-pub struct ChunkContext<'a>(&'a [Key], &'a [Column]);
+pub struct ItemContext<'a> {
+    table: &'a Table,
+    keys: &'a [Key],
+    columns: &'a [Column],
+    row: usize,
+}
+pub struct ChunkContext<'a> {
+    table: &'a Table,
+    keys: &'a [Key],
+    columns: &'a [Column],
+}
 
 pub unsafe trait Row: 'static {
     type State;
@@ -108,66 +117,101 @@ impl<'a> InitializeContext<'a> {
 
 impl<'a> ItemContext<'a> {
     #[inline]
-    pub const fn new(keys: &'a [Key], columns: &'a [Column]) -> Self {
-        Self(keys, columns, 0)
+    pub const fn new(table: &'a Table, keys: &'a [Key], columns: &'a [Column]) -> Self {
+        Self {
+            table,
+            keys,
+            columns,
+            row: 0,
+        }
     }
 
     #[inline]
     pub const fn own(&self) -> Self {
-        Self(self.0, self.1, self.2)
+        Self {
+            table: self.table,
+            keys: self.keys,
+            columns: self.columns,
+            row: self.row,
+        }
     }
 
     #[inline]
-    pub const fn with(&self, index: usize) -> Self {
-        debug_assert!(index < self.0.len());
-        Self(self.0, self.1, index)
+    pub const fn with(&self, row: usize) -> Self {
+        debug_assert!(row < self.keys.len());
+        Self {
+            table: self.table,
+            keys: self.keys,
+            columns: self.columns,
+            row,
+        }
+    }
+
+    #[inline]
+    pub const fn table(&self) -> &'a Table {
+        self.table
     }
 
     #[inline]
     pub fn key(&self) -> Key {
-        unsafe { *get_unchecked(self.0, self.row()) }
+        unsafe { *get_unchecked(self.keys, self.row()) }
     }
 
     #[inline]
     pub const fn row(&self) -> usize {
-        self.2
+        self.row
     }
 
     #[inline]
     pub unsafe fn read<D: Datum>(&self, state: &Read<D>) -> &'a D {
-        get_unchecked(self.1, state.0).get(self.2)
+        debug_assert!(self.table.has::<D>());
+        get_unchecked(self.columns, state.0).get(self.row)
     }
 
     #[inline]
     pub unsafe fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut D {
-        get_unchecked(self.1, state.0).get(self.2)
+        debug_assert!(self.table.has::<D>());
+        get_unchecked(self.columns, state.0).get(self.row)
     }
 }
 
 impl<'a> ChunkContext<'a> {
     #[inline]
-    pub const fn new(keys: &'a [Key], columns: &'a [Column]) -> Self {
-        Self(keys, columns)
+    pub const fn new(table: &'a Table, keys: &'a [Key], columns: &'a [Column]) -> Self {
+        Self {
+            table,
+            keys,
+            columns,
+        }
     }
 
     #[inline]
     pub const fn own(&self) -> Self {
-        Self(self.0, self.1)
+        Self {
+            table: self.table,
+            keys: self.keys,
+            columns: self.columns,
+        }
     }
 
     #[inline]
-    pub const fn key(&self) -> &'a [Key] {
-        self.0
+    pub const fn table(&self) -> &'a Table {
+        self.table
+    }
+
+    #[inline]
+    pub const fn keys(&self) -> &'a [Key] {
+        self.keys
     }
 
     #[inline]
     pub unsafe fn read<D: Datum>(&self, state: &Read<D>) -> &'a [D] {
-        get_unchecked(self.1, state.0).get_all(self.0.len())
+        get_unchecked(self.columns, state.0).get_all(self.keys.len())
     }
 
     #[inline]
     pub unsafe fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut [D] {
-        get_unchecked(self.1, state.0).get_all(self.0.len())
+        get_unchecked(self.columns, state.0).get_all(self.keys.len())
     }
 }
 
@@ -202,7 +246,30 @@ unsafe impl Row for Key {
     }
     #[inline]
     unsafe fn chunk<'a>(_: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
-        context.key()
+        context.keys()
+    }
+}
+
+unsafe impl Row for Table {
+    type State = ();
+    type Read = ();
+    type Item<'a> = &'a Self;
+    type Chunk<'a> = &'a Self;
+
+    fn declare(_: DeclareContext) -> Result<(), Error> {
+        Ok(())
+    }
+    fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
+        Ok(())
+    }
+    fn read(_: &Self::State) -> <Self::Read as Row>::State {}
+    #[inline]
+    unsafe fn item<'a>(_: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
+        context.table()
+    }
+    #[inline]
+    unsafe fn chunk<'a>(_: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
+        context.table()
     }
 }
 

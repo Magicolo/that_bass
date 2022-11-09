@@ -11,15 +11,16 @@ use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{collections::HashMap, marker::PhantomData, mem, num::NonZeroUsize, sync::Arc};
 
 /// Adds template `T` to accumulated add operations.
-pub struct Add<'d, T: Template> {
+pub struct Add<'d, T: Template, F: Filter = ()> {
     database: &'d Database,
     keys: HashMap<Key, u32>,
     pending: Vec<(Key, &'d Slot, T, u32)>,
-    sorted: HashMap<u32, State<'d, T>>,
+    sorted: HashMap<u32, Option<State<'d, T>>>,
+    _marker: PhantomData<fn(F)>,
 }
 
 /// Adds template `T` to all keys in tables that satisfy the filter `F`.
-pub struct AddAll<'d, T: Template, F: Filter> {
+pub struct AddAll<'d, T: Template, F: Filter = ()> {
     database: &'d Database,
     index: usize,
     states: Vec<StateAll<T>>,
@@ -62,10 +63,11 @@ impl Database {
             keys: HashMap::new(),
             pending: Vec::new(),
             sorted: HashMap::new(),
+            _marker: PhantomData,
         })
     }
 
-    pub fn add_all<T: Template, F: Filter>(&self) -> Result<AddAll<T, F>, Error> {
+    pub fn add_all<T: Template>(&self) -> Result<AddAll<T>, Error> {
         // Validate metas here, but there is no need to store them.
         ShareMeta::<T>::from(self).map(|_| AddAll {
             database: self,
@@ -76,7 +78,7 @@ impl Database {
     }
 }
 
-impl<'d, T: Template> Add<'d, T> {
+impl<'d, T: Template, F: Filter> Add<'d, T, F> {
     #[inline]
     pub fn one(&mut self, key: Key, template: T) -> Result<(), Error> {
         let (slot, table) = self.database.keys().get(key)?;
@@ -89,6 +91,30 @@ impl<'d, T: Template> Add<'d, T> {
             .into_iter()
             .filter_map(|(key, template)| self.one(key, template).ok())
             .count()
+    }
+
+    pub fn filter<G: Filter>(mut self) -> Add<'d, T, (F, G)> {
+        debug_assert_eq!(self.keys.len(), 0);
+        debug_assert_eq!(self.pending.len(), 0);
+        self.sorted.retain(|_, state| match state {
+            Some(state) => G::filter(&state.source, self.database),
+            None => true,
+        });
+        Add {
+            database: self.database,
+            keys: self.keys,
+            pending: self.pending,
+            sorted: self.sorted,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        debug_assert_eq!(self.keys.len(), 0);
+        debug_assert_eq!(self.pending.len(), 0);
+        for state in self.sorted.values_mut().flatten() {
+            state.rows.clear();
+        }
     }
 
     pub fn resolve(&mut self) -> usize {
@@ -109,7 +135,7 @@ impl<'d, T: Template> Add<'d, T> {
 
     fn resolve_sorted(&mut self) {
         // TODO: Maybe do not iterate over all pairs?
-        for state in self.sorted.values_mut() {
+        for state in self.sorted.values_mut().flatten() {
             move_to(
                 (&mut self.keys, &mut state.templates, &mut self.pending),
                 self.database,
@@ -119,12 +145,12 @@ impl<'d, T: Template> Add<'d, T> {
                 &state.inner.copy,
                 &[],
                 |(keys, templates, pending), rows| {
-                    Self::filter(&state.source, keys, rows, templates, pending)
+                    Self::retain(&state.source, keys, rows, templates, pending)
                 },
                 |(keys, templates, pending), rows| {
                     // The keys do not need to be moved, simply write the row data.
                     let inner = state.source.inner.read();
-                    Self::filter(&state.source, keys, rows, templates, pending);
+                    Self::retain(&state.source, keys, rows, templates, pending);
                     if rows.len() > 0 && T::SIZE > 0 {
                         lock(&state.inner.apply, &inner, || {
                             let context = ApplyContext::new(inner.columns());
@@ -167,35 +193,40 @@ impl<'d, T: Template> Add<'d, T> {
         slot: &'d Slot,
         template: T,
         table: u32,
-        sorted: &mut HashMap<u32, State<'d, T>>,
+        sorted: &mut HashMap<u32, Option<State<'d, T>>>,
         database: &'d Database,
     ) -> Result<(), Error> {
         match sorted.get_mut(&table) {
-            Some(state) => {
-                state.rows.push((key, slot, u32::MAX));
-                state.templates.push(template);
-                Ok(())
-            }
+            Some(state) => match state {
+                Some(state) => {
+                    state.rows.push((key, slot, u32::MAX));
+                    state.templates.push(template);
+                    Ok(())
+                }
+                None => Err(Error::FilterDoesNotMatch),
+            },
             None => {
                 let share = ShareTable::from(table, database)?;
                 let share = share.read();
-                sorted.insert(
-                    table,
-                    State {
+                let state = if F::filter(&share.source, database) {
+                    Some(State {
                         source: share.source.clone(),
                         target: share.target.clone(),
                         inner: share.inner.clone(),
                         rows: vec![(key, slot, u32::MAX)],
                         templates: vec![template],
-                    },
-                );
+                    })
+                } else {
+                    None
+                };
+                sorted.insert(table, state);
                 Ok(())
             }
         }
     }
 
     /// Call this while holding a lock on `table`.
-    fn filter<'a>(
+    fn retain<'a>(
         table: &'a Table,
         keys: &mut HashMap<Key, u32>,
         rows: &mut Vec<(Key, &'d Slot, u32)>,
@@ -244,12 +275,6 @@ impl<'d, T: Template> Add<'d, T> {
 
         debug_assert_eq!(low <= high, rows.len() > 0);
         (low, high)
-    }
-}
-
-impl<T: Template> Drop for Add<'_, T> {
-    fn drop(&mut self) {
-        self.resolve();
     }
 }
 
