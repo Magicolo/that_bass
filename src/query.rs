@@ -23,7 +23,8 @@ pub struct Query<'d, R: Row, F = (), I = Item> {
     index: usize,
     indices: Vec<u32>,         // May be reordered.
     states: Vec<State<'d, R>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
-    _marker: PhantomData<fn(F, I)>,
+    filter: F,
+    _marker: PhantomData<fn(I)>,
 }
 
 pub struct Split<'d, 'a, R: Row, I = Item> {
@@ -45,7 +46,7 @@ pub struct By<'d, V> {
 struct State<'d, R: Row> {
     state: R::State,
     table: &'d Table,
-    indices: Box<[(usize, Access)]>,
+    locks: Box<[(usize, Access)]>,
 }
 
 struct Errors<'d, 'a, R: Row, V> {
@@ -65,6 +66,7 @@ impl Database {
             indices: Vec::new(),
             states: Vec::new(),
             index: 0,
+            filter: (),
             _marker: PhantomData,
         })
     }
@@ -85,31 +87,33 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         })
     }
 
-    pub fn read(&self) -> Query<'d, R::Read, F, I> {
+    pub fn read(self) -> Query<'d, R::Read, F, I> {
         Query {
             database: self.database,
             indices: self.indices.clone(),
             states: self
                 .states
-                .iter()
-                .map(|state| State {
-                    state: R::read(&state.state),
-                    table: state.table,
-                    indices: state
-                        .indices
-                        .iter()
-                        .map(|&(i, access)| (i, access.read()))
-                        .collect(),
+                .into_iter()
+                .map(|mut state| {
+                    for (_, access) in state.locks.iter_mut() {
+                        *access = access.read();
+                    }
+                    State {
+                        state: R::read(&state.state),
+                        table: state.table,
+                        locks: state.locks,
+                    }
                 })
                 .collect(),
+            filter: self.filter,
             index: self.index,
             _marker: PhantomData,
         }
     }
 
-    pub fn filter<G: Filter>(mut self) -> Query<'d, R, (F, G), I> {
+    pub fn filter<G: Filter>(mut self, filter: G) -> Query<'d, R, (F, G), I> {
         self.states
-            .retain(|state| G::filter(state.table, self.database));
+            .retain(|state| filter.filter(state.table, self.database));
         self.indices.clear();
         self.indices.extend(0..self.states.len() as u32);
         Query {
@@ -117,6 +121,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             indices: self.indices,
             states: self.states,
             index: self.index,
+            filter: self.filter.and(filter),
             _marker: PhantomData,
         }
     }
@@ -143,7 +148,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 let State {
                     state: row,
                     table,
-                    indices,
+                    locks,
                 } = unsafe { get_unchecked(states, *index as usize) };
                 let Some(inner) = table.inner.try_read() else {
                     return Err(state);
@@ -152,7 +157,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 if keys.len() == 0 {
                     return Ok(Continue(state));
                 }
-                try_lock(state, indices, &inner, |state| {
+                try_lock(state, locks, &inner, |state| {
                     fold(state, *index, row, table, keys, inner.columns())
                 })
             },
@@ -160,14 +165,14 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 let State {
                     state: row,
                     table,
-                    indices,
+                    locks,
                 } = unsafe { get_unchecked_mut(states, *index as usize) };
                 let inner = table.inner.read();
                 let keys = inner.keys();
                 if keys.len() == 0 {
                     return Continue(state);
                 }
-                lock(indices, &inner, || {
+                lock(locks, &inner, || {
                     fold(state, *index, row, table, keys, inner.columns())
                 })
             },
@@ -188,7 +193,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 let State {
                     state: row,
                     table,
-                    indices,
+                    locks,
                 } = unsafe { get_unchecked(states, *index as usize) };
                 let Some(inner) = table.inner.try_read() else {
                     return Err(state);
@@ -197,7 +202,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 if keys.len() == 0 {
                     return Ok(state);
                 }
-                try_lock(state, indices, &inner, |state| {
+                try_lock(state, locks, &inner, |state| {
                     fold(state, *index, row, table, keys, inner.columns())
                 })
             },
@@ -205,14 +210,14 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 let State {
                     state: row,
                     table,
-                    indices,
+                    locks,
                 } = unsafe { get_unchecked_mut(states, *index as usize) };
                 let inner = table.inner.read();
                 let keys = inner.keys();
                 if keys.len() == 0 {
                     return state;
                 }
-                lock(indices, &inner, || {
+                lock(locks, &inner, || {
                     fold(state, *index, row, table, keys, inner.columns())
                 })
             },
@@ -220,25 +225,28 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
     }
 
     fn try_add(&mut self, table: &'d Table) -> Result<(), Error> {
-        if F::filter(table, self.database) {
+        if self.filter.filter(table, self.database) {
             // Initialize first to save some work if it fails.
             let state = R::initialize(InitializeContext::new(table))?;
-            let mut indices = Vec::new();
+            let mut locks = Vec::new();
             for &access in ShareAccess::<R>::from(self.database)?.iter() {
-                if let Ok(index) = table.column_with(access.identifier()) {
-                    indices.push((index, access));
+                if let Ok((index, meta)) = table.column_with(access.identifier()) {
+                    // No need to lock columns of size 0.
+                    if meta.size > 0 {
+                        locks.push((index, access));
+                    }
                 }
             }
             // The sorting of indices ensures that there cannot be a deadlock between `Rows` when locking multiple columns as long as this
             // happens while holding at most 1 table lock.
-            indices.sort_unstable_by_key(|&(index, _)| index);
+            locks.sort_unstable_by_key(|&(index, _)| index);
 
             let index = self.states.len() as _;
             self.indices.push(index);
             self.states.push(State {
                 state,
                 table,
-                indices: indices.into_boxed_slice(),
+                locks: locks.into_boxed_slice(),
             });
             Ok(())
         } else {
@@ -254,6 +262,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             indices: self.indices,
             states: self.states,
             index: self.index,
+            filter: self.filter,
             _marker: PhantomData,
         }
     }
@@ -419,7 +428,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             let State {
                 state,
                 table,
-                indices,
+                locks,
             } = match find_state(&self.states, old_table) {
                 Some((_, state)) => state,
                 None => break find(Err(Error::KeyNotInQuery(key))),
@@ -435,7 +444,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             };
             if new_table == table.index() {
                 debug_assert_eq!(old_table, table.index());
-                break lock(indices, &inner, || {
+                break lock(locks, &inner, || {
                     let row = slot.row() as usize;
                     let keys = inner.keys();
                     debug_assert_eq!(keys.get(row).copied(), Some(key));
@@ -590,6 +599,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
             indices: self.indices,
             states: self.states,
             index: self.index,
+            filter: self.filter,
             _marker: PhantomData,
         }
     }
@@ -671,12 +681,12 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
         let State {
             state: row,
             table,
-            indices,
+            locks,
         } = self.state;
         let inner = table.inner.read();
         let keys = inner.keys();
         if keys.len() > 0 {
-            Ok(lock(indices, &inner, || {
+            Ok(lock(locks, &inner, || {
                 let context = ItemContext::new(table, keys, inner.columns());
                 for i in 0..keys.len() {
                     let item = unsafe { R::item(row, context.with(i)) };
@@ -701,12 +711,12 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
         let State {
             state: row,
             table,
-            indices,
+            locks,
         } = self.state;
         let inner = table.inner.read();
         let keys = inner.keys();
         if keys.len() > 0 {
-            Ok(lock(indices, &inner, || {
+            Ok(lock(locks, &inner, || {
                 let context = ItemContext::new(table, keys, inner.columns());
                 for i in 0..keys.len() {
                     let item = unsafe { R::item(row, context.with(i)) };
@@ -737,7 +747,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
         let State {
             state,
             table,
-            indices,
+            locks,
         } = self.state;
 
         let inner = table.inner.read();
@@ -747,7 +757,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
             Ok(_) => return find(Err(Error::KeyNotInSplit(key))),
             Err(error) => return find(Err(error)),
         };
-        lock(indices, &inner, || {
+        lock(locks, &inner, || {
             let row = slot.row() as usize;
             let keys = inner.keys();
             debug_assert_eq!(keys.get(row).copied(), Some(key));
@@ -769,12 +779,12 @@ impl<'d, R: Row> Split<'d, '_, R, Chunk> {
         let State {
             state: row,
             table,
-            indices,
+            locks,
         } = self.state;
         let inner = table.inner.read();
         let keys = inner.keys();
         if keys.len() > 0 {
-            Some(lock(indices, &inner, || {
+            Some(lock(locks, &inner, || {
                 let context = ChunkContext::new(table, keys, inner.columns());
                 map(unsafe { R::chunk(row, context) })
             }))
@@ -907,53 +917,48 @@ fn find_state<'d, 'a, R: Row>(
 
 fn try_lock<T, S, F: FnOnce(S) -> T>(
     state: S,
-    mut indices: &[(usize, Access)],
+    locks: &[(usize, Access)],
     inner: &table::Inner,
     with: F,
 ) -> Result<T, S> {
-    while let Some((&(index, access), rest)) = indices.split_first() {
-        let column = unsafe { get_unchecked(inner.columns(), index) };
-        debug_assert_eq!(access.identifier(), column.meta().identifier());
-        if column.meta().size == 0 {
-            // No need to recurse since no lock needs to be accumulated.
-            indices = rest;
-            continue;
+    match locks.split_first() {
+        Some((&(index, access), rest)) => {
+            let column = unsafe { get_unchecked(inner.columns(), index) };
+            debug_assert_eq!(access.identifier(), column.meta().identifier());
+            debug_assert!(column.meta().size > 0);
+            match access {
+                Access::Read(_) => match column.data().try_read() {
+                    Some(_guard) => return try_lock(state, rest, inner, with),
+                    None => return Err(state),
+                },
+                Access::Write(_) => match column.data().try_write() {
+                    Some(_guard) => return try_lock(state, rest, inner, with),
+                    None => return Err(state),
+                },
+            }
         }
-
-        match access {
-            Access::Read(_) => match column.data().try_read() {
-                Some(_guard) => return try_lock(state, rest, inner, with),
-                None => return Err(state),
-            },
-            Access::Write(_) => match column.data().try_write() {
-                Some(_guard) => return try_lock(state, rest, inner, with),
-                None => return Err(state),
-            },
-        }
+        None => Ok(with(state)),
     }
-    Ok(with(state))
 }
 
-fn lock<T, F: FnOnce() -> T>(mut indices: &[(usize, Access)], inner: &table::Inner, with: F) -> T {
-    while let Some((&(index, access), rest)) = indices.split_first() {
-        let column = unsafe { get_unchecked(inner.columns(), index) };
-        debug_assert_eq!(access.identifier(), column.meta().identifier());
-        if column.meta().size == 0 {
-            // No need to recurse since no lock needs to be accumulated.
-            indices = rest;
-            continue;
-        }
+fn lock<T, F: FnOnce() -> T>(locks: &[(usize, Access)], inner: &table::Inner, with: F) -> T {
+    match locks.split_first() {
+        Some((&(index, access), rest)) => {
+            let column = unsafe { get_unchecked(inner.columns(), index) };
+            debug_assert_eq!(access.identifier(), column.meta().identifier());
+            debug_assert!(column.meta().size > 0);
 
-        match access {
-            Access::Read(_) => {
-                let _guard = column.data().read();
-                return lock(rest, inner, with);
-            }
-            Access::Write(_) => {
-                let _guard = column.data().write();
-                return lock(rest, inner, with);
+            match access {
+                Access::Read(_) => {
+                    let _guard = column.data().read();
+                    return lock(rest, inner, with);
+                }
+                Access::Write(_) => {
+                    let _guard = column.data().write();
+                    return lock(rest, inner, with);
+                }
             }
         }
+        None => with(),
     }
-    with()
 }

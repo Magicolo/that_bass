@@ -3,7 +3,7 @@ use crate::{
     table::{Column, Table},
     Database, Datum, Error, Meta,
 };
-use std::{marker::PhantomData, mem::size_of, sync::Arc};
+use std::{marker::PhantomData, sync::Arc};
 
 pub struct Apply<D>(usize, PhantomData<fn(D)>);
 pub struct DeclareContext<'a>(&'a mut Vec<&'static Meta>);
@@ -11,7 +11,6 @@ pub struct InitializeContext<'a>(&'a Table);
 pub struct ApplyContext<'a>(&'a [Column], usize);
 
 pub unsafe trait Template: 'static {
-    const SIZE: usize;
     type State: Send + Sync;
     fn declare(context: DeclareContext) -> Result<(), Error>;
     fn initialize(context: InitializeContext) -> Result<Self::State, Error>;
@@ -55,7 +54,7 @@ impl<'a> InitializeContext<'a> {
     }
 
     pub fn apply<D: Datum>(&self) -> Result<Apply<D>, Error> {
-        Ok(Apply(self.0.column::<D>()?, PhantomData))
+        Ok(Apply(self.0.column::<D>()?.0, PhantomData))
     }
 }
 
@@ -95,7 +94,6 @@ impl<T: Template> ShareMeta<T> {
 }
 
 unsafe impl<D: Datum> Template for D {
-    const SIZE: usize = size_of::<D>();
     type State = Apply<D>;
 
     fn declare(mut context: DeclareContext) -> Result<(), Error> {
@@ -115,7 +113,6 @@ unsafe impl<D: Datum> Template for D {
 macro_rules! tuple {
     ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
         unsafe impl<$($t: Template,)*> Template for ($($t,)*) {
-            const SIZE: usize = 0 $(+ $t::SIZE)*;
             type State = ($($t::State,)*);
 
             fn declare(mut _context: DeclareContext) -> Result<(), Error> {

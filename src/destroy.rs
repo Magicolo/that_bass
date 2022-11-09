@@ -8,7 +8,6 @@ use crate::{
 use parking_lot::RwLockWriteGuard;
 use std::{
     collections::{HashMap, HashSet},
-    marker::PhantomData,
     num::NonZeroUsize,
 };
 
@@ -17,7 +16,7 @@ pub struct Destroy<'d, F: Filter = ()> {
     keys: HashSet<Key>,
     pending: Vec<(Key, &'d Slot, u32)>,
     sorted: HashMap<u32, Option<State<'d>>>,
-    _marker: PhantomData<fn(F)>,
+    filter: F,
 }
 
 /// Destroys all keys in tables that satisfy the filter `F`.
@@ -25,7 +24,7 @@ pub struct DestroyAll<'d, F: Filter = ()> {
     database: &'d Database,
     index: usize,
     tables: Vec<&'d Table>,
-    _marker: PhantomData<fn(F)>,
+    filter: F,
 }
 
 struct State<'d> {
@@ -40,7 +39,7 @@ impl Database {
             keys: HashSet::new(),
             pending: Vec::new(),
             sorted: HashMap::new(),
-            _marker: PhantomData,
+            filter: (),
         }
     }
 
@@ -49,7 +48,7 @@ impl Database {
             database: self,
             index: 0,
             tables: Vec::new(),
-            _marker: PhantomData,
+            filter: (),
         }
     }
 }
@@ -58,7 +57,14 @@ impl<'d, F: Filter> Destroy<'d, F> {
     #[inline]
     pub fn one(&mut self, key: Key) -> Result<(), Error> {
         let (slot, table) = self.database.keys().get(key)?;
-        Self::sort(key, slot, table, &mut self.sorted, self.database)
+        Self::sort(
+            key,
+            slot,
+            table,
+            &mut self.sorted,
+            &self.filter,
+            self.database,
+        )
     }
 
     #[inline]
@@ -68,9 +74,9 @@ impl<'d, F: Filter> Destroy<'d, F> {
             .count()
     }
 
-    pub fn filter<G: Filter>(mut self) -> Destroy<'d, (F, G)> {
+    pub fn filter<G: Filter>(mut self, filter: G) -> Destroy<'d, (F, G)> {
         self.sorted.retain(|_, state| match state {
-            Some(state) => G::filter(state.table, self.database),
+            Some(state) => filter.filter(state.table, self.database),
             None => true,
         });
         Destroy {
@@ -78,7 +84,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             keys: self.keys,
             pending: self.pending,
             sorted: self.sorted,
-            _marker: PhantomData,
+            filter: self.filter.and(filter),
         }
     }
 
@@ -86,7 +92,14 @@ impl<'d, F: Filter> Destroy<'d, F> {
         self.resolve_sorted();
         while self.pending.len() > 0 {
             for (key, slot, table) in self.pending.drain(..) {
-                let _ = Self::sort(key, slot, table, &mut self.sorted, self.database);
+                let _ = Self::sort(
+                    key,
+                    slot,
+                    table,
+                    &mut self.sorted,
+                    &self.filter,
+                    self.database,
+                );
             }
             self.resolve_sorted();
         }
@@ -194,6 +207,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         slot: &'d Slot,
         table: u32,
         sorted: &mut HashMap<u32, Option<State<'d>>>,
+        filter: &F,
         database: &'d Database,
     ) -> Result<(), Error> {
         match sorted.get_mut(&table) {
@@ -203,7 +217,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             },
             None => {
                 let table = unsafe { database.tables().get_unchecked(table as _) };
-                let state = if F::filter(table, database) {
+                let state = if filter.filter(table, database) {
                     let rows = vec![(key, slot, u32::MAX)];
                     Some(State { table, rows })
                 } else {
@@ -251,20 +265,21 @@ impl<'d, F: Filter> Destroy<'d, F> {
 }
 
 impl<'d, F: Filter> DestroyAll<'d, F> {
-    pub fn filter<G: Filter>(mut self) -> DestroyAll<'d, (F, G)> {
-        self.tables.retain(|table| G::filter(table, self.database));
+    pub fn filter<G: Filter>(mut self, filter: G) -> DestroyAll<'d, (F, G)> {
+        self.tables
+            .retain(|table| filter.filter(table, self.database));
         DestroyAll {
             database: self.database,
             index: self.index,
             tables: self.tables,
-            _marker: PhantomData,
+            filter: self.filter.and(filter),
         }
     }
 
     pub fn resolve(&mut self) -> usize {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
-            if F::filter(table, self.database) {
+            if self.filter.filter(table, self.database) {
                 self.tables.push(table);
             }
         }

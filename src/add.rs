@@ -8,7 +8,7 @@ use crate::{
     Database, Error,
 };
 use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
-use std::{collections::HashMap, marker::PhantomData, mem, num::NonZeroUsize, sync::Arc};
+use std::{collections::HashMap, mem, num::NonZeroUsize, sync::Arc};
 
 /// Adds template `T` to accumulated add operations.
 pub struct Add<'d, T: Template, F: Filter = ()> {
@@ -16,7 +16,7 @@ pub struct Add<'d, T: Template, F: Filter = ()> {
     keys: HashMap<Key, u32>,
     pending: Vec<(Key, &'d Slot, T, u32)>,
     sorted: HashMap<u32, Option<State<'d, T>>>,
-    _marker: PhantomData<fn(F)>,
+    filter: F,
 }
 
 /// Adds template `T` to all keys in tables that satisfy the filter `F`.
@@ -24,7 +24,7 @@ pub struct AddAll<'d, T: Template, F: Filter = ()> {
     database: &'d Database,
     index: usize,
     states: Vec<StateAll<T>>,
-    _marker: PhantomData<fn(F)>,
+    filter: F,
 }
 
 struct State<'d, T: Template> {
@@ -63,7 +63,7 @@ impl Database {
             keys: HashMap::new(),
             pending: Vec::new(),
             sorted: HashMap::new(),
-            _marker: PhantomData,
+            filter: (),
         })
     }
 
@@ -73,7 +73,7 @@ impl Database {
             database: self,
             index: 0,
             states: Vec::new(),
-            _marker: PhantomData,
+            filter: (),
         })
     }
 }
@@ -82,7 +82,15 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
     #[inline]
     pub fn one(&mut self, key: Key, template: T) -> Result<(), Error> {
         let (slot, table) = self.database.keys().get(key)?;
-        Self::sort(key, slot, template, table, &mut self.sorted, self.database)
+        Self::sort(
+            key,
+            slot,
+            template,
+            table,
+            &mut self.sorted,
+            &self.filter,
+            self.database,
+        )
     }
 
     #[inline]
@@ -93,11 +101,11 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
             .count()
     }
 
-    pub fn filter<G: Filter>(mut self) -> Add<'d, T, (F, G)> {
+    pub fn filter<G: Filter>(mut self, filter: G) -> Add<'d, T, (F, G)> {
         debug_assert_eq!(self.keys.len(), 0);
         debug_assert_eq!(self.pending.len(), 0);
         self.sorted.retain(|_, state| match state {
-            Some(state) => G::filter(&state.source, self.database),
+            Some(state) => filter.filter(&state.source, self.database),
             None => true,
         });
         Add {
@@ -105,7 +113,7 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
             keys: self.keys,
             pending: self.pending,
             sorted: self.sorted,
-            _marker: PhantomData,
+            filter: self.filter.and(filter),
         }
     }
 
@@ -125,7 +133,15 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
             }
 
             for (key, slot, template, table) in self.pending.drain(..) {
-                let _ = Self::sort(key, slot, template, table, &mut self.sorted, self.database);
+                let _ = Self::sort(
+                    key,
+                    slot,
+                    template,
+                    table,
+                    &mut self.sorted,
+                    &self.filter,
+                    self.database,
+                );
             }
         }
         let count = self.keys.len();
@@ -151,7 +167,7 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
                     // The keys do not need to be moved, simply write the row data.
                     let inner = state.source.inner.read();
                     Self::retain(&state.source, keys, rows, templates, pending);
-                    if rows.len() > 0 && T::SIZE > 0 {
+                    if rows.len() > 0 {
                         lock(&state.inner.apply, &inner, || {
                             let context = ApplyContext::new(inner.columns());
                             for (i, template) in templates.drain(..).enumerate() {
@@ -163,21 +179,14 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
                             }
                             rows.clear();
                         });
-                    } else {
-                        rows.clear();
-                        templates.clear();
                     }
                 },
                 |(_, templates, _), inner, index| {
                     // Initialize missing data `T` in target.
-                    if T::SIZE > 0 {
-                        // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
-                        let context = ApplyContext::new(inner.columns());
-                        for (i, template) in templates.drain(..).enumerate() {
-                            unsafe { template.apply(&state.inner.state, context.with(index + i)) };
-                        }
-                    } else {
-                        templates.clear();
+                    // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
+                    let context = ApplyContext::new(inner.columns());
+                    for (i, template) in templates.drain(..).enumerate() {
+                        unsafe { template.apply(&state.inner.state, context.with(index + i)) };
                     }
                 },
             );
@@ -194,6 +203,7 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
         template: T,
         table: u32,
         sorted: &mut HashMap<u32, Option<State<'d, T>>>,
+        filter: &F,
         database: &'d Database,
     ) -> Result<(), Error> {
         match sorted.get_mut(&table) {
@@ -208,7 +218,7 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
             None => {
                 let share = ShareTable::from(table, database)?;
                 let share = share.read();
-                let state = if F::filter(&share.source, database) {
+                let state = if filter.filter(&share.source, database) {
                     Some(State {
                         source: share.source.clone(),
                         target: share.target.clone(),
@@ -290,13 +300,15 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
     pub fn resolve_with<G: FnMut() -> T>(&mut self, set: bool, with: G) -> usize {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
-            if let Ok(share) = ShareTable::from(table.index(), self.database) {
-                let share = share.read();
-                self.states.push(StateAll {
-                    source: share.source.clone(),
-                    target: share.target.clone(),
-                    inner: share.inner.clone(),
-                });
+            if self.filter.filter(table, self.database) {
+                if let Ok(share) = ShareTable::from(table.index(), self.database) {
+                    let share = share.read();
+                    self.states.push(StateAll {
+                        source: share.source.clone(),
+                        target: share.target.clone(),
+                        inner: share.inner.clone(),
+                    });
+                }
             }
         }
 
@@ -313,7 +325,7 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
                     let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
                     let source = state.source.inner.try_write().ok_or(sum)?;
                     Self::resolve_tables(source, target, state, self.database, with)
-                } else if T::SIZE > 0 && set {
+                } else if set {
                     let inner = state.source.inner.try_read().ok_or(sum)?;
                     Self::resolve_table(inner, state, with)
                 } else {
@@ -330,7 +342,7 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
                     let target = state.target.inner.upgradable_read();
                     let source = state.source.inner.write();
                     Self::resolve_tables(source, target, state, self.database, with)
-                } else if T::SIZE > 0 && set {
+                } else if set {
                     let inner = state.source.inner.read();
                     Self::resolve_table(inner, state, with)
                 } else {
@@ -363,12 +375,10 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
             &[],
         );
 
-        if T::SIZE > 0 {
-            // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
-            let context = ApplyContext::new(target.columns());
-            for i in 0..count.get() {
-                unsafe { with().apply(&state.inner.state, context.with(start + i)) };
-            }
+        // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
+        let context = ApplyContext::new(target.columns());
+        for i in 0..count.get() {
+            unsafe { with().apply(&state.inner.state, context.with(start + i)) };
         }
 
         target.commit(count);
@@ -391,7 +401,6 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         let Some(count) = NonZeroUsize::new(inner.count()) else {
             return 0;
         };
-
         lock(&state.inner.apply, &inner, || {
             let context = ApplyContext::new(inner.columns());
             for i in 0..count.get() {
@@ -413,24 +422,31 @@ impl<T: Template> ShareTable<T> {
             let state = T::initialize(InitializeContext::new(&target))?;
 
             let mut copy = Vec::new();
-            for (source, &identifier) in source.types().iter().enumerate() {
-                copy.push((source, target.column_with(identifier)?));
+            for source in source.metas().iter().enumerate() {
+                let target = target.column_with(source.1.identifier())?;
+                debug_assert_eq!(source.1.identifier(), target.1.identifier());
+                if target.1.size > 0 {
+                    copy.push((source.0, target.0));
+                }
             }
 
-            let mut add = Vec::new();
+            let mut apply = Vec::new();
             for meta in metas.iter() {
-                add.push(target.column_with(meta.identifier())?);
+                let (index, meta) = target.column_with(meta.identifier())?;
+                if meta.size > 0 {
+                    apply.push(index);
+                }
             }
 
-            debug_assert_eq!(source.types().len(), copy.len());
-            debug_assert_eq!(target.types().len(), copy.len() + add.len());
+            debug_assert_eq!(source.metas().len(), copy.len());
+            debug_assert_eq!(target.metas().len(), copy.len() + apply.len());
 
             Ok(ShareTable::<T> {
                 source,
                 target,
                 inner: Arc::new(Inner {
                     state,
-                    apply: add.into_boxed_slice(),
+                    apply: apply.into_boxed_slice(),
                     copy: copy.into_boxed_slice(),
                 }),
             })

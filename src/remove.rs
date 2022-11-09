@@ -17,7 +17,8 @@ pub struct Remove<'d, T: Template, F: Filter = ()> {
     keys: HashMap<Key, u32>,
     pending: Vec<(Key, &'d Slot, u32)>,
     sorted: HashMap<u32, Option<State<'d>>>,
-    _marker: PhantomData<fn(T, F)>,
+    filter: F,
+    _marker: PhantomData<fn(T)>,
 }
 
 /// Removes template `T` to all keys in tables that satisfy the filter `F`.
@@ -25,7 +26,8 @@ pub struct RemoveAll<'d, T: Template, F: Filter = ()> {
     database: &'d Database,
     index: usize,
     states: Vec<StateAll>,
-    _marker: PhantomData<fn(T, F)>,
+    filter: F,
+    _marker: PhantomData<fn(T)>,
 }
 
 struct State<'d> {
@@ -61,6 +63,7 @@ impl Database {
             keys: HashMap::new(),
             pending: Vec::new(),
             sorted: HashMap::new(),
+            filter: (),
             _marker: PhantomData,
         })
     }
@@ -71,6 +74,7 @@ impl Database {
             database: self,
             index: 0,
             states: Vec::new(),
+            filter: (),
             _marker: PhantomData,
         })
     }
@@ -80,7 +84,14 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
     #[inline]
     pub fn one(&mut self, key: Key) -> Result<(), Error> {
         let (slot, table) = self.database.keys().get(key)?;
-        Self::sort(key, slot, table, &mut self.sorted, self.database)
+        Self::sort(
+            key,
+            slot,
+            table,
+            &mut self.sorted,
+            &self.filter,
+            self.database,
+        )
     }
 
     #[inline]
@@ -90,11 +101,11 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
             .count()
     }
 
-    pub fn filter<G: Filter>(mut self) -> Remove<'d, T, (F, G)> {
+    pub fn filter<G: Filter>(mut self, filter: G) -> Remove<'d, T, (F, G)> {
         debug_assert_eq!(self.keys.len(), 0);
         debug_assert_eq!(self.pending.len(), 0);
         self.sorted.retain(|_, state| match state {
-            Some(state) => G::filter(&state.source, self.database),
+            Some(state) => filter.filter(&state.source, self.database),
             None => true,
         });
         Remove {
@@ -102,6 +113,7 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
             keys: self.keys,
             pending: self.pending,
             sorted: self.sorted,
+            filter: self.filter.and(filter),
             _marker: PhantomData,
         }
     }
@@ -122,7 +134,14 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
             }
 
             for (key, slot, table) in self.pending.drain(..) {
-                let _ = Self::sort(key, slot, table, &mut self.sorted, self.database);
+                let _ = Self::sort(
+                    key,
+                    slot,
+                    table,
+                    &mut self.sorted,
+                    &self.filter,
+                    self.database,
+                );
             }
         }
         let count = self.keys.len();
@@ -155,6 +174,7 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
         slot: &'d Slot,
         table: u32,
         sorted: &mut HashMap<u32, Option<State<'d>>>,
+        filter: &F,
         database: &'d Database,
     ) -> Result<(), Error> {
         match sorted.get_mut(&table) {
@@ -165,7 +185,7 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
             None => {
                 let share = ShareTable::<T>::from(table, database)?;
                 let share = share.read();
-                let state = if F::filter(&share.source, database) {
+                let state = if filter.filter(&share.source, database) {
                     Some(State {
                         source: share.source.clone(),
                         target: share.target.clone(),
@@ -231,13 +251,14 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
 }
 
 impl<'d, T: Template, F: Filter> RemoveAll<'d, T, F> {
-    pub fn filter<G: Filter>(mut self) -> RemoveAll<'d, T, (F, G)> {
+    pub fn filter<G: Filter>(mut self, filter: G) -> RemoveAll<'d, T, (F, G)> {
         self.states
-            .retain(|state| G::filter(&state.source, self.database));
+            .retain(|state| filter.filter(&state.source, self.database));
         RemoveAll {
             database: self.database,
             index: self.index,
             states: self.states,
+            filter: self.filter.and(filter),
             _marker: PhantomData,
         }
     }
@@ -245,7 +266,7 @@ impl<'d, T: Template, F: Filter> RemoveAll<'d, T, F> {
     pub fn resolve(&mut self) -> usize {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
-            if F::filter(table, self.database) {
+            if self.filter.filter(table, self.database) {
                 if let Ok(share) = ShareTable::<T>::from(table.index(), self.database) {
                     let share = share.read();
                     if share.source.index() != share.target.index() {
@@ -273,7 +294,7 @@ impl<'d, T: Template, F: Filter> RemoveAll<'d, T, F> {
                     let source = state.source.inner.try_write().ok_or(sum)?;
                     Self::resolve_tables(source, target, state, self.database)
                 } else {
-                    0
+                    unreachable!("Same source and target is supposed to be filtered.")
                 };
                 Ok(sum + count)
             },
@@ -287,7 +308,7 @@ impl<'d, T: Template, F: Filter> RemoveAll<'d, T, F> {
                     let source = state.source.inner.write();
                     Self::resolve_tables(source, target, state, self.database)
                 } else {
-                    0
+                    unreachable!("Same source and target is supposed to be filtered.")
                 }
             },
         )
@@ -344,26 +365,29 @@ impl<T: Template> ShareTable<T> {
             let target = database.tables().find_or_add(target_metas);
 
             let mut copy = Vec::new();
-            for (target, &identifier) in target.types().iter().enumerate() {
-                copy.push((source.column_with(identifier)?, target));
-            }
-
-            let mut remove = Vec::new();
-            for meta in metas.iter() {
-                if let Ok(index) = source.column_with(meta.identifier()) {
-                    remove.push(index);
+            for target in target.metas().iter().enumerate() {
+                let source = source.column_with(target.1.identifier())?;
+                debug_assert_eq!(source.1.identifier(), target.1.identifier());
+                if source.1.size > 0 {
+                    copy.push((source.0, target.0));
                 }
             }
 
-            debug_assert_eq!(source.types().len(), copy.len() + remove.len());
-            debug_assert_eq!(target.types().len(), copy.len());
+            let mut drop = Vec::new();
+            for meta in metas.iter() {
+                if let Ok((index, meta)) = source.column_with(meta.identifier()) {
+                    if meta.drop.0() {
+                        drop.push(index);
+                    }
+                }
+            }
 
             Ok(Self {
                 source,
                 target,
                 inner: Arc::new(Inner {
                     copy: copy.into_boxed_slice(),
-                    drop: remove.into_boxed_slice(),
+                    drop: drop.into_boxed_slice(),
                 }),
                 _marker: PhantomData,
             })

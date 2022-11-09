@@ -123,20 +123,15 @@ impl<'d, T: Template> Create<'d, T> {
         // until `table::Inner::commit` is called and as long as a table lock is held.
         let keys = unsafe { &mut **inner.keys.get() };
         keys[start..start + count.get()].copy_from_slice(&self.keys[..count.get()]);
-        if T::SIZE == 0 {
-            // No data to initialize.
-            self.templates.clear();
-        } else {
-            let context = ApplyContext::new(inner.columns());
-            for (i, template) in self.templates.drain(..).enumerate() {
-                // SAFETY: This is safe by the guarantees of `T::apply` and by the fact that only the rows in the range
-                // `start..start + count` are modified.
-                let index = start + i;
-                debug_assert!(index < start + count.get());
-                // SAFETY: No locks are required because of the guarantee above and `index` is guaranteed to hold no previous
-                // valid data.
-                unsafe { template.apply(&self.state, context.with(index)) };
-            }
+        let context = ApplyContext::new(inner.columns());
+        for (i, template) in self.templates.drain(..).enumerate() {
+            // SAFETY: This is safe by the guarantees of `T::apply` and by the fact that only the rows in the range
+            // `start..start + count` are modified.
+            let index = start + i;
+            debug_assert!(index < start + count.get());
+            // SAFETY: No locks are required because of the guarantee above and `index` is guaranteed to hold no previous
+            // valid data.
+            unsafe { template.apply(&self.state, context.with(index)) };
         }
 
         // Initialize table keys.
@@ -161,20 +156,21 @@ impl<T: Template> Drop for Create<'_, T> {
 }
 
 pub(crate) fn is<T: Template>(table: &Table, database: &Database) -> bool {
-    match Share::<T>::from(database) {
-        Ok(share) => share.read().1.index() == table.index(),
-        Err(_) => false,
-    }
+    let Ok(share) = Share::<T>::from(database) else {
+        return false;
+    };
+    let share = share.read();
+    share.1.index() == table.index()
 }
 
 pub(crate) fn has<T: Template>(table: &Table, database: &Database) -> bool {
-    match Share::<T>::from(database) {
-        Ok(shared) => shared
-            .read()
-            .1
-            .types()
-            .iter()
-            .all(|&identifier| table.has_with(identifier)),
-        Err(_) => false,
-    }
+    let Ok(share) = Share::<T>::from(database) else {
+        return false;
+    };
+    let share = share.read();
+    share
+        .1
+        .metas()
+        .iter()
+        .all(|&meta| table.has_with(meta.identifier()))
 }

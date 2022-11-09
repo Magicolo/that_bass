@@ -206,7 +206,7 @@ pub struct Meta {
     new: unsafe fn(usize) -> NonNull<()>,
     free: unsafe fn(NonNull<()>, usize, usize),
     copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), NonZeroUsize),
-    drop: unsafe fn(NonNull<()>, usize, NonZeroUsize),
+    drop: (fn() -> bool, unsafe fn(NonNull<()>, usize, NonZeroUsize)),
 }
 
 impl PartialEq for Meta {
@@ -239,12 +239,12 @@ pub trait Datum: Sized + 'static {
                     copy(source, target, count.get());
                 }
             },
-            drop: |data, index, count| unsafe {
+            drop: (needs_drop::<Self>, |data, index, count| unsafe {
                 if needs_drop::<Self>() {
                     let data = data.as_ptr().cast::<Self>().add(index);
                     drop_in_place(slice_from_raw_parts_mut(data, count.get()));
                 }
-            },
+            }),
         }
     }
 }
@@ -288,12 +288,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        filter::{False, Has},
-        key::Key,
-        query::By,
-        Database, Datum, Error,
-    };
+    use crate::{filter::has, key::Key, query::By, Database, Datum, Error};
     use std::{collections::HashSet, thread::scope};
 
     #[derive(Debug, Clone, Copy)]
@@ -601,7 +596,7 @@ mod tests {
         let database = Database::new();
         database.create()?.all_n([(); 100]);
         database.create()?.all_n([A; 100]);
-        assert_eq!(database.destroy_all().filter::<Has<A>>().resolve(), 100);
+        assert_eq!(database.destroy_all().filter(has::<A>()).resolve(), 100);
         assert_eq!(database.destroy_all().resolve(), 100);
         Ok(())
     }
@@ -674,7 +669,7 @@ mod tests {
     #[test]
     fn query_with_false_is_always_empty() -> Result<(), Error> {
         let database = Database::new();
-        let mut query = database.query::<()>()?.filter::<False>();
+        let mut query = database.query::<()>()?.filter(false);
         assert_eq!(query.count(), 0);
         let key = database.create()?.one(());
         assert_eq!(query.count(), 0);

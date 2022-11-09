@@ -18,7 +18,7 @@ use std::{
 
 pub struct Table {
     index: u32,
-    types: Box<[TypeId]>,
+    metas: Box<[&'static Meta]>,
     pub(crate) inner: RwLock<Inner>,
 }
 
@@ -104,7 +104,7 @@ impl Column {
             copy((old_data, 0), (new_data, 0), new_capacity);
         }
         if let Some(over) = NonZeroUsize::new(old_capacity.get() - new_capacity) {
-            drop(old_data, new_capacity, over);
+            drop.1(old_data, new_capacity, over);
         }
         // A count of 0 is sent to `free` because the values of `old_data` have been moved to `new_data`, so they must not be dropped.
         free(old_data, 0, old_capacity.get());
@@ -117,7 +117,7 @@ impl Column {
     pub unsafe fn squash(&mut self, source_index: usize, target_index: usize, count: NonZeroUsize) {
         let &Meta { copy, drop, .. } = self.meta();
         let data = *self.data.get_mut();
-        drop(data, target_index, count);
+        drop.1(data, target_index, count);
         copy((data, source_index), (data, target_index), count);
     }
 
@@ -134,7 +134,7 @@ impl Column {
     pub unsafe fn drop(&mut self, index: usize, count: NonZeroUsize) {
         let &Meta { drop, .. } = self.meta();
         let data = *self.data.get_mut();
-        drop(data, index, count);
+        drop.1(data, index, count);
     }
 
     #[inline]
@@ -235,6 +235,7 @@ impl Tables {
         table
     }
 
+    /// Caller must ensure that there are no duplicates in `metas`.
     #[inline]
     pub(crate) fn find_or_add(&self, mut metas: Vec<&'static Meta>) -> Arc<Table> {
         let upgrade = self.lock.upgradable_read();
@@ -242,7 +243,7 @@ impl Tables {
         // before any mutation to `self.tables`.
         let tables = unsafe { &*self.tables.get() };
         for table in tables.iter() {
-            if table.types.len() == metas.len() {
+            if table.metas.len() == metas.len() {
                 if metas.iter().all(|meta| table.has_with(meta.identifier())) {
                     return table.clone();
                 }
@@ -251,7 +252,6 @@ impl Tables {
 
         metas.sort_unstable_by_key(|meta| meta.identifier());
         let columns = metas.iter().map(|&meta| Column::new(meta, 0)).collect();
-        let types = metas.iter().map(|&meta| meta.identifier()).collect();
         let index = tables.len();
         let inner = Inner {
             count: 0.into(),
@@ -261,7 +261,7 @@ impl Tables {
         };
         let table = Arc::new(Table {
             index: index as _,
-            types,
+            metas: metas.into_boxed_slice(),
             inner: RwLock::new(inner),
         });
         let write = RwLockUpgradableReadGuard::upgrade(upgrade);
@@ -290,8 +290,8 @@ impl Table {
     }
 
     #[inline]
-    pub fn types(&self) -> &[TypeId] {
-        &self.types
+    pub fn metas(&self) -> &[&'static Meta] {
+        &self.metas
     }
 
     #[inline]
@@ -301,19 +301,21 @@ impl Table {
 
     #[inline]
     pub fn has_with(&self, identifier: TypeId) -> bool {
-        self.types.binary_search(&identifier).is_ok()
+        self.metas
+            .binary_search_by_key(&identifier, |meta| meta.identifier())
+            .is_ok()
     }
 
-    #[inline]
-    pub(crate) fn column<D: Datum>(&self) -> Result<usize, Error> {
+    pub(crate) fn column<D: Datum>(&self) -> Result<(usize, &'static Meta), Error> {
         self.column_with(TypeId::of::<D>())
     }
 
-    #[inline]
-    pub(crate) fn column_with(&self, identifier: TypeId) -> Result<usize, Error> {
-        self.types
-            .binary_search(&identifier)
-            .map_err(|_| Error::MissingColumn)
+    pub(crate) fn column_with(&self, identifier: TypeId) -> Result<(usize, &'static Meta), Error> {
+        let index = self
+            .metas
+            .binary_search_by_key(&identifier, |meta| meta.identifier())
+            .map_err(|_| Error::MissingColumn)?;
+        Ok((index, self.metas[index]))
     }
 }
 

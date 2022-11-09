@@ -107,11 +107,11 @@ impl<'a> InitializeContext<'a> {
     }
 
     pub fn read<D: Datum>(&self) -> Result<Read<D>, Error> {
-        Ok(Read(self.0.column::<D>()?, PhantomData))
+        Ok(Read(self.0.column::<D>()?.0, PhantomData))
     }
 
     pub fn write<D: Datum>(&self) -> Result<Write<D>, Error> {
-        Ok(Write(self.0.column::<D>()?, PhantomData))
+        Ok(Write(self.0.column::<D>()?.0, PhantomData))
     }
 }
 
