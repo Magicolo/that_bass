@@ -291,7 +291,7 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
                 index
             }
         };
-        if let Some(Ok(state)) = states.get_mut(index) {
+        if let Ok(state) = unsafe { get_unchecked_mut(states, index) } {
             if state.rows.len() == 0 {
                 indices.push(index);
             }
@@ -310,7 +310,7 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
         let mut low = u32::MAX;
         let mut high = 0;
         for i in (0..rows.len()).rev() {
-            let (key, slot, row) = &mut rows[i];
+            let (key, slot, row) = unsafe { get_unchecked_mut(rows, i) };
             if let Ok(table_index) = slot.table(key.generation()) {
                 if table_index == table.index() {
                     *row = slot.row();
