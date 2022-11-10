@@ -120,6 +120,19 @@ unsafe impl<D: Datum> Template for D {
     }
 }
 
+unsafe impl<T: 'static> Template for PhantomData<T> {
+    type State = ();
+
+    fn declare(_: DeclareContext) -> Result<(), Error> {
+        Ok(())
+    }
+    fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
+        Ok(())
+    }
+    #[inline]
+    unsafe fn apply(self, _: &Self::State, _: ApplyContext) {}
+}
+
 macro_rules! tuple {
     ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
         unsafe impl<$($t: Template,)*> Template for ($($t,)*) {
@@ -144,10 +157,12 @@ macro_rules! tuple {
 tuples!(tuple);
 
 pub struct With<T, F>(F, PhantomData<fn(T)>);
+
 #[inline]
 pub const fn with<T, F: FnOnce(Key) -> T>(with: F) -> With<T, F> {
     With(with, PhantomData)
 }
+
 unsafe impl<T: Template, F: FnOnce(Key) -> T + 'static> Template for With<T, F> {
     type State = T::State;
 

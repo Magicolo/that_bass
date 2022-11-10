@@ -100,7 +100,11 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         }
     }
 
-    pub fn filter<G: Filter>(mut self, filter: G) -> Query<'d, R, (F, G), I> {
+    pub fn filter<G: Filter + Default>(self) -> Query<'d, R, (F, G), I> {
+        self.filter_with(G::default())
+    }
+
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> Query<'d, R, (F, G), I> {
         self.states
             .retain(|state| filter.filter(state.table, self.database));
         self.indices.clear();

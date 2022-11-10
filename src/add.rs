@@ -88,7 +88,11 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
         self.pairs.extend(templates);
     }
 
-    pub fn filter<G: Filter>(mut self, filter: G) -> Add<'d, T, (F, G)> {
+    pub fn filter<G: Filter + Default>(self) -> Add<'d, T, (F, G)> {
+        self.filter_with(G::default())
+    }
+
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> Add<'d, T, (F, G)> {
         for state in self.states.iter_mut() {
             let index = match state {
                 Ok(state) if filter.filter(&state.source, self.database) => None,
@@ -399,6 +403,21 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
 }
 
 impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
+    pub fn filter<G: Filter + Default>(self) -> AddAll<'d, T, (F, G)> {
+        self.filter_with(G::default())
+    }
+
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> AddAll<'d, T, (F, G)> {
+        self.states
+            .retain(|state| filter.filter(&state.source, self.database));
+        AddAll {
+            database: self.database,
+            index: self.index,
+            states: self.states,
+            filter: self.filter.and(filter),
+        }
+    }
+
     #[inline]
     pub fn resolve(&mut self, set: bool) -> usize
     where

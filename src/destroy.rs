@@ -63,7 +63,11 @@ impl<'d, F: Filter> Destroy<'d, F> {
         self.keys.extend(keys);
     }
 
-    pub fn filter<G: Filter>(mut self, filter: G) -> Destroy<'d, (F, G)> {
+    pub fn filter<G: Filter + Default>(self) -> Destroy<'d, (F, G)> {
+        self.filter_with(G::default())
+    }
+
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> Destroy<'d, (F, G)> {
         for state in self.states.iter_mut() {
             let index = match state {
                 Ok(state) if filter.filter(&state.table, self.database) => None,
@@ -337,7 +341,11 @@ impl<'d, F: Filter> Destroy<'d, F> {
 }
 
 impl<'d, F: Filter> DestroyAll<'d, F> {
-    pub fn filter<G: Filter>(mut self, filter: G) -> DestroyAll<'d, (F, G)> {
+    pub fn filter<G: Filter + Default>(self) -> DestroyAll<'d, (F, G)> {
+        self.filter_with(G::default())
+    }
+
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> DestroyAll<'d, (F, G)> {
         self.tables
             .retain(|table| filter.filter(table, self.database));
         DestroyAll {

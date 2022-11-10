@@ -1,0 +1,12 @@
+[package]
+name = "that_base_derive"
+version = "0.1.0"
+edition = "2021"
+authors = ["Magicolo <magicololand@gmail.com>"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "*"
+quote = "*"

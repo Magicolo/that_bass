@@ -329,6 +329,25 @@ unsafe impl<D: Datum> Row for &'static mut D {
     }
 }
 
+unsafe impl<T: 'static> Row for PhantomData<T> {
+    type State = ();
+    type Read = Self;
+    type Item<'a> = ();
+    type Chunk<'a> = ();
+
+    fn declare(_: DeclareContext) -> Result<(), Error> {
+        Ok(())
+    }
+    fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
+        Ok(())
+    }
+    fn read(_: &Self::State) -> <Self::Read as Row>::State {}
+    #[inline]
+    unsafe fn item<'a>(_: &'a Self::State, _: ItemContext<'a>) -> Self::Item<'a> {}
+    #[inline]
+    unsafe fn chunk<'a>(_: &'a Self::State, _: ChunkContext<'a>) -> Self::Chunk<'a> {}
+}
+
 unsafe impl<R: Row> Row for Option<R> {
     type State = Option<R::State>;
     type Read = Option<R::Read>;

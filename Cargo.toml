@@ -2,8 +2,11 @@
 name = "that_bass"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ["Magicolo <magicololand@gmail.com>"]
 
 [dependencies]
+that_base_derive = { path = "./that_base_derive" }
 parking_lot = "*"
+
+[workspace]
+members = ["that_base_derive"]
