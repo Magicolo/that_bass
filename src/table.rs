@@ -235,11 +235,13 @@ impl Tables {
         table
     }
 
-    /// Caller must ensure that there are no duplicates in `metas`.
+    /// `metas` must be sorted by `meta.identifier()` and must be deduplicated.
     #[inline]
-    pub(crate) fn find_or_add(&self, mut metas: Vec<&'static Meta>) -> Arc<Table> {
-        metas.sort_unstable_by_key(|meta| meta.identifier());
-        metas.dedup_by_key(|meta| meta.identifier());
+    pub(crate) fn find_or_add(&self, metas: &[&'static Meta]) -> Arc<Table> {
+        // Verifies that `metas` is sorted and deduplicated.
+        debug_assert!(metas
+            .windows(2)
+            .all(|metas| metas[0].identifier() < metas[1].identifier()));
 
         let upgrade = self.lock.upgradable_read();
         // SAFETY: `self.tables` can be read since an upgrade lock is held. The lock will need to be upgraded
@@ -261,7 +263,7 @@ impl Tables {
         };
         let table = Arc::new(Table {
             index: index as _,
-            metas: metas.into_boxed_slice(),
+            metas: metas.iter().copied().collect(),
             inner: RwLock::new(inner),
         });
         let write = RwLockUpgradableReadGuard::upgrade(upgrade);

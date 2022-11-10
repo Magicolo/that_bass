@@ -5,18 +5,18 @@ use crate::{
     core::utility::{fold_swap, get_unchecked_mut},
     filter::Filter,
     key::{Key, Slot},
-    resources::Global,
     table::{self, Table},
     template::{ShareMeta, Template},
     Database, Error,
 };
-use std::{collections::HashMap, marker::PhantomData, num::NonZeroUsize, sync::Arc};
+use std::{collections::HashSet, marker::PhantomData, num::NonZeroUsize, sync::Arc};
 
 pub struct Remove<'d, T: Template, F: Filter = ()> {
     database: &'d Database,
-    keys: HashMap<Key, u32>,
+    keys: HashSet<Key>, // A `HashSet` is used because the move algorithm assumes that rows will be unique.
+    states: Vec<Result<State<'d>, u32>>, // Must remain ordered by `state.source.index()`.
+    indices: Vec<usize>, // Allow to use the `fold_swap` strategy when resolving.
     pending: Vec<(Key, &'d Slot, u32)>,
-    sorted: HashMap<u32, Option<State<'d>>>,
     filter: F,
     _marker: PhantomData<fn(T)>,
 }
@@ -60,9 +60,10 @@ impl Database {
         // Validate metas here, but there is no need to store them.
         ShareMeta::<T>::from(self).map(|_| Remove {
             database: self,
-            keys: HashMap::new(),
+            keys: HashSet::new(),
             pending: Vec::new(),
-            sorted: HashMap::new(),
+            states: Vec::new(),
+            indices: Vec::new(),
             filter: (),
             _marker: PhantomData,
         })
@@ -81,170 +82,227 @@ impl Database {
 }
 
 impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
+    // Note: `one` and `all` methods should minimize the amount of work they do since they are meant to be called inside a query,
+    // thus while potentially holding many locks. Therefore, all validation is moved to `resolve` instead.
     #[inline]
-    pub fn one(&mut self, key: Key) -> Result<(), Error> {
-        let (slot, table) = self.database.keys().get(key)?;
-        Self::sort(
-            key,
-            slot,
-            table,
-            &mut self.sorted,
-            &self.filter,
-            self.database,
-        )
+    pub fn one(&mut self, key: Key) {
+        self.keys.insert(key);
     }
 
     #[inline]
-    pub fn all(&mut self, keys: impl IntoIterator<Item = Key>) -> usize {
-        keys.into_iter()
-            .filter_map(|key| self.one(key).ok())
-            .count()
+    pub fn all(&mut self, keys: impl IntoIterator<Item = Key>) {
+        self.keys.extend(keys);
     }
 
     pub fn filter<G: Filter>(mut self, filter: G) -> Remove<'d, T, (F, G)> {
-        debug_assert_eq!(self.keys.len(), 0);
-        debug_assert_eq!(self.pending.len(), 0);
-        self.sorted.retain(|_, state| match state {
-            Some(state) => filter.filter(&state.source, self.database),
-            None => true,
-        });
+        for state in self.states.iter_mut() {
+            let index = match state {
+                Ok(state) if filter.filter(&state.source, self.database) => None,
+                Ok(state) => Some(state.source.index()),
+                Err(_) => None,
+            };
+            if let Some(index) = index {
+                *state = Err(index);
+            }
+        }
         Remove {
             database: self.database,
             keys: self.keys,
             pending: self.pending,
-            sorted: self.sorted,
             filter: self.filter.and(filter),
+            indices: self.indices,
+            states: self.states,
             _marker: PhantomData,
         }
     }
 
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
     pub fn clear(&mut self) {
-        debug_assert_eq!(self.keys.len(), 0);
         debug_assert_eq!(self.pending.len(), 0);
-        for state in self.sorted.values_mut().flatten() {
-            state.rows.clear();
-        }
+        debug_assert_eq!(self.indices.len(), 0);
+        self.keys.clear();
     }
 
     pub fn resolve(&mut self) -> usize {
-        loop {
-            self.resolve_sorted();
-            if self.pending.len() == 0 {
-                break;
-            }
-
-            for (key, slot, table) in self.pending.drain(..) {
-                let _ = Self::sort(
+        for (key, result) in self.database.keys().get_all(self.keys.drain()) {
+            if let Ok((slot, table)) = result {
+                Self::sort(
                     key,
                     slot,
                     table,
-                    &mut self.sorted,
+                    &mut self.indices,
+                    &mut self.states,
                     &self.filter,
                     self.database,
                 );
             }
         }
-        let count = self.keys.len();
-        self.keys.clear();
-        count
+
+        let mut sum = 0;
+        loop {
+            sum += self.resolve_sorted();
+            self.indices.clear();
+            if self.pending.len() == 0 {
+                break;
+            }
+            for (key, slot, table) in self.pending.drain(..) {
+                Self::sort(
+                    key,
+                    slot,
+                    table,
+                    &mut self.indices,
+                    &mut self.states,
+                    &self.filter,
+                    self.database,
+                );
+            }
+        }
+        sum
     }
 
-    fn resolve_sorted(&mut self) {
-        for state in self.sorted.values_mut().flatten() {
-            move_to(
-                (),
-                self.database,
-                &state.source,
-                &state.target,
-                &mut state.rows,
-                &state.inner.copy,
-                &state.inner.drop,
-                |_, rows| Self::retain(&state.source, &mut self.keys, rows, &mut self.pending),
-                |_, rows| rows.clear(),
-                |_, _, _| {},
-            );
-
-            // Sanity checks.
-            debug_assert!(state.rows.is_empty());
-        }
+    fn resolve_sorted(&mut self) -> usize {
+        fold_swap(
+            &mut self.indices,
+            0,
+            (&mut self.states, &mut self.pending),
+            |sum, (states, pending), index| {
+                let Some(Ok(state)) = states.get_mut(*index) else {
+                    unreachable!();
+                };
+                if state.rows.len() == 0 {
+                    return Ok(sum);
+                }
+                let Some(source) = state.source.inner.try_write() else {
+                    return Err(sum);
+                };
+                let Some(target) = state.target.inner.try_upgradable_read() else {
+                    return Err(sum);
+                };
+                let (low, high) = Self::retain(&state.source, &mut state.rows, pending);
+                let Some(count) = NonZeroUsize::new(state.rows.len()) else {
+                    // Happens if all keys from this table have been moved or destroyed between here and the sorting.
+                    return Ok(sum);
+                };
+                move_to(
+                    self.database,
+                    source,
+                    (state.target.index(), target),
+                    (low, high, count),
+                    &mut state.rows,
+                    &state.inner.copy,
+                    &state.inner.drop,
+                    |_, _| {},
+                );
+                Ok(sum + count.get())
+            },
+            |sum, (states, pending), index| {
+                let Some(Ok(state)) = states.get_mut(*index) else {
+                    unreachable!();
+                };
+                let (source, target, low, high, count) =
+                    // If locks are always taken in order (lower index first), there can not be a deadlock between move operations.
+                    if state.source.index() < state.target.index() {
+                        let source = state.source.inner.write();
+                        let (low, high) = Self::retain(&state.source, &mut state.rows, pending);
+                        let Some(count) = NonZeroUsize::new(state.rows.len()) else {
+                        // Happens if all keys from this table have been moved or destroyed between here and the sorting.
+                        return sum;
+                    };
+                        let target = state.target.inner.upgradable_read();
+                        (source, target, low, high, count)
+                    } else if state.source.index() > state.target.index() {
+                        let target = state.target.inner.upgradable_read();
+                        let source = state.source.inner.write();
+                        let (low, high) = Self::retain(&state.source, &mut state.rows, pending);
+                        let Some(count) = NonZeroUsize::new(state.rows.len()) else {
+                        // Happens if all keys from this table have been moved or destroyed between here and the sorting.
+                        return sum ;
+                    };
+                        (source, target, low, high, count)
+                    } else {
+                        unreachable!()
+                    };
+                move_to(
+                    self.database,
+                    source,
+                    (state.target.index(), target),
+                    (low, high, count),
+                    &mut state.rows,
+                    &state.inner.copy,
+                    &state.inner.drop,
+                    |_, _| {},
+                );
+                sum + count.get()
+            },
+        )
     }
 
     fn sort(
         key: Key,
         slot: &'d Slot,
         table: u32,
-        sorted: &mut HashMap<u32, Option<State<'d>>>,
+        indices: &mut Vec<usize>,
+        states: &mut Vec<Result<State<'d>, u32>>,
         filter: &F,
         database: &'d Database,
-    ) -> Result<(), Error> {
-        match sorted.get_mut(&table) {
-            Some(state) => match state {
-                Some(state) => Ok(state.rows.push((key, slot, u32::MAX))),
-                None => Err(Error::FilterDoesNotMatch),
-            },
-            None => {
-                let share = ShareTable::<T>::from(table, database)?;
-                let share = share.read();
-                let state = if filter.filter(&share.source, database) {
-                    Some(State {
-                        source: share.source.clone(),
-                        target: share.target.clone(),
-                        inner: share.inner.clone(),
-                        rows: vec![(key, slot, u32::MAX)],
-                    })
-                } else {
-                    None
+    ) {
+        let index = match states.binary_search_by_key(&table, |result| match result {
+            Ok(state) => state.source.index(),
+            Err(index) => *index,
+        }) {
+            Ok(index) => index,
+            Err(index) => {
+                let result = match ShareTable::<T>::from(table, database) {
+                    Ok((source, target, inner)) if filter.filter(&source, database) => Ok(State {
+                        source,
+                        target,
+                        inner,
+                        rows: Vec::new(),
+                    }),
+                    _ => Err(table),
                 };
-                sorted.insert(table, state);
-                Ok(())
+                for i in indices.iter_mut().filter(|i| **i >= index) {
+                    *i += 1;
+                }
+                states.insert(index, result);
+                index
             }
+        };
+        if let Ok(state) = unsafe { get_unchecked_mut(states, index) } {
+            if state.rows.len() == 0 {
+                indices.push(index);
+            }
+            state.rows.push((key, slot, u32::MAX));
         }
     }
 
     /// Call this while holding a lock on `table`.
     fn retain<'a>(
         table: &'a Table,
-        keys: &mut HashMap<Key, u32>,
         rows: &mut Vec<(Key, &'d Slot, u32)>,
         pending: &mut Vec<(Key, &'d Slot, u32)>,
     ) -> (u32, u32) {
         let mut low = u32::MAX;
         let mut high = 0;
-        let mut index = rows.len();
-
-        // Iterate in reverse to prevent the `ABBAA` problem where `A2` is considered the latest `A` in place of `A3`. This happened
-        // with the previous template swapping algorithm.
-        while index > 0 {
-            index -= 1;
-
-            let (key, slot, row) = unsafe { get_unchecked_mut(rows, index) };
-            if let Ok(table_index) = slot.table(key.generation()) {
-                if table_index == table.index() {
-                    // Duplicates must only be checked here where the key would be guaranteed to be added.
-                    // - This way, a proper count of added can be collected.
-                    // - The removal algorithm also assumes that there is no duplicate rows.
-                    match keys.insert(*key, table_index) {
-                        Some(table) if table == table_index => {
-                            // If the key was already seen, discard the earlier template.
-                            rows.swap_remove(index);
-                        }
-                        _ => {
-                            // It is possible that the key has already been processed in another table and moved to this one.
-                            // - If this is the case, it needs to be reprocessed.
-                            *row = slot.row();
-                            low = low.min(*row);
-                            high = high.max(*row);
-                        }
-                    }
+        for i in (0..rows.len()).rev() {
+            let (key, slot, row) = &mut rows[i];
+            if let Ok(new_table) = slot.table(key.generation()) {
+                if new_table == table.index() {
+                    *row = slot.row();
+                    low = low.min(*row);
+                    high = high.max(*row);
                 } else {
-                    let (key, slot, _) = rows.swap_remove(index);
-                    pending.push((key, slot, table_index));
+                    let (key, slot, _) = rows.swap_remove(i);
+                    pending.push((key, slot, new_table));
                 }
             } else {
-                rows.swap_remove(index);
+                rows.swap_remove(i);
             }
         }
-
         debug_assert_eq!(low <= high, rows.len() > 0);
         (low, high)
     }
@@ -266,17 +324,15 @@ impl<'d, T: Template, F: Filter> RemoveAll<'d, T, F> {
     pub fn resolve(&mut self) -> usize {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
-            if self.filter.filter(table, self.database) {
-                if let Ok(share) = ShareTable::<T>::from(table.index(), self.database) {
-                    let share = share.read();
-                    if share.source.index() != share.target.index() {
-                        self.states.push(StateAll {
-                            source: share.source.clone(),
-                            target: share.target.clone(),
-                            inner: share.inner.clone(),
-                        });
-                    }
+            match ShareTable::<T>::from(table.index(), self.database) {
+                Ok((source, target, inner)) if self.filter.filter(table, self.database) => {
+                    self.states.push(StateAll {
+                        source,
+                        target,
+                        inner,
+                    })
                 }
+                _ => {}
             }
         }
 
@@ -350,19 +406,26 @@ impl<'d, T: Template, F: Filter> RemoveAll<'d, T, F> {
 }
 
 impl<T: Template> ShareTable<T> {
-    pub fn from(table: u32, database: &Database) -> Result<Global<Self>, Error> {
-        database.resources().try_global_with(table, || {
+    pub fn from(
+        table: u32,
+        database: &Database,
+    ) -> Result<(Arc<Table>, Arc<Table>, Arc<Inner>), Error> {
+        let share = database.resources().try_global_with(table, || {
             let metas = ShareMeta::<T>::from(database)?;
             let source = database.tables().get_shared(table as usize)?;
-            let mut target_metas = Vec::new();
-            for column in source.inner.read().columns() {
-                if metas.contains(&column.meta()) {
-                    continue;
-                } else {
-                    target_metas.push(column.meta());
+            let target = {
+                let mut targets = Vec::new();
+                for &meta in source.metas() {
+                    match metas.binary_search_by_key(&meta.identifier(), |meta| meta.identifier()) {
+                        Ok(_) => {}
+                        Err(_) => targets.push(meta),
+                    }
                 }
+                database.tables().find_or_add(&targets)
+            };
+            if source.index() == target.index() {
+                return Err(Error::TablesMustDiffer);
             }
-            let target = database.tables().find_or_add(target_metas);
 
             let mut copy = Vec::new();
             for target in target.metas().iter().enumerate() {
@@ -391,6 +454,12 @@ impl<T: Template> ShareTable<T> {
                 }),
                 _marker: PhantomData,
             })
-        })
+        })?;
+        let share = share.read();
+        Ok((
+            share.source.clone(),
+            share.target.clone(),
+            share.inner.clone(),
+        ))
     }
 }

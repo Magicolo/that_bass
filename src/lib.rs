@@ -191,6 +191,7 @@ pub enum Error {
     WrongGenerationOrTable,
     WrongRow,
     FilterDoesNotMatch,
+    TablesMustDiffer,
 }
 
 pub struct Database {
@@ -208,14 +209,6 @@ pub struct Meta {
     copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), NonZeroUsize),
     drop: (fn() -> bool, unsafe fn(NonNull<()>, usize, NonZeroUsize)),
 }
-
-impl PartialEq for Meta {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        self.identifier() == other.identifier()
-    }
-}
-impl Eq for Meta {}
 
 pub trait Datum: Sized + 'static {
     #[inline]
@@ -320,14 +313,14 @@ mod tests {
 
     fn destroy_one(database: &Database, key: Key) -> Result<(), Error> {
         let mut destroy = database.destroy();
-        destroy.one(key)?;
+        destroy.one(key);
         assert_eq!(destroy.resolve(), 1);
         Ok(())
     }
 
     fn destroy_all(database: &Database, keys: &[Key]) {
         let mut destroy = database.destroy();
-        assert_eq!(destroy.all(keys.iter().copied()), keys.len());
+        destroy.all(keys.iter().copied());
         assert_eq!(destroy.resolve(), keys.len());
     }
 
@@ -410,7 +403,7 @@ mod tests {
             database.keys().get(Key::NULL).err(),
             Some(Error::InvalidKey)
         );
-        assert_eq!(destroy.one(Key::NULL), Err(Error::InvalidKey));
+        destroy.one(Key::NULL);
         assert_eq!(destroy.resolve(), 0);
         assert_eq!(
             database.keys().get(Key::NULL).err(),
@@ -424,7 +417,7 @@ mod tests {
         let key = create_one(&database, ())?;
         let mut destroy = database.destroy();
         assert!(database.keys().get(key).is_ok());
-        assert_eq!(destroy.one(key), Ok(()));
+        destroy.one(key);
         assert!(database.keys().get(key).is_ok());
         assert_eq!(destroy.resolve(), 1);
         assert_eq!(database.keys().get(key).err(), Some(Error::InvalidKey));
@@ -445,7 +438,7 @@ mod tests {
         let keys = create_n(&database, [(); 1000])?;
         let mut destroy = database.destroy();
         assert_eq!(count(&keys), 1000);
-        assert_eq!(destroy.all(keys.clone()), 1000);
+        destroy.all(keys.clone());
         assert_eq!(count(&keys), 1000);
         assert_eq!(destroy.resolve(), 1000);
         assert_eq!(count(&keys), 0);
@@ -464,7 +457,7 @@ mod tests {
         let database = Database::new();
         let key = create_one(&database, ())?;
         let mut add = database.add()?;
-        assert_eq!(add.one(key, A), Ok(()));
+        add.one(key, A);
         assert_eq!(add.resolve(), 1);
         assert_eq!(add.resolve(), 0);
         Ok(())
@@ -475,7 +468,7 @@ mod tests {
         let database = Database::new();
         let key = create_one(&database, ())?;
         let mut add = database.add()?;
-        assert_eq!(add.one(key, A), Ok(()));
+        add.one(key, A);
         assert!(!database.query::<&A>()?.has(key));
         assert_eq!(add.resolve(), 1);
         assert!(database.query::<&A>()?.has(key));
@@ -489,8 +482,8 @@ mod tests {
         let mut add_a = database.add()?;
         let mut add_b = database.add()?;
 
-        assert_eq!(add_a.one(key, A), Ok(()));
-        assert_eq!(add_b.one(key, B), Ok(()));
+        add_a.one(key, A);
+        add_b.one(key, B);
         assert!(database.query::<()>()?.has(key));
         assert!(!database.query::<&A>()?.has(key));
         assert!(!database.query::<&B>()?.has(key));
@@ -515,7 +508,7 @@ mod tests {
         let database = Database::new();
         let key = create_one(&database, ())?;
         let mut add = database.add()?;
-        assert_eq!(add.one(key, (A, B)), Ok(()));
+        add.one(key, (A, B));
         assert!(!database.query::<&A>()?.has(key));
         assert!(!database.query::<&B>()?.has(key));
         assert!(!database.query::<(&A, &B)>()?.has(key));
@@ -540,7 +533,7 @@ mod tests {
         let key = create_one(&database, A)?;
 
         let mut remove = database.remove::<A>()?;
-        assert_eq!(remove.one(key), Ok(()));
+        remove.one(key);
         assert_eq!(remove.resolve(), 1);
         assert_eq!(remove.resolve(), 0);
         Ok(())
@@ -551,7 +544,7 @@ mod tests {
         let database = Database::new();
         let key = create_one(&database, A)?;
         let mut remove = database.remove::<A>()?;
-        assert_eq!(remove.one(key), Ok(()));
+        remove.one(key);
         assert!(database.query::<&A>()?.has(key));
         assert_eq!(remove.resolve(), 1);
         assert!(!database.query::<&A>()?.has(key));
@@ -565,8 +558,8 @@ mod tests {
         let mut remove_a = database.remove::<A>()?;
         let mut remove_b = database.remove::<B>()?;
 
-        assert_eq!(remove_a.one(key), Ok(()));
-        assert_eq!(remove_b.one(key), Ok(()));
+        remove_a.one(key);
+        remove_b.one(key);
         assert!(database.query::<()>()?.has(key));
         assert!(database.query::<&A>()?.has(key));
         assert!(database.query::<&B>()?.has(key));
@@ -592,7 +585,7 @@ mod tests {
         let key = create_one(&database, (A, B))?;
         let mut remove = database.remove::<(A, B)>()?;
 
-        assert_eq!(remove.one(key), Ok(()));
+        remove.one(key);
         assert!(database.query::<()>()?.has(key));
         assert!(database.query::<&A>()?.has(key));
         assert!(database.query::<&B>()?.has(key));

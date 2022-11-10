@@ -17,18 +17,6 @@ pub struct Create<'d, T: Template> {
 
 struct Share<T: Template>(Arc<T::State>, Arc<Table>);
 
-impl<T: Template> Share<T> {
-    pub fn from(database: &Database) -> Result<Global<Share<T>>, Error> {
-        database.resources().try_global(|| {
-            let metas = DeclareContext::metas::<T>()?;
-            let table = database.tables().find_or_add(metas);
-            let context = InitializeContext::new(&table);
-            let state = Arc::new(T::initialize(context)?);
-            Ok(Share::<T>(state, table))
-        })
-    }
-}
-
 impl Database {
     pub fn create<T: Template>(&self) -> Result<Create<T>, Error> {
         let share = Share::<T>::from(self)?;
@@ -152,6 +140,18 @@ impl<'d, T: Template> Create<'d, T> {
 impl<T: Template> Drop for Create<'_, T> {
     fn drop(&mut self) {
         self.clear();
+    }
+}
+
+impl<T: Template> Share<T> {
+    pub fn from(database: &Database) -> Result<Global<Share<T>>, Error> {
+        database.resources().try_global(|| {
+            let metas = DeclareContext::metas::<T>()?;
+            let table = database.tables().find_or_add(&metas);
+            let context = InitializeContext::new(&table);
+            let state = Arc::new(T::initialize(context)?);
+            Ok(Share::<T>(state, table))
+        })
     }
 }
 
