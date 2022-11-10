@@ -1,12 +1,11 @@
 pub mod add;
 pub mod core;
 pub mod create;
-mod defer;
 pub mod destroy;
 pub mod filter;
 pub mod key;
 pub mod query;
-mod remove;
+pub mod remove;
 pub mod resources;
 pub mod row;
 pub mod table;

@@ -31,7 +31,6 @@ struct State<'d, T: Template> {
     source: Arc<Table>,
     target: Arc<Table>,
     inner: Arc<Inner<T>>,
-    // TODO: Merge `rows` and `templates`? How does this affect `slot.update/initialize`?
     rows: Vec<(Key, &'d Slot, u32)>,
     templates: Vec<T>,
 }
@@ -45,7 +44,6 @@ struct StateAll<T: Template> {
 struct Inner<T: Template> {
     state: T::State,
     apply: Box<[usize]>,
-    // TODO: A `Vec<usize>` should suffice here where its indices map to its values `source_column -> target_column`.
     copy: Box<[(usize, usize)]>,
 }
 
@@ -712,13 +710,9 @@ fn lock<T>(indices: &[usize], inner: &table::Inner, with: impl FnOnce() -> T) ->
     match indices.split_first() {
         Some((&index, rest)) => {
             let column = unsafe { get_unchecked(inner.columns(), index) };
-            if column.meta().size == 0 {
-                // TODO: No need to recurse here.
-                lock(rest, inner, with)
-            } else {
-                let _guard = column.data().write();
-                lock(rest, inner, with)
-            }
+            debug_assert!(column.meta().size > 0);
+            let _guard = column.data().write();
+            lock(rest, inner, with)
         }
         None => with(),
     }

@@ -13,10 +13,6 @@ pub struct Key {
 }
 
 pub struct Slot {
-    // TODO: Package `table` with `generation` since they tend to be required together.
-    // - Most updates to `indices` only change the `row`.
-    // - `generation` has to be validated everytime the table is read to sort keys in `Add/Remove/Destroy`.
-    // generation: AtomicU32,
     indices: AtomicU64,
     row: AtomicU32,
 }

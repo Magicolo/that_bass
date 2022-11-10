@@ -1,7 +1,5 @@
 pub mod bits;
-pub mod borrow;
 pub mod iterate;
-pub mod or;
 pub mod utility;
 
 macro_rules! tuples {

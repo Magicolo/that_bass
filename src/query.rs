@@ -18,6 +18,7 @@ use std::{
 };
 
 // TODO: Share some state... But how to `update` without locking when accessing `states`?
+// - Maybe use the `COW` pattern?
 pub struct Query<'d, R: Row, F = (), I = Item> {
     database: &'d Database,
     index: usize,
