@@ -97,13 +97,20 @@ impl<'d, T: Template> Create<'d, T> {
         self.with_n(T::default)
     }
 
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (Key, &T)> {
+        self.templates
+            .iter()
+            .zip(&self.keys)
+            .map(|pair| (*pair.1, pair.0))
+    }
+
     pub fn drain(&mut self) -> impl ExactSizeIterator<Item = (Key, T)> + '_ {
         let keys = self.database.keys();
         keys.recycle(self.keys[..self.templates.len()].iter().copied());
         self.templates
             .drain(..)
-            .zip(self.keys.iter().copied())
-            .map(|pair| (pair.1, pair.0))
+            .zip(&self.keys)
+            .map(|pair| (*pair.1, pair.0))
     }
 
     pub fn clear(&mut self) {

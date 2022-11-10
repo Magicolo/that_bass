@@ -116,6 +116,10 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
         self.pairs.len()
     }
 
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (Key, &T)> {
+        self.pairs.iter().map(|pair| (*pair.0, pair.1))
+    }
+
     pub fn drain(&mut self) -> impl ExactSizeIterator<Item = (Key, T)> + '_ {
         debug_assert_eq!(self.pending.len(), 0);
         debug_assert_eq!(self.indices.len(), 0);
