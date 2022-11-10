@@ -14,8 +14,8 @@ use std::{collections::HashSet, marker::PhantomData, num::NonZeroUsize, sync::Ar
 pub struct Remove<'d, T: Template, F: Filter = ()> {
     database: &'d Database,
     keys: HashSet<Key>, // A `HashSet` is used because the move algorithm assumes that rows will be unique.
-    states: Vec<Result<State<'d>, u32>>, // Must remain ordered by `state.source.index()`.
-    indices: Vec<usize>, // Allow to use the `fold_swap` strategy when resolving.
+    indices: Vec<usize>, // May be reordered (ex: by `fold_swap`).
+    states: Vec<Result<State<'d>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
     pending: Vec<(Key, &'d Slot, u32)>,
     filter: F,
     _marker: PhantomData<fn(T)>,

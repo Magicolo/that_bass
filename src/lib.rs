@@ -12,7 +12,6 @@ pub mod table;
 pub mod template;
 
 /*
-    TODO: Share some query state using a COW pattern.
     TODO: A mechanism to detect `OnAdd<D>/OnRemove<D>/OnCreate<D>`:
         - An additional hidden datum `Added/Removed/Created` would be added to rows when....
         - What to do about `OnDestroy`.
@@ -23,7 +22,6 @@ pub mod template;
         - It may be resonnable to require from users (or a scheduler) to resolve deferred operations at an appropriate time.
     TODO: Implement `Defer`:
         - Will order the resolution of deferred operations such that coherence is maintained.
-    TODO: Implement `Remove<T: Template>`
     TODO: Implement `Keep<T: Template>/Trim<T: Template>`:
         - Removes all datum from a key except to ones provided by `T`.
     TODO: Implement `Change<T: Template>/Convert<T: Template>/Conform<T: Template>`:
@@ -52,6 +50,8 @@ pub mod template;
     TODO: Prevent using a query within a query using an auto trait `Nest` that is negatively implemented for `Query`.
     TODO: Test the database with generative tests.
 
+    TODO (POSTPONED): Share some query state using a COW pattern.
+        - Gains are likely marginal and memory will remain in use for the lifetime of the database...
     TODO (POSTPONED): Add an option to split large table stores in chunks of fixed size.
         - Large stores have better locality but might cause more contention on their locks.
         - Small stores cause less contention but have worse locality.

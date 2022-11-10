@@ -10,10 +10,10 @@ use std::{collections::HashSet, num::NonZeroUsize};
 
 pub struct Destroy<'d, F: Filter = ()> {
     database: &'d Database,
-    keys: HashSet<Key>,
+    keys: HashSet<Key>, // A `HashSet` is used because the move algorithm assumes that rows will be unique.
+    indices: Vec<usize>, // May be reordered (ex: by `fold_swap`).
+    states: Vec<Result<State<'d>, u32>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
     pending: Vec<(Key, &'d Slot, u32)>,
-    states: Vec<Result<State<'d>, u32>>,
-    indices: Vec<usize>,
     filter: F,
 }
 

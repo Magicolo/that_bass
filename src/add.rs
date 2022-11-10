@@ -12,10 +12,10 @@ use std::{collections::HashMap, mem, num::NonZeroUsize, sync::Arc};
 /// Adds template `T` to accumulated add operations.
 pub struct Add<'d, T: Template, F: Filter = ()> {
     database: &'d Database,
-    pairs: HashMap<Key, T>,
+    pairs: HashMap<Key, T>, // A `HashMap` is used because the move algorithm assumes that rows will be unique.
+    indices: Vec<usize>,    // May be reordered (ex: by `fold_swap`).
+    states: Vec<Result<State<'d, T>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
     pending: Vec<(Key, &'d Slot, T, u32)>,
-    states: Vec<Result<State<'d, T>, u32>>,
-    indices: Vec<usize>,
     filter: F,
 }
 
