@@ -187,12 +187,8 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
                 if state.rows.len() == 0 {
                     return Ok(sum);
                 }
-                let Some(source) = state.source.inner.try_write() else {
-                    return Err(sum);
-                };
-                let Some(target) = state.target.inner.try_upgradable_read() else {
-                    return Err(sum);
-                };
+                let source = state.source.inner.try_write().ok_or(sum)?;
+                let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
                 let (low, high) = Self::retain(&state.source, &mut state.rows, pending);
                 let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                     // Happens if all keys from this table have been moved or destroyed between here and the sorting.

@@ -155,9 +155,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
                 if state.rows.len() == 0 {
                     return Ok(sum);
                 }
-                let Some(inner) = state.table.inner.try_write() else {
-                    return Err(sum);
-                };
+                let inner = state.table.inner.try_write().ok_or(sum)?;
                 let (low, high) = Self::retain(state.table, &mut state.rows, pending);
                 let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                     return Ok(sum);

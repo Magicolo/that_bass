@@ -1,6 +1,5 @@
 use crate::{
     key::Key,
-    resources::Global,
     table::{self, Table},
     template::{ApplyContext, DeclareContext, InitializeContext, Template},
     Database, Error,
@@ -19,12 +18,11 @@ struct Share<T: Template>(Arc<T::State>, Arc<Table>);
 
 impl Database {
     pub fn create<T: Template>(&self) -> Result<Create<T>, Error> {
-        let share = Share::<T>::from(self)?;
-        let share = share.read();
+        let (state, table) = Share::<T>::from(self)?;
         Ok(Create {
             database: self,
-            state: share.0.clone(),
-            table: share.1.clone(),
+            state,
+            table,
             keys: Vec::new(),
             templates: Vec::new(),
         })
@@ -160,29 +158,29 @@ impl<T: Template> Drop for Create<'_, T> {
 }
 
 impl<T: Template> Share<T> {
-    pub fn from(database: &Database) -> Result<Global<Share<T>>, Error> {
-        database.resources().try_global(|| {
+    pub fn from(database: &Database) -> Result<(Arc<T::State>, Arc<Table>), Error> {
+        let share = database.resources().try_global(|| {
             let metas = DeclareContext::metas::<T>()?;
             let table = database.tables().find_or_add(&metas);
             let context = InitializeContext::new(&table);
             let state = Arc::new(T::initialize(context)?);
             Ok(Share::<T>(state, table))
-        })
+        })?;
+        let share = share.read();
+        Ok((share.0.clone(), share.1.clone()))
     }
 }
 
 pub(crate) fn is<T: Template>(table: &Table, database: &Database) -> bool {
-    let Ok(share) = Share::<T>::from(database) else {
-        return false;
-    };
-    let share = share.read();
-    share.1.index() == table.index()
+    match Share::<T>::from(database) {
+        Ok(pair) => table.index() == pair.1.index(),
+        Err(_) => false,
+    }
 }
 
 pub(crate) fn has<T: Template>(table: &Table, database: &Database) -> bool {
-    let Ok(share) = Share::<T>::from(database) else {
-        return false;
-    };
-    let share = share.read();
-    table.has_all(share.1.metas().iter().map(|meta| meta.identifier()))
+    match Share::<T>::from(database) {
+        Ok(pair) => table.has_all(pair.1.metas().iter().map(|meta| meta.identifier())),
+        Err(_) => false,
+    }
 }

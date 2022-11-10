@@ -61,7 +61,7 @@ impl<T: Template> Filter for Has<T> {
 
 impl Filter for HasWith {
     fn filter(&self, table: &Table, _: &Database) -> bool {
-        self.0.iter().all(|&identifier| table.has_with(identifier))
+        table.has_all(self.0.iter().copied())
     }
 }
 
@@ -73,10 +73,7 @@ impl<T: Template> Filter for Is<T> {
 
 impl Filter for IsWith {
     fn filter(&self, table: &Table, _: &Database) -> bool {
-        self.0
-            .iter()
-            .copied()
-            .eq(table.metas().iter().map(|meta| meta.identifier()))
+        table.is_all(self.0.iter().copied())
     }
 }
 
