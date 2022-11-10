@@ -116,6 +116,12 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
         self.pairs.len()
     }
 
+    pub fn drain(&mut self) -> impl ExactSizeIterator<Item = (Key, T)> + '_ {
+        debug_assert_eq!(self.pending.len(), 0);
+        debug_assert_eq!(self.indices.len(), 0);
+        self.pairs.drain()
+    }
+
     pub fn clear(&mut self) {
         debug_assert_eq!(self.pending.len(), 0);
         debug_assert_eq!(self.indices.len(), 0);
@@ -174,12 +180,28 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
                 if state.rows.len() == 0 {
                     return Ok(sum);
                 }
-                let Some(source) = state.source.inner.try_write() else {
-                    return Err(sum);
-                };
-                let Some(target) = state.target.inner.try_upgradable_read() else {
-                    return Err(sum);
-                };
+                if state.source.index() == state.target.index() {
+                    let inner = state.source.inner.try_read().ok_or(sum)?;
+                    Self::retain(
+                        &state.source,
+                        &mut state.rows,
+                        &mut state.templates,
+                        pending,
+                    );
+                    let Some(count) = NonZeroUsize::new(state.rows.len()) else {
+                        return Ok(sum);
+                    };
+                    Self::resolve_set(
+                        inner,
+                        &state.inner.state,
+                        &mut state.rows,
+                        &mut state.templates,
+                        &state.inner.apply,
+                    );
+                    return Ok(sum + count.get());
+                }
+                let source = state.source.inner.try_write().ok_or(sum)?;
+                let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
                 let (low, high) = Self::retain(
                     &state.source,
                     &mut state.rows,
@@ -198,10 +220,10 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
                     &mut state.rows,
                     &state.inner.copy,
                     &[],
-                    |inner, index| {
+                    |keys, columns, index| {
                         // Initialize missing data `T` in target.
                         // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
-                        let context = ApplyContext::new(inner.columns());
+                        let context = ApplyContext::new(keys, columns);
                         for (i, template) in state.templates.drain(..).enumerate() {
                             unsafe { template.apply(&state.inner.state, context.with(index + i)) };
                         }
@@ -213,28 +235,50 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
                 let Some(Ok(state)) = states.get_mut(*index) else {
                     unreachable!();
                 };
+                if state.rows.len() == 0 {
+                    return sum;
+                }
+                if state.source.index() == state.target.index() {
+                    let inner = state.source.inner.read();
+                    Self::retain(
+                        &state.source,
+                        &mut state.rows,
+                        &mut state.templates,
+                        pending,
+                    );
+                    let Some(count) = NonZeroUsize::new(state.rows.len()) else {
+                        return sum;
+                    };
+                    Self::resolve_set(
+                        inner,
+                        &state.inner.state,
+                        &mut state.rows,
+                        &mut state.templates,
+                        &state.inner.apply,
+                    );
+                    return sum + count.get();
+                }
+
                 let (source, target, low, high, count) =
                     // If locks are always taken in order (lower index first), there can not be a deadlock between move operations.
                     if state.source.index() < state.target.index() {
                         let source = state.source.inner.write();
                         let (low, high) = Self::retain(&state.source, &mut state.rows, &mut state.templates, pending);
                         let Some(count) = NonZeroUsize::new(state.rows.len()) else {
-                        // Happens if all keys from this table have been moved or destroyed between here and the sorting.
-                        return sum;
-                    };
+                            // Happens if all keys from this table have been moved or destroyed between here and the sorting.
+                            return sum;
+                        };
                         let target = state.target.inner.upgradable_read();
                         (source, target, low, high, count)
-                    } else if state.source.index() > state.target.index() {
+                    } else  {
                         let target = state.target.inner.upgradable_read();
                         let source = state.source.inner.write();
                         let (low, high) = Self::retain(&state.source, &mut state.rows, &mut state.templates, pending);
                         let Some(count) = NonZeroUsize::new(state.rows.len()) else {
-                        // Happens if all keys from this table have been moved or destroyed between here and the sorting.
-                        return sum ;
-                    };
+                            // Happens if all keys from this table have been moved or destroyed between here and the sorting.
+                            return sum;
+                        };
                         (source, target, low, high, count)
-                    } else {
-                        unreachable!()
                     };
                 move_to(
                     self.database,
@@ -244,10 +288,10 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
                     &mut state.rows,
                     &state.inner.copy,
                     &[],
-                    |inner, index| {
+                    |keys, columns, index| {
                         // Initialize missing data `T` in target.
                         // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
-                        let context = ApplyContext::new(inner.columns());
+                        let context = ApplyContext::new(keys, columns);
                         for (i, template) in state.templates.drain(..).enumerate() {
                             unsafe { template.apply(&state.inner.state, context.with(index + i)) };
                         }
@@ -256,6 +300,27 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
                 sum + count.get()
             },
         )
+    }
+
+    fn resolve_set<'a>(
+        inner: RwLockReadGuard<'a, table::Inner>,
+        state: &T::State,
+        rows: &mut Rows<'d>,
+        templates: &mut Vec<T>,
+        apply: &[usize],
+    ) {
+        // The keys do not need to be moved, simply write the row data.
+        let keys = inner.keys();
+        debug_assert!(rows.len() <= keys.len());
+        lock(apply, &inner, || {
+            let context = ApplyContext::new(keys, inner.columns());
+            for (i, template) in templates.drain(..).enumerate() {
+                let &(.., row) = unsafe { get_unchecked(rows, i) };
+                debug_assert!(row < u32::MAX);
+                unsafe { template.apply(state, context.with(row as _)) };
+            }
+            rows.clear();
+        });
     }
 
     fn sort(
@@ -360,14 +425,13 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
             0,
             with,
             |sum, with, state| {
-                let count = if state.source.index() < state.target.index() {
-                    let source = state.source.inner.try_write().ok_or(sum)?;
+                let count = if state.source.index() != state.target.index() {
+                    let mut source = state.source.inner.try_write().ok_or(sum)?;
+                    let Some(count) = NonZeroUsize::new(*source.count.get_mut() as _) else {
+                        return Ok(sum);
+                    };
                     let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
-                    Self::resolve_tables(source, target, state, self.database, with)
-                } else if state.source.index() > state.target.index() {
-                    let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
-                    let source = state.source.inner.try_write().ok_or(sum)?;
-                    Self::resolve_tables(source, target, state, self.database, with)
+                    Self::resolve_tables(source, target, state, count, self.database, with)
                 } else if set {
                     let inner = state.source.inner.try_read().ok_or(sum)?;
                     Self::resolve_table(inner, state, with)
@@ -378,13 +442,19 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
             },
             |sum, with, state| {
                 sum + if state.source.index() < state.target.index() {
-                    let source = state.source.inner.write();
+                    let mut source = state.source.inner.write();
+                    let Some(count) = NonZeroUsize::new(*source.count.get_mut() as _) else {
+                        return sum;
+                    };
                     let target = state.target.inner.upgradable_read();
-                    Self::resolve_tables(source, target, state, self.database, with)
+                    Self::resolve_tables(source, target, state, count, self.database, with)
                 } else if state.source.index() > state.target.index() {
                     let target = state.target.inner.upgradable_read();
-                    let source = state.source.inner.write();
-                    Self::resolve_tables(source, target, state, self.database, with)
+                    let mut source = state.source.inner.write();
+                    let Some(count) = NonZeroUsize::new(*source.count.get_mut() as _) else {
+                        return sum;
+                    };
+                    Self::resolve_tables(source, target, state, count, self.database, with)
                 } else if set {
                     let inner = state.source.inner.read();
                     Self::resolve_table(inner, state, with)
@@ -399,12 +469,10 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         mut source: RwLockWriteGuard<table::Inner>,
         target: RwLockUpgradableReadGuard<table::Inner>,
         state: &StateAll<T>,
+        count: NonZeroUsize,
         database: &Database,
-        with: &mut impl FnMut() -> T,
+        mut with: impl FnMut() -> T,
     ) -> usize {
-        let Some(count) = NonZeroUsize::new(*source.count.get_mut() as _) else {
-            return 0;
-        };
         source.release(count);
 
         let (start, target) = table::Inner::reserve(target, count);
@@ -419,7 +487,7 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         );
 
         // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
-        let context = ApplyContext::new(target.columns());
+        let context = ApplyContext::new(keys.1, target.columns());
         for i in 0..count.get() {
             unsafe { with().apply(&state.inner.state, context.with(start + i)) };
         }
@@ -441,11 +509,12 @@ impl<'d, T: Template, F: Filter> AddAll<'d, T, F> {
         state: &StateAll<T>,
         with: &mut impl FnMut() -> T,
     ) -> usize {
-        let Some(count) = NonZeroUsize::new(inner.count()) else {
+        let keys = inner.keys();
+        let Some(count) = NonZeroUsize::new(keys.len()) else {
             return 0;
         };
         lock(&state.inner.apply, &inner, || {
-            let context = ApplyContext::new(inner.columns());
+            let context = ApplyContext::new(keys, inner.columns());
             for i in 0..count.get() {
                 unsafe { with().apply(&state.inner.state, context.with(i)) };
             }
@@ -520,28 +589,30 @@ pub(crate) fn move_to<'d, 'a>(
     rows: &mut Rows<'d>,
     copy: &[(usize, usize)],
     drop: &[usize],
-    initialize: impl FnOnce(&table::Inner, usize),
+    initialize: impl FnOnce(&[Key], &[Column], usize),
 ) {
     let (start, target) = table::Inner::reserve(target, count);
     // Move data from source to target.
     let range = low..high + 1;
     let head = source.release(count);
+    let inners = (&mut *source, &*target);
+    let keys = (inners.0.keys.get_mut(), unsafe {
+        &mut *inners.1.keys.get()
+    });
     let (low, high) = (range.start as usize, range.end as usize);
 
     if range.len() == count.get() {
         // Fast path. The move range is contiguous. Copy everything from source to target at once.
-        let source = &mut *source;
-        let keys = (source.keys.get_mut(), unsafe { &mut *target.keys.get() });
         copy_to(
-            (low, keys.0, &mut source.columns),
-            (start, keys.1, target.columns()),
+            (low, keys.0, &mut inners.0.columns),
+            (start, keys.1, inners.1.columns()),
             count,
             copy,
             drop,
         );
 
         for &index in drop {
-            let source = unsafe { get_unchecked_mut(&mut source.columns, index) };
+            let source = unsafe { get_unchecked_mut(&mut inners.0.columns, index) };
             unsafe { source.drop(low, count) };
         }
 
@@ -551,7 +622,7 @@ pub(crate) fn move_to<'d, 'a>(
         if let Some(end) = NonZeroUsize::new(end) {
             let start = head + over;
             // Copy the range at the end of the table on the beginning of the removed range.
-            for column in source.columns.iter_mut() {
+            for column in inners.0.columns.iter_mut() {
                 unsafe { column.copy(start, low, end) };
             }
 
@@ -561,12 +632,10 @@ pub(crate) fn move_to<'d, 'a>(
         }
     } else {
         // Range is not contiguous; use the slow path.
-        let source = &mut *source;
-        let keys = (source.keys.get_mut(), unsafe { &mut *target.keys.get() });
         for (i, &(.., row)) in rows.iter().enumerate() {
             copy_to(
-                (row as usize, keys.0, &mut source.columns),
-                (start + i, keys.1, target.columns()),
+                (row as usize, keys.0, &mut inners.0.columns),
+                (start + i, keys.1, inners.1.columns()),
                 ONE,
                 copy,
                 drop,
@@ -585,7 +654,7 @@ pub(crate) fn move_to<'d, 'a>(
                 }
                 debug_assert!(cursor < head + count.get());
 
-                for column in source.columns.iter_mut() {
+                for column in inners.0.columns.iter_mut() {
                     unsafe { column.squash(cursor, row, ONE) };
                 }
 
@@ -598,8 +667,8 @@ pub(crate) fn move_to<'d, 'a>(
         }
     }
 
-    initialize(&target, start);
-    target.commit(count);
+    initialize(unsafe { &*inners.1.keys.get() }, target.columns(), start);
+    inners.1.commit(count);
     // Slots must be updated after the table `commit` to prevent a `query::find` to be able to observe a row which
     // has an index greater than the `table.count()`. As long as the slots remain in the source table, all accesses
     // to these keys will block at the table access and will correct their table index after they acquire the source

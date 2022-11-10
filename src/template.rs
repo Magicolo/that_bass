@@ -1,14 +1,16 @@
 use crate::{
     core::{tuples, utility::get_unchecked},
+    key::Key,
     table::{Column, Table},
     Database, Datum, Error, Meta,
 };
 use std::{marker::PhantomData, sync::Arc};
 
+pub struct With<T, F>(F, PhantomData<fn(T)>);
 pub struct Apply<D>(usize, PhantomData<fn(D)>);
 pub struct DeclareContext<'a>(&'a mut Vec<&'static Meta>);
 pub struct InitializeContext<'a>(&'a Table);
-pub struct ApplyContext<'a>(&'a [Column], usize);
+pub struct ApplyContext<'a>(&'a [Key], &'a [Column], usize);
 
 pub unsafe trait Template: 'static {
     type State: Send + Sync;
@@ -65,23 +67,29 @@ impl<'a> InitializeContext<'a> {
 
 impl<'a> ApplyContext<'a> {
     #[inline]
-    pub const fn new(columns: &'a [Column]) -> Self {
-        Self(columns, 0)
+    pub const fn new(keys: &'a [Key], columns: &'a [Column]) -> Self {
+        Self(keys, columns, 0)
     }
 
     #[inline]
     pub const fn own(&self) -> Self {
-        Self(self.0, self.1)
+        Self(self.0, self.1, self.2)
     }
 
     #[inline]
     pub const fn with(&self, index: usize) -> Self {
-        Self(self.0, index)
+        debug_assert!(index < self.0.len());
+        Self(self.0, self.1, index)
+    }
+
+    #[inline]
+    pub fn key(&self) -> Key {
+        unsafe { *get_unchecked(self.0, self.2) }
     }
 
     #[inline]
     pub fn apply<D: Datum>(&self, state: &Apply<D>, value: D) {
-        unsafe { get_unchecked(self.0, state.0).set(self.1, value) };
+        unsafe { get_unchecked(self.1, state.0).set(self.2, value) };
     }
 }
 
@@ -113,6 +121,21 @@ unsafe impl<D: Datum> Template for D {
     }
 }
 
+unsafe impl<T: Template, F: FnOnce(Key) -> T + 'static> Template for With<T, F> {
+    type State = T::State;
+
+    fn declare(context: DeclareContext) -> Result<(), Error> {
+        T::declare(context)
+    }
+    fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
+        T::initialize(context)
+    }
+    #[inline]
+    unsafe fn apply(self, state: &Self::State, context: ApplyContext) {
+        self.0(context.key()).apply(state, context)
+    }
+}
+
 macro_rules! tuple {
     ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
         unsafe impl<$($t: Template,)*> Template for ($($t,)*) {
@@ -135,3 +158,8 @@ macro_rules! tuple {
     };
 }
 tuples!(tuple);
+
+#[inline]
+pub const fn with<T, F: FnOnce(Key) -> T>(with: F) -> With<T, F> {
+    With(with, PhantomData)
+}

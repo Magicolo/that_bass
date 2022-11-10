@@ -121,6 +121,12 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
         self.keys.len()
     }
 
+    pub fn drain(&mut self) -> impl ExactSizeIterator<Item = Key> + '_ {
+        debug_assert_eq!(self.pending.len(), 0);
+        debug_assert_eq!(self.indices.len(), 0);
+        self.keys.drain()
+    }
+
     pub fn clear(&mut self) {
         debug_assert_eq!(self.pending.len(), 0);
         debug_assert_eq!(self.indices.len(), 0);
@@ -173,6 +179,7 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
                 let Some(Ok(state)) = states.get_mut(*index) else {
                     unreachable!();
                 };
+                debug_assert_ne!(state.source.index(), state.target.index());
                 if state.rows.len() == 0 {
                     return Ok(sum);
                 }
@@ -195,7 +202,7 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
                     &mut state.rows,
                     &state.inner.copy,
                     &state.inner.drop,
-                    |_, _| {},
+                    |_, _, _| {},
                 );
                 Ok(sum + count.get())
             },
@@ -203,28 +210,27 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
                 let Some(Ok(state)) = states.get_mut(*index) else {
                     unreachable!();
                 };
+                debug_assert_ne!(state.source.index(), state.target.index());
                 let (source, target, low, high, count) =
                     // If locks are always taken in order (lower index first), there can not be a deadlock between move operations.
                     if state.source.index() < state.target.index() {
                         let source = state.source.inner.write();
                         let (low, high) = Self::retain(&state.source, &mut state.rows, pending);
                         let Some(count) = NonZeroUsize::new(state.rows.len()) else {
-                        // Happens if all keys from this table have been moved or destroyed between here and the sorting.
-                        return sum;
-                    };
+                            // Happens if all keys from this table have been moved or destroyed between here and the sorting.
+                            return sum;
+                        };
                         let target = state.target.inner.upgradable_read();
                         (source, target, low, high, count)
-                    } else if state.source.index() > state.target.index() {
+                    } else {
                         let target = state.target.inner.upgradable_read();
                         let source = state.source.inner.write();
                         let (low, high) = Self::retain(&state.source, &mut state.rows, pending);
                         let Some(count) = NonZeroUsize::new(state.rows.len()) else {
-                        // Happens if all keys from this table have been moved or destroyed between here and the sorting.
-                        return sum ;
-                    };
+                            // Happens if all keys from this table have been moved or destroyed between here and the sorting.
+                            return sum ;
+                        };
                         (source, target, low, high, count)
-                    } else {
-                        unreachable!()
                     };
                 move_to(
                     self.database,
@@ -234,7 +240,7 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
                     &mut state.rows,
                     &state.inner.copy,
                     &state.inner.drop,
-                    |_, _| {},
+                    |_, _, _| {},
                 );
                 sum + count.get()
             },

@@ -89,6 +89,12 @@ impl<'d, F: Filter> Destroy<'d, F> {
         self.keys.len()
     }
 
+    pub fn drain(&mut self) -> impl ExactSizeIterator<Item = Key> + '_ {
+        debug_assert_eq!(self.pending.len(), 0);
+        debug_assert_eq!(self.indices.len(), 0);
+        self.keys.drain()
+    }
+
     pub fn clear(&mut self) {
         debug_assert_eq!(self.pending.len(), 0);
         debug_assert_eq!(self.indices.len(), 0);

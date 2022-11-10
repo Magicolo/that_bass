@@ -97,6 +97,21 @@ impl<'d, T: Template> Create<'d, T> {
         self.with_n(T::default)
     }
 
+    pub fn drain(&mut self) -> impl ExactSizeIterator<Item = (Key, T)> + '_ {
+        let keys = self.database.keys();
+        keys.recycle(self.keys[..self.templates.len()].iter().copied());
+        self.templates
+            .drain(..)
+            .zip(self.keys.iter().copied())
+            .map(|pair| (pair.1, pair.0))
+    }
+
+    pub fn clear(&mut self) {
+        let keys = self.database.keys();
+        keys.recycle(self.keys[..self.templates.len()].iter().copied());
+        self.templates.clear();
+    }
+
     /// Resolves the accumulated create operations.
     ///
     /// In order to prevent deadlocks, **do not call this method while using a `Query`** unless you can
@@ -111,7 +126,7 @@ impl<'d, T: Template> Create<'d, T> {
         // until `table::Inner::commit` is called and as long as a table lock is held.
         let keys = unsafe { &mut **inner.keys.get() };
         keys[start..start + count.get()].copy_from_slice(&self.keys[..count.get()]);
-        let context = ApplyContext::new(inner.columns());
+        let context = ApplyContext::new(keys, inner.columns());
         for (i, template) in self.templates.drain(..).enumerate() {
             // SAFETY: This is safe by the guarantees of `T::apply` and by the fact that only the rows in the range
             // `start..start + count` are modified.
@@ -128,12 +143,6 @@ impl<'d, T: Template> Create<'d, T> {
             .initialize(keys, self.table.index(), start..start + count.get());
         inner.commit(count);
         count.get()
-    }
-
-    pub fn clear(&mut self) {
-        let keys = self.database.keys();
-        keys.recycle(self.keys[..self.templates.len()].iter().copied());
-        self.templates.clear();
     }
 }
 
