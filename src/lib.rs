@@ -40,9 +40,6 @@ mod test;
     created keys are reported to not be present in a corresponding query.
         - This happens because `Table::commit` can technically fail for an unlimited amount of time...
         - Would require to force a successful commit at key moments.
-    TODO: Allow creating with a struct with a `#[derive(Template)]`. All members will need to implement `Template`.
-    TODO: Allow querying with a struct or enum with a `#[derive(Row)]`. All members will need to implement `Item`.
-    TODO: Allow filtering with a struct or enum with a `#[derive(Filter)]`. All members will need to implement `Filter`.
     TODO: Implement `Permute`.
         - Returns all permutations (with repetitions) of two queries.
         - Order of items matters, so (A, B) is considered different than (B, A), thus both will be returned.
@@ -55,6 +52,7 @@ mod test;
     TODO: Prevent using a query within a query using an auto trait `Nest` that is negatively implemented for `Query`.
     TODO: Test the database with generative tests.
 
+    TODO (POSTPONED): Allow querying with a struct or enum with a `#[derive(Row)]`.
     TODO (POSTPONED): Share some query state using a COW pattern.
         - Gains are likely marginal and memory will remain in use for the lifetime of the database...
     TODO (POSTPONED): Add an option to split large table stores in chunks of fixed size.
@@ -277,6 +275,42 @@ impl Database {
     pub const fn resources(&self) -> &Resources {
         &self.resources
     }
+}
+
+mod messages {
+    // use std::{cell::RefCell, collections::VecDeque};
+
+    // pub struct Messages<T> {
+    //     messages: VecDeque<T>,
+    //     receivers: usize,
+    //     index: usize,
+    //     count: usize,
+    // }
+    // pub struct Receive<'a, T> {
+    //     messages: &'a RefCell<Messages<T>>,
+    //     index: usize,
+    //     last: usize,
+    // }
+
+    // impl<'a, T: Clone> Receive<'a, T> {
+    //     pub fn next(&mut self) -> Option<T> {
+    //         let mut messages = self.messages.borrow_mut();
+    //         if self.last == messages.index {
+    //             let message = messages.messages.get(self.index)?.clone();
+    //             self.index += 1;
+    //             if self.index == messages.index {
+    //                 if messages.count == messages.receivers {
+    //                     messages.index = self.index;
+    //                 } else {
+    //                     messages.count += 1;
+    //                 }
+    //             }
+    //             Some(message)
+    //         } else {
+    //             None
+    //         }
+    //     }
+    // }
 }
 
 // mod locks {

@@ -8,5 +8,5 @@ authors = ["Magicolo <magicololand@gmail.com>"]
 proc-macro = true
 
 [dependencies]
-syn = "*"
+syn = { version = "*", features = ["visit-mut"] }
 quote = "*"
