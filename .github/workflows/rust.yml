@@ -16,14 +16,14 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
-    - name: Install Miri
+    - name: Install
       run: |
         rustup toolchain install nightly --component miri
         rustup override set nightly
         cargo miri setup
-    - name: Run Niri tests
+    - name: Build
+      run: cargo build --verbose
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Run Miri tests
       run: cargo miri test --verbose
