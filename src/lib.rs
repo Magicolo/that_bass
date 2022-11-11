@@ -160,9 +160,9 @@ use std::{
     num::NonZeroUsize,
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
 };
-use table::Tables;
+use table::{Table, Tables};
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     DuplicateMeta,
     InvalidKey(Key),
@@ -184,10 +184,11 @@ impl fmt::Display for Error {
 }
 impl error::Error for Error {}
 
-pub struct Database {
+pub struct Database<L = ()> {
     keys: Keys,
     tables: Tables,
     resources: Resources,
+    listen: L,
 }
 
 pub struct Meta {
@@ -199,6 +200,25 @@ pub struct Meta {
     copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), NonZeroUsize),
     drop: (fn() -> bool, unsafe fn(NonNull<()>, usize, NonZeroUsize)),
 }
+
+/// Allows to listen to database events. These events are guaranteed to be coherent (ex. `create` always happens before
+/// `destroy` for a given key).
+///
+/// **All listen methods should be considered as time critical** since they are called while holding table locks and may add
+/// contention on many other database operations. If these events need to be processed in some way, it is recommended to queue
+/// the events and defer the processing.
+pub trait Listen: Send + Sync + 'static {
+    #[inline]
+    fn created(&self, _: &[Key], _: &Table) {}
+    #[inline]
+    fn destroyed(&self, _: &[Key], _: &Table) {}
+    #[inline]
+    fn added(&self, _: &[Key], _: TypeId) {}
+    #[inline]
+    fn removed(&self, _: &[Key], _: TypeId) {}
+}
+
+impl Listen for () {}
 
 pub trait Datum: Sized + 'static {
     #[inline]
@@ -245,14 +265,21 @@ impl Meta {
 }
 
 impl Database {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Database {
+        Self::new_with(())
+    }
+
+    pub fn new_with<L: Listen>(listen: L) -> Database<L> {
+        Database {
             keys: Keys::new(),
             tables: Tables::new(),
             resources: Resources::new(),
+            listen,
         }
     }
+}
 
+impl<L> Database<L> {
     #[inline]
     pub const fn keys(&self) -> &Keys {
         &self.keys
@@ -270,7 +297,7 @@ impl Database {
 }
 
 mod messages {
-    use std::{error::Error, sync::Arc};
+    use std::error::Error;
 
     use super::*;
     use crossbeam_channel::unbounded;

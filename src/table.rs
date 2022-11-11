@@ -246,7 +246,7 @@ impl Tables {
         let upgrade = self.lock.upgradable_read();
         // SAFETY: `self.tables` can be read since an upgrade lock is held. The lock will need to be upgraded
         // before any mutation to `self.tables`.
-        let tables = unsafe { &*self.tables.get() };
+        let tables = unsafe { &mut *self.tables.get() };
         for table in tables.iter() {
             if table.is_all(metas.iter().map(|meta| meta.identifier())) {
                 return table.clone();
@@ -268,7 +268,7 @@ impl Tables {
         });
         let write = RwLockUpgradableReadGuard::upgrade(upgrade);
         // SAFETY: The lock has been upgraded so `self.tables` can be mutated.
-        unsafe { &mut *self.tables.get() }.push(table.clone());
+        tables.push(table.clone());
         let read = RwLockWriteGuard::downgrade(write);
         let table = unsafe { get_unchecked(tables, index) }.clone();
         drop(read);

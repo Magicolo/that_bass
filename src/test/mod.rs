@@ -196,6 +196,8 @@ pub mod template {
 //     }
 // }
 
+const COUNT: usize = 17;
+
 fn create_one(database: &Database, template: impl Template) -> Result<Key, Error> {
     let mut create = database.create()?;
     let key = create.one(template);
@@ -266,7 +268,7 @@ fn create_one_returns_non_null_key() -> Result<(), Error> {
 #[test]
 fn create_all_returns_no_null_key() -> Result<(), Error> {
     let database = Database::new();
-    assert!(create_n(&database, [(); 1000])?.iter().all(Key::valid));
+    assert!(create_n(&database, [(); COUNT])?.iter().all(Key::valid));
     Ok(())
 }
 
@@ -275,7 +277,7 @@ fn create_all_returns_distinct_keys() -> Result<(), Error> {
     let database = Database::new();
     let mut set = HashSet::new();
     let mut create = database.create()?;
-    assert!(create.all([(); 1000]).iter().all(|&key| set.insert(key)));
+    assert!(create.all([(); COUNT]).iter().all(|&key| set.insert(key)));
     Ok(())
 }
 
@@ -337,12 +339,12 @@ fn destroy_all_n_with_create_all_n_resolves_n() -> Result<(), Error> {
             .count()
     };
 
-    let keys = create_n(&database, [(); 1000])?;
+    let keys = create_n(&database, [(); COUNT])?;
     let mut destroy = database.destroy();
-    assert_eq!(count(&keys), 1000);
+    assert_eq!(count(&keys), COUNT);
     destroy.all(keys.clone());
-    assert_eq!(count(&keys), 1000);
-    assert_eq!(destroy.resolve(), 1000);
+    assert_eq!(count(&keys), COUNT);
+    assert_eq!(destroy.resolve(), COUNT);
     assert_eq!(count(&keys), 0);
     Ok(())
 }
@@ -511,18 +513,18 @@ fn destroy_all_resolve_0() -> Result<(), Error> {
 #[test]
 fn destroy_all_resolve_100() -> Result<(), Error> {
     let database = Database::new();
-    create_n(&database, [(); 100])?;
-    assert_eq!(database.destroy_all().resolve(), 100);
+    create_n(&database, [(); COUNT])?;
+    assert_eq!(database.destroy_all().resolve(), COUNT);
     Ok(())
 }
 
 #[test]
 fn destroy_all_filter() -> Result<(), Error> {
     let database = Database::new();
-    create_n(&database, [(); 100])?;
-    create_n(&database, [A; 100])?;
-    assert_eq!(database.destroy_all().filter::<Has<A>>().resolve(), 100);
-    assert_eq!(database.destroy_all().resolve(), 100);
+    create_n(&database, [(); COUNT])?;
+    create_n(&database, [A; COUNT])?;
+    assert_eq!(database.destroy_all().filter::<Has<A>>().resolve(), COUNT);
+    assert_eq!(database.destroy_all().resolve(), COUNT);
     Ok(())
 }
 
@@ -548,7 +550,7 @@ fn query_is_none_destroy_one_key() -> Result<(), Error> {
 #[test]
 fn query_is_some_all_create_all() -> Result<(), Error> {
     let database = Database::new();
-    let keys = create_n(&database, [(); 1000])?;
+    let keys = create_n(&database, [(); COUNT])?;
     let mut query = database.query::<()>()?;
     assert!(keys.iter().all(|&key| query.find(key, |_| {}).is_ok()));
     Ok(())
@@ -557,13 +559,13 @@ fn query_is_some_all_create_all() -> Result<(), Error> {
 #[test]
 fn query_is_some_remain_destroy_all() -> Result<(), Error> {
     let database = Database::new();
-    let keys = create_n(&database, [(); 1000])?;
-    destroy_all(&database, &keys[..500]);
+    let keys = create_n(&database, [(); COUNT])?;
+    destroy_all(&database, &keys[..COUNT / 2]);
     let mut query = database.query::<()>()?;
-    assert!(keys[..500]
+    assert!(keys[..COUNT / 2]
         .iter()
         .all(|&key| query.find(key, |_| {}).is_err()));
-    assert!(keys[500..]
+    assert!(keys[COUNT / 2..]
         .iter()
         .all(|&key| query.find(key, |_| {}).is_ok()));
     Ok(())
@@ -638,19 +640,20 @@ fn query_option_read() -> Result<(), Error> {
 #[test]
 fn query_split_item_on_multiple_threads() -> Result<(), Error> {
     let database = Database::new();
-    create_n(&database, [C(0); 25])?;
-    create_n(&database, [(A, C(0)); 50])?;
-    create_n(&database, [(B, C(0)); 75])?;
-    create_n(&database, [(A, B, C(0)); 100])?;
+    create_n(&database, [C(0); COUNT])?;
+    create_n(&database, [(A, C(0)); COUNT * 2])?;
+    create_n(&database, [(B, C(0)); COUNT * 3])?;
+    create_n(&database, [(A, B, C(0)); COUNT * 4])?;
     let mut query = database.query::<&mut C>()?;
     assert_eq!(query.split().len(), 4);
     assert!(query
         .split()
         .enumerate()
-        .all(|(i, split)| split.count() == (i + 1) * 25));
+        .all(|(i, split)| split.count() == (i + 1) * COUNT));
 
     scope(|scope| {
-        for split in query.split() {
+        for (i, split) in query.split().enumerate() {
+            assert_eq!(split.count(), (i + 1) * COUNT);
             scope.spawn(move || split.each(|c| c.0 += 1));
         }
     });
@@ -661,18 +664,19 @@ fn query_split_item_on_multiple_threads() -> Result<(), Error> {
 #[test]
 fn query_split_chunk_on_multiple_threads() -> Result<(), Error> {
     let database = Database::new();
-    create_n(&database, [C(0); 25])?;
-    create_n(&database, [(A, C(0)); 50])?;
-    create_n(&database, [(B, C(0)); 75])?;
-    create_n(&database, [(A, B, C(0)); 100])?;
+    create_n(&database, [C(0); COUNT])?;
+    create_n(&database, [(A, C(0)); COUNT * 2])?;
+    create_n(&database, [(B, C(0)); COUNT * 3])?;
+    create_n(&database, [(A, B, C(0)); COUNT * 4])?;
     let mut query = database.query::<&mut C>()?.chunk();
     assert_eq!(query.count(), 4);
     assert_eq!(query.split().len(), 4);
 
     scope(|scope| {
-        for split in query.split() {
+        for (i, split) in query.split().enumerate() {
             scope.spawn(move || {
                 let value = split.map(|c| {
+                    assert_eq!(c.len(), (i + 1) * COUNT);
                     for c in c {
                         c.0 += 1;
                     }
@@ -717,7 +721,6 @@ fn multi_join() -> Result<(), Error> {
 fn copy_to() -> Result<(), Error> {
     struct CopyTo(Key);
     impl Datum for CopyTo {}
-    const COUNT: usize = 10;
 
     let database = Database::new();
     let mut a = create_one(&database, C(1))?;
@@ -740,7 +743,6 @@ fn copy_to() -> Result<(), Error> {
 fn copy_from() -> Result<(), Error> {
     struct CopyFrom(Key);
     impl Datum for CopyFrom {}
-    const COUNT: usize = 10;
 
     let database = Database::new();
     let a = create_one(&database, C(1))?;
@@ -778,7 +780,6 @@ fn copy_from() -> Result<(), Error> {
 fn swap() -> Result<(), Error> {
     struct Swap(Key, Key);
     impl Datum for Swap {}
-    const COUNT: usize = 10;
 
     let database = Database::new();
     let mut a = create_one(&database, C(1))?;

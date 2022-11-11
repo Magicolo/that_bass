@@ -2,7 +2,7 @@ use crate::{
     key::Key,
     table::{self, Table},
     template::{ApplyContext, DeclareContext, InitializeContext, Template},
-    Database, Error,
+    Database, Error, Listen,
 };
 use std::{num::NonZeroUsize, sync::Arc};
 
@@ -146,6 +146,10 @@ impl<'d, T: Template> Create<'d, T> {
         self.database
             .keys()
             .initialize(keys, self.table.index(), start..start + count.get());
+        // Emit a `create` event before
+        self.database
+            .listen
+            .created(&self.keys[..count.get()], &self.table);
         inner.commit(count);
         count.get()
     }
