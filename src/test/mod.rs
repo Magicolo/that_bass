@@ -1,5 +1,5 @@
 use crate as that_bass;
-use std::{collections::HashSet, marker::PhantomData, thread::scope};
+use std::{any::TypeId, collections::HashSet, marker::PhantomData, thread::scope};
 use that_bass::{
     filter::{Filter, Has, Is, Not},
     key::Key,
@@ -303,13 +303,13 @@ fn destroy_one_fails_with_null_key() {
     let mut destroy = database.destroy();
     assert_eq!(
         database.keys().get(Key::NULL).err(),
-        Some(Error::InvalidKey)
+        Some(Error::InvalidKey(Key::NULL))
     );
     destroy.one(Key::NULL);
     assert_eq!(destroy.resolve(), 0);
     assert_eq!(
         database.keys().get(Key::NULL).err(),
-        Some(Error::InvalidKey)
+        Some(Error::InvalidKey(Key::NULL))
     );
 }
 
@@ -322,7 +322,7 @@ fn destroy_one_true_with_create_one() -> Result<(), Error> {
     destroy.one(key);
     assert!(database.keys().get(key).is_ok());
     assert_eq!(destroy.resolve(), 1);
-    assert_eq!(database.keys().get(key).err(), Some(Error::InvalidKey));
+    assert_eq!(database.keys().get(key).err(), Some(Error::InvalidKey(key)));
     Ok(())
 }
 
@@ -541,7 +541,7 @@ fn query_is_none_destroy_one_key() -> Result<(), Error> {
     let key = create_one(&database, ())?;
     destroy_one(&database, key)?;
     let mut query = database.query::<()>()?;
-    assert_eq!(query.find(key, |_| {}).err(), Some(Error::InvalidKey));
+    assert_eq!(query.find(key, |_| {}).err(), Some(Error::InvalidKey(key)));
     Ok(())
 }
 
@@ -574,7 +574,7 @@ fn query_is_err_with_write_write() {
     let database = Database::new();
     assert_eq!(
         database.query::<(&mut A, &mut A)>().err(),
-        Some(Error::WriteWriteConflict)
+        Some(Error::WriteWriteConflict(TypeId::of::<A>()))
     );
 }
 
@@ -583,11 +583,11 @@ fn query_is_err_with_read_write() {
     let database = Database::new();
     assert_eq!(
         database.query::<(&A, &mut A)>().err(),
-        Some(Error::ReadWriteConflict)
+        Some(Error::ReadWriteConflict(TypeId::of::<A>()))
     );
     assert_eq!(
         database.query::<(&mut A, &A)>().err(),
-        Some(Error::ReadWriteConflict)
+        Some(Error::ReadWriteConflict(TypeId::of::<A>()))
     );
 }
 

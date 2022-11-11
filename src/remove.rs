@@ -300,7 +300,7 @@ impl<'d, T: Template, F: Filter> Remove<'d, T, F> {
         let mut high = 0;
         for i in (0..rows.len()).rev() {
             let (key, slot, row) = unsafe { get_unchecked_mut(rows, i) };
-            if let Ok(new_table) = slot.table(key.generation()) {
+            if let Ok(new_table) = slot.table(*key) {
                 if new_table == table.index() {
                     *row = slot.row();
                     low = low.min(*row);
@@ -438,7 +438,7 @@ impl<T: Template> ShareTable<T> {
                 database.tables().find_or_add(&targets)
             };
             if source.index() == target.index() {
-                return Err(Error::TablesMustDiffer);
+                return Err(Error::TablesMustDiffer(source.index() as _));
             }
 
             let mut copy = Vec::new();

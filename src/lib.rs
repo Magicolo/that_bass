@@ -155,6 +155,7 @@ use key::{Key, Keys};
 use resources::Resources;
 use std::{
     any::{type_name, TypeId},
+    error, fmt,
     mem::{needs_drop, size_of, ManuallyDrop},
     num::NonZeroUsize,
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
@@ -163,34 +164,25 @@ use table::Tables;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Error {
-    AddRemoveConflict,
     DuplicateMeta,
-    FailedToLockColumns,
-    FailedToLockTable,
-    InsufficientGuard,
-    Invalid,
-    InvalidGuard,
-    InvalidKey,
-    InvalidTable,
-    InvalidType,
+    InvalidKey(Key),
+    InvalidType(TypeId),
     KeyNotInQuery(Key),
     KeyNotInSplit(Key),
-    KeysMustDiffer(Key),
-    MissingColumn,
-    MissingIndex,
-    MissingJoinKey,
-    MissingTable,
-    QueryConflict,
-    ReadWriteConflict,
-    WouldBlock,
-    WouldDeadlock,
-    WriteWriteConflict,
-    WrongGeneration,
-    WrongGenerationOrTable,
-    WrongRow,
-    FilterDoesNotMatch,
-    TablesMustDiffer,
+    MissingColumn(TypeId),
+    MissingTable(usize),
+    ReadWriteConflict(TypeId),
+    WriteWriteConflict(TypeId),
+    TablesMustDiffer(usize),
+    TableDoesNotMatchFilter(usize),
 }
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self, f)
+    }
+}
+impl error::Error for Error {}
 
 pub struct Database {
     keys: Keys,
@@ -278,6 +270,26 @@ impl Database {
 }
 
 mod messages {
+    use std::{error::Error, sync::Arc};
+
+    use super::*;
+    use crossbeam_channel::unbounded;
+
+    fn boba() -> Result<(), Box<dyn Error>> {
+        struct OnKill(Key);
+        let database = Database::new();
+        let (send, receive) = database
+            .resources()
+            .global(|| unbounded::<OnKill>())
+            .read()
+            .clone();
+        let a = receive.clone();
+        let b = receive.clone();
+        send.send(OnKill(Key::NULL))?;
+        let c = a.recv()?;
+        let d = b.recv()?;
+        Ok(())
+    }
     // use std::{cell::RefCell, collections::VecDeque};
 
     // pub struct Messages<T> {

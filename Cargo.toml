@@ -7,6 +7,7 @@ authors = ["Magicolo <magicololand@gmail.com>"]
 [dependencies]
 that_base_derive = { path = "./that_base_derive" }
 parking_lot = "*"
+crossbeam-channel = "*"
 
 [workspace]
 members = ["that_base_derive"]

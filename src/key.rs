@@ -91,7 +91,9 @@ impl Keys {
         let (chunk_index, slot_index) = Self::decompose(key.index());
         // SAFETY: `chunks` can be read since the `count_read` lock is held.
         let chunks = unsafe { &**self.chunks.get() };
-        let chunk = &**chunks.get(chunk_index as usize).ok_or(Error::InvalidKey)?;
+        let chunk = &**chunks
+            .get(chunk_index as usize)
+            .ok_or(Error::InvalidKey(key))?;
         // SAFETY: As soon as the `chunk` is dereferenced, the `count_read` lock is no longer needed.
         drop(read);
         let slot = unsafe { get_unchecked(chunk, slot_index as usize) };
@@ -99,7 +101,7 @@ impl Keys {
         // because its address is stable and no mutable reference to it is ever given out.
         // The stability of the address is guaranteed by the fact that the `chunks` vector never drops its items other than
         // when `self` is dropped.
-        Ok((slot, slot.table(key.generation())?))
+        Ok((slot, slot.table(key)?))
     }
 
     /// SAFETY: The provided key must be valid.
@@ -127,10 +129,10 @@ impl Keys {
             // SAFETY: See `get`.
             let chunks = unsafe { &**self.chunks.get() };
             let Some(chunk) = chunks.get(chunk_index as usize) else {
-                return (key, Err(Error::InvalidKey));
+                return (key, Err(Error::InvalidKey(key)));
             };
             let slot = unsafe { get_unchecked(&**chunk, slot_index as usize) };
-            match slot.table(key.generation()) {
+            match slot.table(key) {
                 Ok(table) => (key, Ok((slot, table))),
                 Err(error) => (key, Err(error)),
             }
@@ -274,12 +276,12 @@ impl Slot {
     }
 
     #[inline]
-    pub fn table(&self, generation: u32) -> Result<u32, Error> {
+    pub fn table(&self, key: Key) -> Result<u32, Error> {
         let indices = Self::decompose_indices(self.indices.load(Acquire));
-        if indices.0 == generation && indices.1 < u32::MAX {
+        if indices.0 == key.generation() && indices.1 < u32::MAX {
             Ok(indices.1)
         } else {
-            Err(Error::InvalidKey)
+            Err(Error::InvalidKey(key))
         }
     }
 

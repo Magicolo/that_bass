@@ -81,7 +81,7 @@ impl DeclareContext<'_> {
 
     pub fn read_with(&mut self, identifier: TypeId) -> Result<(), Error> {
         if self.0.contains(&Access::Write(identifier)) {
-            Err(Error::ReadWriteConflict)
+            Err(Error::ReadWriteConflict(identifier))
         } else {
             self.0.insert(Access::Read(identifier));
             Ok(())
@@ -94,11 +94,11 @@ impl DeclareContext<'_> {
 
     pub fn write_with(&mut self, identifier: TypeId) -> Result<(), Error> {
         if self.0.contains(&Access::Read(identifier)) {
-            Err(Error::ReadWriteConflict)
+            Err(Error::ReadWriteConflict(identifier))
         } else if self.0.insert(Access::Write(identifier)) {
             Ok(())
         } else {
-            Err(Error::WriteWriteConflict)
+            Err(Error::WriteWriteConflict(identifier))
         }
     }
 }

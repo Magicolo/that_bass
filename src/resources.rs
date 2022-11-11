@@ -39,7 +39,7 @@ impl<K: Eq + Hash> Globals<K> {
                 .or_insert_with(|| Ok(Arc::new(RwLock::new(default()?))))
                 .clone()?
                 .downcast()
-                .map_err(|_| Error::InvalidType)?,
+                .map_err(|_| Error::InvalidType(TypeId::of::<T>()))?,
         ))
     }
 
@@ -84,7 +84,7 @@ impl<K: Eq + Hash> Locals<K> {
                 .or_insert_with(|| Ok(Rc::new(RefCell::new(default()?))))
                 .clone()?
                 .downcast()
-                .map_err(|_| Error::InvalidType)?,
+                .map_err(|_| Error::InvalidType(TypeId::of::<T>()))?,
         ))
     }
 

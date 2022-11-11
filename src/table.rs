@@ -199,7 +199,7 @@ impl Tables {
         let read = self.lock.read();
         let table = &**unsafe { &**self.tables.get() }
             .get(index)
-            .ok_or(Error::MissingTable)?;
+            .ok_or(Error::MissingTable(index))?;
         drop(read);
         Ok(table)
     }
@@ -219,7 +219,7 @@ impl Tables {
         let read = self.lock.read();
         let table = unsafe { &**self.tables.get() }
             .get(index)
-            .ok_or(Error::MissingTable)?
+            .ok_or(Error::MissingTable(index))?
             .clone();
         drop(read);
         Ok(table)
@@ -344,7 +344,7 @@ impl Table {
         let index = self
             .metas
             .binary_search_by_key(&identifier, |meta| meta.identifier())
-            .map_err(|_| Error::MissingColumn)?;
+            .map_err(|_| Error::MissingColumn(identifier))?;
         Ok((index, self.metas[index]))
     }
 }

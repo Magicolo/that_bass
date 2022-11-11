@@ -382,7 +382,7 @@ impl<'d, T: Template, F: Filter> Add<'d, T, F> {
         let mut high = 0;
         for i in (0..rows.len()).rev() {
             let (key, slot, row) = unsafe { get_unchecked_mut(rows, i) };
-            if let Ok(table_index) = slot.table(key.generation()) {
+            if let Ok(table_index) = slot.table(*key) {
                 if table_index == table.index() {
                     *row = slot.row();
                     low = low.min(*row);

@@ -243,7 +243,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             });
             Ok(())
         } else {
-            Err(Error::InvalidTable)
+            Err(Error::TableDoesNotMatchFilter(table.index() as _))
         }
     }
 }
@@ -429,7 +429,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
 
             let inner = table.inner.read();
             // The key must be checked again while holding the table lock to be sure is has not been moved/destroyed since last read.
-            let new_table = match slot.table(key.generation()) {
+            let new_table = match slot.table(key) {
                 Ok(new_table) => new_table,
                 // The `key` has just been destroyed.
                 // - Do not call `find` in here since it would hold locks for longer.
@@ -492,7 +492,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             let slots = unsafe { get_unchecked_mut(&mut by.slots, index) };
             for (key, value, slot) in slots.drain(..) {
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
-                match slot.table(key.generation()) {
+                match slot.table(key) {
                     Ok(table_index) if table.index() == table_index => {
                         let item = unsafe { R::item(row, context.with(slot.row() as _)) };
                         state = fold(state, value, Ok(item));
@@ -544,7 +544,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             let slots = unsafe { get_unchecked_mut(&mut by.slots, index) };
             for (key, value, slot) in slots.drain(..) {
                 // The key is allowed to move within its table (such as with a swap as part of a remove).
-                match slot.table(key.generation()) {
+                match slot.table(key) {
                     Ok(table_index) if table.index() == table_index => {
                         let item = unsafe { R::item(row, context.with(slot.row() as _)) };
                         state = fold(state, value, Ok(item))?;
