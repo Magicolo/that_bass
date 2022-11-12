@@ -1,4 +1,4 @@
-use crate as that_bass;
+use crate::{self as that_bass, event::Listen};
 use std::{any::TypeId, collections::HashSet, marker::PhantomData, thread::scope};
 use that_bass::{
     filter::{Filter, Has, Is, Not},
@@ -198,7 +198,7 @@ pub mod template {
 
 const COUNT: usize = 17;
 
-fn create_one(database: &Database, template: impl Template) -> Result<Key, Error> {
+fn create_one(database: &Database<impl Listen>, template: impl Template) -> Result<Key, Error> {
     let mut create = database.create()?;
     let key = create.one(template);
     assert_eq!(create.resolve(), 1);
@@ -206,7 +206,7 @@ fn create_one(database: &Database, template: impl Template) -> Result<Key, Error
 }
 
 fn create_n<const N: usize>(
-    database: &Database,
+    database: &Database<impl Listen>,
     templates: [impl Template; N],
 ) -> Result<[Key; N], Error> {
     let mut create = database.create()?;
@@ -215,14 +215,14 @@ fn create_n<const N: usize>(
     Ok(keys)
 }
 
-fn destroy_one(database: &Database, key: Key) -> Result<(), Error> {
+fn destroy_one(database: &Database<impl Listen>, key: Key) -> Result<(), Error> {
     let mut destroy = database.destroy();
     destroy.one(key);
     assert_eq!(destroy.resolve(), 1);
     Ok(())
 }
 
-fn destroy_all(database: &Database, keys: &[Key]) {
+fn destroy_all(database: &Database<impl Listen>, keys: &[Key]) {
     let mut destroy = database.destroy();
     destroy.all(keys.iter().copied());
     assert_eq!(destroy.resolve(), keys.len());

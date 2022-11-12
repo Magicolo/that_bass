@@ -1,8 +1,9 @@
 use crate::{
     core::{tuples, utility::get_unchecked},
     key::Key,
+    resources::Resources,
     table::{Column, Table},
-    Database, Datum, Error,
+    Datum, Error,
 };
 use std::{any::TypeId, collections::HashSet, marker::PhantomData, sync::Arc};
 
@@ -222,8 +223,8 @@ impl<'a> ChunkContext<'a> {
 }
 
 impl<R: Row> ShareAccess<R> {
-    pub fn from(database: &Database) -> Result<Arc<HashSet<Access>>, Error> {
-        let share = database.resources().try_global(|| {
+    pub fn from(resources: &Resources) -> Result<Arc<HashSet<Access>>, Error> {
+        let share = resources.try_global(|| {
             let mut accesses = DeclareContext::accesses::<R>()?;
             accesses.shrink_to_fit();
             Ok(Self(Arc::new(accesses), PhantomData))

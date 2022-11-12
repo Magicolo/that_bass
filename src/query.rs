@@ -17,7 +17,7 @@ use std::{
 };
 
 pub struct Query<'d, R: Row, F = (), I = Item> {
-    database: &'d Database,
+    database: &'d crate::Inner,
     index: usize,
     indices: Vec<usize>,       // May be reordered (ex: by `fold_swap`).
     states: Vec<State<'d, R>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
@@ -26,7 +26,7 @@ pub struct Query<'d, R: Row, F = (), I = Item> {
 }
 
 pub struct Split<'d, 'a, R: Row, I = Item> {
-    database: &'d Database,
+    database: &'d crate::Inner,
     state: &'a State<'d, R>,
     _marker: PhantomData<fn(I)>,
 }
@@ -38,6 +38,7 @@ pub struct By<'d, V> {
     pairs: Vec<(Key, V)>,
     pending: Vec<(Key, V, &'d Slot, u32)>,
     slots: Vec<Vec<(Key, V, &'d Slot)>>,
+    errors: Vec<(V, Error)>,
     indices: Vec<usize>,
 }
 
@@ -47,11 +48,10 @@ struct State<'d, R: Row> {
     locks: Box<[(usize, Access)]>,
 }
 
-impl Database {
+impl<L> Database<L> {
     pub fn query<R: Row>(&self) -> Result<Query<'_, R>, Error> {
-        ShareAccess::<R>::from(self)?;
-        Ok(Query {
-            database: self,
+        ShareAccess::<R>::from(self.resources()).map(|_| Query {
+            database: &self.inner,
             indices: Vec::new(),
             states: Vec::new(),
             index: 0,
@@ -106,7 +106,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
 
     pub fn filter_with<G: Filter>(mut self, filter: G) -> Query<'d, R, (F, G), I> {
         self.states
-            .retain(|state| filter.filter(state.table, self.database));
+            .retain(|state| filter.filter(state.table, self.database.into()));
         self.indices.clear();
         self.indices.extend(0..self.states.len());
         Query {
@@ -120,8 +120,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
     }
 
     pub(crate) fn update(&mut self) {
-        let tables = self.database.tables();
-        while let Ok(table) = tables.get(self.index) {
+        while let Ok(table) = self.database.tables.get(self.index) {
             self.index += 1;
             let _ = self.try_add(table);
         }
@@ -137,12 +136,12 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             &mut self.indices,
             state,
             (&mut self.states, fold),
-            |state, (states, fold), index| {
+            |state, (states, fold), &mut index| {
                 let State {
                     state: row,
                     table,
                     locks,
-                } = unsafe { get_unchecked(states, *index) };
+                } = unsafe { get_unchecked(states, index) };
                 let Some(inner) = table.inner.try_read() else {
                     return Err(state);
                 };
@@ -150,23 +149,24 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 if keys.len() == 0 {
                     return Ok(Continue(state));
                 }
+
                 try_lock(state, locks, &inner, |state| {
-                    fold(state, *index, row, table, keys, inner.columns())
+                    fold(state, index, row, table, keys, inner.columns())
                 })
             },
-            |state, (states, fold), index| {
+            |state, (states, fold), &mut index| {
                 let State {
                     state: row,
                     table,
                     locks,
-                } = unsafe { get_unchecked_mut(states, *index) };
+                } = unsafe { get_unchecked_mut(states, index) };
                 let inner = table.inner.read();
                 let keys = inner.keys();
                 if keys.len() == 0 {
                     return Continue(state);
                 }
                 lock(locks, &inner, || {
-                    fold(state, *index, row, table, keys, inner.columns())
+                    fold(state, index, row, table, keys, inner.columns())
                 })
             },
         )
@@ -218,11 +218,11 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
     }
 
     fn try_add(&mut self, table: &'d Table) -> Result<(), Error> {
-        if self.filter.filter(table, self.database) {
+        if self.filter.filter(table, self.database.into()) {
             // Initialize first to save some work if it fails.
             let state = R::initialize(InitializeContext::new(table))?;
             let mut locks = Vec::new();
-            for &access in ShareAccess::<R>::from(self.database)?.iter() {
+            for &access in ShareAccess::<R>::from(&self.database.resources)?.iter() {
                 if let Ok((index, meta)) = table.column_with(access.identifier()) {
                     // No need to lock columns of size 0.
                     if meta.size > 0 {
@@ -401,7 +401,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     #[inline]
     pub fn has(&mut self, key: Key) -> bool {
         self.update();
-        match self.database.keys().get(key) {
+        match self.database.keys.get(key) {
             Ok((_, table)) => find_state(&mut self.states, table).is_some(),
             Err(_) => false,
         }
@@ -413,7 +413,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         find: G,
     ) -> T {
         self.update();
-        let (slot, mut old_table) = match self.database.keys().get(key) {
+        let (slot, mut old_table) = match self.database.keys.get(key) {
             Ok(pair) => pair,
             Err(error) => return find(Err(error)),
         };
@@ -433,18 +433,27 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 Ok(new_table) => new_table,
                 // The `key` has just been destroyed.
                 // - Do not call `find` in here since it would hold locks for longer.
-                Err(error) => break find(Err(error)),
+                Err(error) => {
+                    drop(inner);
+                    break find(Err(error));
+                }
             };
             if new_table == table.index() {
                 debug_assert_eq!(old_table, table.index());
-                break lock(locks, &inner, || {
-                    let row = slot.row() as usize;
-                    let keys = inner.keys();
+                let row = slot.row() as usize;
+                let keys = inner.keys();
+                if row < keys.len() {
                     debug_assert_eq!(keys.get(row).copied(), Some(key));
-                    let context = ItemContext::new(table, keys, inner.columns());
-                    let item = unsafe { R::item(state, context.with(row)) };
-                    find(Ok(item))
-                });
+                    let context = ItemContext::new(table, keys, inner.columns()).with(row);
+                    break lock(locks, &inner, || {
+                        find(Ok(unsafe { R::item(state, context) }))
+                    });
+                } else {
+                    // This is an edge case where a `Create::resolve` operation from another thread has initialized its slots but hasn't
+                    // yet commited the table count. This should be reported as if `Database::keys().get()` had failed.
+                    drop(inner);
+                    break find(Err(Error::InvalidKey(key)));
+                }
             } else {
                 // The `key` has just been moved; try again with the new table.
                 old_table = new_table;
@@ -468,14 +477,14 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         for (key, value) in by.pairs.drain(..) {
-            match self.database.keys().get(key) {
+            match self.database.keys.get(key) {
                 Ok((slot, table)) => {
                     match self.sort(&mut by.slots, &mut by.indices, key, value, slot, table) {
                         Some((value, error)) => state = fold(state, value, Err(error)),
                         None => {}
                     }
                 }
-                Err(error) => state = fold(state, value, Err(error)),
+                Err(error) => state = fold(state, value, Err(dbg!(error))),
             }
         }
 
@@ -487,24 +496,38 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         swap(&mut self.indices, &mut by.indices);
-        let state = self.guards(state, |mut state, index, row, table, keys, columns| {
-            let context = ItemContext::new(table, keys, columns);
-            let slots = unsafe { get_unchecked_mut(&mut by.slots, index) };
-            for (key, value, slot) in slots.drain(..) {
-                // The key is allowed to move within its table (such as with a swap as part of a remove).
-                match slot.table(key) {
-                    Ok(table_index) if table.index() == table_index => {
-                        let item = unsafe { R::item(row, context.with(slot.row() as _)) };
-                        state = fold(state, value, Ok(item));
+        let mut state = self.guards(
+            state,
+            |mut state, index, row_state, table, keys, columns| {
+                let context = ItemContext::new(table, keys, columns);
+                let slots = unsafe { get_unchecked_mut(&mut by.slots, index) };
+                for (key, value, slot) in slots.drain(..) {
+                    // The key is allowed to move within its table (such as with a swap as part of a remove).
+                    match slot.table(key) {
+                        Ok(table_index) if table.index() == table_index => {
+                            let row = slot.row() as usize;
+                            if row < keys.len() {
+                                let item = unsafe { R::item(row_state, context.with(row)) };
+                                state = fold(state, value, Ok(item));
+                            } else {
+                                // This is an edge case where a `Create::resolve` operation from another thread has initialized its slots but hasn't
+                                // yet commited the table count. This should be reported as if `Database::keys().get()` had failed.
+                                by.errors.push((value, Error::InvalidKey(key)));
+                            }
+                        }
+                        // The key has moved to another table between the last moment the slot indices were read and now.
+                        Ok(table_index) => by.pending.push((key, value, slot, table_index)),
+                        Err(error) => by.errors.push((value, error)),
                     }
-                    // The key has moved to another table between the last moment the slot indices were read and now.
-                    Ok(table_index) => by.pending.push((key, value, slot, table_index)),
-                    Err(error) => state = fold(state, value, Err(error)),
                 }
-            }
-            state
-        });
+                state
+            },
+        );
         swap(&mut self.indices, &mut by.indices);
+        // Resolve errors outside of `guards` to release locks sooner.
+        for (value, error) in by.errors.drain(..) {
+            state = fold(state, value, Err(error));
+        }
         state
     }
 
@@ -519,7 +542,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         for (key, value) in by.pairs.drain(..) {
-            match self.database.keys().get(key) {
+            match self.database.keys.get(key) {
                 Ok((slot, table)) => {
                     match self.sort(&mut by.slots, &mut by.indices, key, value, slot, table) {
                         Some((value, error)) => state = fold(state, value, Err(error))?,
@@ -538,26 +561,39 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         swap(&mut self.indices, &mut by.indices);
-        // TODO: No need to lock the columns if `by.slots[index].is_empty()` after being filtered.
-        let flow = self.try_guards(state, |mut state, index, row, table, keys, columns| {
-            let context = ItemContext::new(table, keys, columns);
-            let slots = unsafe { get_unchecked_mut(&mut by.slots, index) };
-            for (key, value, slot) in slots.drain(..) {
-                // The key is allowed to move within its table (such as with a swap as part of a remove).
-                match slot.table(key) {
-                    Ok(table_index) if table.index() == table_index => {
-                        let item = unsafe { R::item(row, context.with(slot.row() as _)) };
-                        state = fold(state, value, Ok(item))?;
+        let state = self.try_guards(
+            state,
+            |mut state, index, row_state, table, keys, columns| {
+                let context = ItemContext::new(table, keys, columns);
+                let slots = unsafe { get_unchecked_mut(&mut by.slots, index) };
+                for (key, value, slot) in slots.drain(..) {
+                    // The key is allowed to move within its table (such as with a swap as part of a remove).
+                    match slot.table(key) {
+                        Ok(table_index) if table.index() == table_index => {
+                            let row = slot.row() as usize;
+                            if row < keys.len() {
+                                let item =
+                                    unsafe { R::item(row_state, context.with(slot.row() as _)) };
+                                state = fold(state, value, Ok(item))?;
+                            } else {
+                                by.errors.push((value, Error::InvalidKey(key)));
+                            }
+                        }
+                        // The key has moved to another table between the last moment the slot indices were read and now.
+                        Ok(table_index) => by.pending.push((key, value, slot, table_index)),
+                        Err(error) => by.errors.push((value, error)),
                     }
-                    // The key has moved to another table between the last moment the slot indices were read and now.
-                    Ok(table_index) => by.pending.push((key, value, slot, table_index)),
-                    Err(error) => state = fold(state, value, Err(error))?,
                 }
-            }
-            Continue(state)
-        });
+                Continue(state)
+            },
+        );
         swap(&mut self.indices, &mut by.indices);
-        flow
+        let mut state = state?;
+        // Resolve errors outside of `guards` to release locks sooner.
+        for (value, error) in by.errors.drain(..) {
+            state = fold(state, value, Err(error))?;
+        }
+        Continue(state)
     }
 
     /// Sorts keys by state index such that table locks can be used for (hopefully) more than one key at a time.
@@ -659,7 +695,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
 
     #[inline]
     pub fn has(&self, key: Key) -> bool {
-        match self.database.keys().get(key) {
+        match self.database.keys.get(key) {
             Ok((_, table)) => self.state.table.index() == table,
             Err(_) => false,
         }
@@ -745,19 +781,29 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
 
         let inner = table.inner.read();
         // Check the slot while under the table lock to ensure that it doesn't move.
-        let slot = match self.database.keys().get(key) {
+        let slot = match self.database.keys.get(key) {
             Ok(pair) if pair.1 == table.index() => pair.0,
-            Ok(_) => return find(Err(Error::KeyNotInSplit(key))),
-            Err(error) => return find(Err(error)),
+            Ok(_) => {
+                drop(inner);
+                return find(Err(Error::KeyNotInSplit(key)));
+            }
+            Err(error) => {
+                drop(inner);
+                return find(Err(error));
+            }
         };
-        lock(locks, &inner, || {
-            let row = slot.row() as usize;
-            let keys = inner.keys();
+        let row = slot.row() as usize;
+        let keys = inner.keys();
+        if row < keys.len() {
             debug_assert_eq!(keys.get(row).copied(), Some(key));
-            let context = ItemContext::new(table, keys, inner.columns());
-            let item = unsafe { R::item(state, context.with(row)) };
-            find(Ok(item))
-        })
+            let context = ItemContext::new(table, keys, inner.columns()).with(row);
+            lock(locks, &inner, || {
+                find(Ok(unsafe { R::item(state, context) }))
+            })
+        } else {
+            drop(inner);
+            find(Err(Error::InvalidKey(key)))
+        }
     }
 
     #[inline]
@@ -817,10 +863,11 @@ impl By<'_, ()> {
 impl<V> By<'_, V> {
     #[inline]
     pub const fn new() -> Self {
-        By {
+        Self {
             pairs: Vec::new(),
             pending: Vec::new(),
             slots: Vec::new(),
+            errors: Vec::new(),
             indices: Vec::new(),
         }
     }
@@ -847,13 +894,9 @@ impl<V> By<'_, V> {
 }
 
 impl<V> Default for By<'_, V> {
+    #[inline]
     fn default() -> Self {
-        Self {
-            pairs: Default::default(),
-            pending: Default::default(),
-            slots: Default::default(),
-            indices: Default::default(),
-        }
+        Self::new()
     }
 }
 

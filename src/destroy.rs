@@ -1,5 +1,6 @@
 use crate::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
+    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, ONE},
+    event::Listen,
     filter::Filter,
     key::{Key, Slot},
     table::{self, Column, Table},
@@ -8,8 +9,8 @@ use crate::{
 use parking_lot::RwLockWriteGuard;
 use std::{collections::HashSet, num::NonZeroUsize};
 
-pub struct Destroy<'d, F: Filter = ()> {
-    database: &'d Database,
+pub struct Destroy<'d, F, L> {
+    database: &'d Database<L>,
     keys: HashSet<Key>, // A `HashSet` is used because the move algorithm assumes that rows will be unique.
     indices: Vec<usize>, // May be reordered (ex: by `fold_swap`).
     states: Vec<Result<State<'d>, u32>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
@@ -18,20 +19,22 @@ pub struct Destroy<'d, F: Filter = ()> {
 }
 
 /// Destroys all keys in tables that satisfy the filter `F`.
-pub struct DestroyAll<'d, F: Filter = ()> {
-    database: &'d Database,
+pub struct DestroyAll<'d, F = (), L = ()> {
+    database: &'d Database<L>,
     index: usize,
     tables: Vec<&'d Table>,
     filter: F,
 }
 
+type Rows<'d> = Vec<(Key, &'d Slot, u32)>;
+
 struct State<'d> {
     table: &'d Table,
-    rows: Vec<(Key, &'d Slot, u32)>,
+    rows: Rows<'d>,
 }
 
-impl Database {
-    pub fn destroy(&self) -> Destroy {
+impl<L> Database<L> {
+    pub fn destroy(&self) -> Destroy<'_, (), L> {
         Destroy {
             database: self,
             keys: HashSet::new(),
@@ -42,7 +45,7 @@ impl Database {
         }
     }
 
-    pub fn destroy_all(&self) -> DestroyAll {
+    pub fn destroy_all(&self) -> DestroyAll<'_, (), L> {
         DestroyAll {
             database: self,
             index: 0,
@@ -52,7 +55,7 @@ impl Database {
     }
 }
 
-impl<'d, F: Filter> Destroy<'d, F> {
+impl<'d, F, L> Destroy<'d, F, L> {
     #[inline]
     pub fn one(&mut self, key: Key) {
         self.keys.insert(key);
@@ -63,14 +66,14 @@ impl<'d, F: Filter> Destroy<'d, F> {
         self.keys.extend(keys);
     }
 
-    pub fn filter<G: Filter + Default>(self) -> Destroy<'d, (F, G)> {
+    pub fn filter<G: Filter + Default>(self) -> Destroy<'d, (F, G), L> {
         self.filter_with(G::default())
     }
 
-    pub fn filter_with<G: Filter>(mut self, filter: G) -> Destroy<'d, (F, G)> {
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> Destroy<'d, (F, G), L> {
         for state in self.states.iter_mut() {
             let index = match state {
-                Ok(state) if filter.filter(&state.table, self.database) => None,
+                Ok(state) if filter.filter(&state.table, self.database.into()) => None,
                 Ok(state) => Some(state.table.index()),
                 Err(_) => None,
             };
@@ -84,7 +87,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             pending: self.pending,
             states: self.states,
             indices: self.indices,
-            filter: self.filter.and(filter),
+            filter: (self.filter, filter),
         }
     }
 
@@ -108,7 +111,9 @@ impl<'d, F: Filter> Destroy<'d, F> {
         debug_assert_eq!(self.indices.len(), 0);
         self.keys.clear();
     }
+}
 
+impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
     pub fn resolve(&mut self) -> usize {
         for (key, result) in self.database.keys().get_all(self.keys.drain()) {
             if let Ok((slot, table)) = result {
@@ -119,7 +124,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
                     &mut self.indices,
                     &mut self.states,
                     &self.filter,
-                    self.database,
+                    &self.database.inner,
                 );
             }
         }
@@ -140,7 +145,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
                     &mut self.indices,
                     &mut self.states,
                     &self.filter,
-                    self.database,
+                    &self.database.inner,
                 );
             }
         }
@@ -187,26 +192,26 @@ impl<'d, F: Filter> Destroy<'d, F> {
 
     fn resolve_rows(
         state: &mut State<'d>,
-        mut inner: RwLockWriteGuard<'d, table::Inner>,
+        mut table: RwLockWriteGuard<'d, table::Inner>,
         (low, high, count): (u32, u32, NonZeroUsize),
-        database: &'d Database,
+        database: &'d Database<impl Listen>,
     ) {
         debug_assert!(low <= high);
 
         let range = low..high + 1;
-        let head = inner.release(count);
+        let head = table.release(count);
         let (low, high) = (range.start as usize, range.end as usize);
+        let inner = &mut *table;
+        let keys = inner.keys.get_mut();
 
         if range.len() == count.get() {
             // The destroy range is contiguous.
-            let inner = &mut *inner;
-            let keys = inner.keys.get_mut();
             let over = high.saturating_sub(head);
             let end = count.get() - over;
             if let Some(end) = NonZeroUsize::new(end) {
                 // Squash the range at the end of the table on the beginning of the removed range.
                 let start = head + over;
-                squash(database, keys, &mut inner.columns, start, low, end);
+                squash(&database.inner, keys, &mut inner.columns, start, low, end);
             }
 
             if let Some(over) = NonZeroUsize::new(over) {
@@ -215,9 +220,6 @@ impl<'d, F: Filter> Destroy<'d, F> {
                 }
             }
         } else {
-            let inner = &mut *inner;
-            let keys = inner.keys.get_mut();
-
             // Tag keys that are going to be removed such that removed keys and valid keys can be differentiated.
             for &(.., row) in state.rows.iter() {
                 *unsafe { get_unchecked_mut(keys, row as usize) } = Key::NULL;
@@ -237,8 +239,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
                         cursor += 1;
                     }
                     debug_assert!(cursor < head + count.get());
-                    let one = ONE;
-                    squash(database, keys, &mut inner.columns, cursor, row, one);
+                    squash(&database.inner, keys, &mut inner.columns, cursor, row, ONE);
                     cursor += 1;
                 } else {
                     // Try to batch contiguous drops.
@@ -265,11 +266,14 @@ impl<'d, F: Filter> Destroy<'d, F> {
             debug_assert_eq!(slot.row(), row);
             slot.release();
         }
-        drop(inner);
+        database
+            .listen
+            .destroyed(&keys[head..head + count.get()], state.table);
+        drop(table);
         // The `recycle` step can be done outside of the lock. This means that the keys within `state.rows` may be very briefly
         // non-reusable for other threads, which is fine.
         database
-            .keys
+            .keys()
             .recycle(state.rows.drain(..).map(|(key, ..)| key));
     }
 
@@ -280,7 +284,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         indices: &mut Vec<usize>,
         states: &mut Vec<Result<State<'d>, u32>>,
         filter: &F,
-        database: &'d Database,
+        database: &'d crate::Inner,
     ) {
         let index = match states.binary_search_by_key(&table, |result| match result {
             Ok(state) => state.table.index(),
@@ -288,8 +292,8 @@ impl<'d, F: Filter> Destroy<'d, F> {
         }) {
             Ok(index) => index,
             Err(index) => {
-                let table = unsafe { database.tables().get_unchecked(table as _) };
-                let result = if filter.filter(table, database) {
+                let table = unsafe { database.tables.get_unchecked(table as _) };
+                let result = if filter.filter(table, database.into()) {
                     Ok(State {
                         table,
                         rows: Vec::new(),
@@ -315,7 +319,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
     /// Call this while holding a lock on `table`.
     fn retain<'a>(
         table: &'a Table,
-        rows: &mut Vec<(Key, &'d Slot, u32)>,
+        rows: &mut Rows<'d>,
         pending: &mut Vec<(Key, &'d Slot, u32)>,
     ) -> (u32, u32) {
         let mut low = u32::MAX;
@@ -340,26 +344,28 @@ impl<'d, F: Filter> Destroy<'d, F> {
     }
 }
 
-impl<'d, F: Filter> DestroyAll<'d, F> {
-    pub fn filter<G: Filter + Default>(self) -> DestroyAll<'d, (F, G)> {
+impl<'d, F, L> DestroyAll<'d, F, L> {
+    pub fn filter<G: Filter + Default>(self) -> DestroyAll<'d, (F, G), L> {
         self.filter_with(G::default())
     }
 
-    pub fn filter_with<G: Filter>(mut self, filter: G) -> DestroyAll<'d, (F, G)> {
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> DestroyAll<'d, (F, G), L> {
         self.tables
-            .retain(|table| filter.filter(table, self.database));
+            .retain(|table| filter.filter(table, self.database.into()));
         DestroyAll {
             database: self.database,
             index: self.index,
             tables: self.tables,
-            filter: self.filter.and(filter),
+            filter: (self.filter, filter),
         }
     }
+}
 
+impl<'d, F: Filter, L: Listen> DestroyAll<'d, F, L> {
     pub fn resolve(&mut self) -> usize {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
-            if self.filter.filter(table, self.database) {
+            if self.filter.filter(table, self.database.into()) {
                 self.tables.push(table);
             }
         }
@@ -369,13 +375,22 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
             0,
             (),
             |sum, _, table| {
-                Ok(sum + Self::resolve_table(table.inner.try_write().ok_or(sum)?, self.database))
+                Ok(sum
+                    + Self::resolve_table(
+                        table.inner.try_write().ok_or(sum)?,
+                        table,
+                        self.database,
+                    ))
             },
-            |sum, _, table| sum + Self::resolve_table(table.inner.write(), self.database),
+            |sum, _, table| sum + Self::resolve_table(table.inner.write(), table, self.database),
         )
     }
 
-    fn resolve_table(mut inner: RwLockWriteGuard<'d, table::Inner>, database: &Database) -> usize {
+    fn resolve_table(
+        mut inner: RwLockWriteGuard<'d, table::Inner>,
+        table: &Table,
+        database: &Database<impl Listen>,
+    ) -> usize {
         let Some(count) = NonZeroUsize::new(*inner.count.get_mut() as _) else {
             return 0;
         };
@@ -386,13 +401,14 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
         }
         let keys = inner.keys.get_mut();
         database.keys().release(&keys[..count.get()]);
+        database.listen.destroyed(&keys[..count.get()], table);
         return count.get();
     }
 }
 
 #[inline]
 fn squash(
-    database: &Database,
+    database: &crate::Inner,
     keys: &mut [Key],
     columns: &mut [Column],
     source: usize,
@@ -404,6 +420,10 @@ fn squash(
     }
 
     // Update the keys.
-    keys.copy_within(source..source + count.get(), target);
-    database.keys().update(keys, target..target + count.get());
+    for i in 0..count.get() {
+        // Swap is used such that destroyed keys are gathered at the end of the table when the operation is complete.
+        // - This allows `on_destroy` to use this fact.
+        unsafe { swap_unchecked(keys, source + i, target + i) };
+    }
+    database.keys.update(keys, target..target + count.get());
 }

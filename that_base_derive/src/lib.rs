@@ -73,8 +73,8 @@ pub fn filter(input: TokenStream) -> TokenStream {
     let (impl_generics, type_generics, where_clauses) = generics.split_for_impl();
     let filter_path = path(ident.span(), ["that_bass", "filter", "Filter"]);
     let any_path = path(ident.span(), ["that_bass", "filter", "Any"]);
+    let context_path = path(ident.span(), ["that_bass", "filter", "Context"]);
     let table_path = path(ident.span(), ["that_bass", "table", "Table"]);
-    let database_path = path(ident.span(), ["that_bass", "Database"]);
     match data {
         Data::Struct(DataStruct { fields, .. }) => {
             let (construct, _, names, ..) = deconstruct_fields(&fields);
@@ -82,17 +82,17 @@ pub fn filter(input: TokenStream) -> TokenStream {
             quote!(
                 #[automatically_derived]
                 impl #impl_generics #filter_path for #ident #type_generics #where_clauses {
-                    fn filter(&self, _table: &#table_path, _database: &#database_path) -> bool {
+                    fn filter(&self, _table: &#table_path, _context: #context_path) -> bool {
                         let #ident #construct = self;
-                        true #(&& #filter_path::filter(#names, _table, _database))*
+                        true #(&& #filter_path::filter(#names, _table, _context.clone()))*
                     }
                 }
 
                 #[automatically_derived]
                 impl #impl_generics #filter_path for #any_path<#ident #type_generics> #where_clauses {
-                    fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
+                    fn filter(&self,_table: &#table_path, _context: #context_path) -> bool {
                         let #ident #construct = self.inner();
-                        false #(|| #filter_path::filter(#names, _table, _database))*
+                        false #(|| #filter_path::filter(#names, _table, _context.clone()))*
                     }
                 }
             )
@@ -104,22 +104,22 @@ pub fn filter(input: TokenStream) -> TokenStream {
                     let (construct, _, names, ..) = deconstruct_fields(&fields);
                     let construct = construct(&names);
                     (
-                        quote!(#ident::#name #construct => true #(&& #filter_path::filter(#names, _table, _database))*),
-                        quote!(#ident::#name #construct => false #(|| #filter_path::filter(#names, _table, _database))*),
+                        quote!(#ident::#name #construct => true #(&& #filter_path::filter(#names, _table, _context.clone()))*),
+                        quote!(#ident::#name #construct => false #(|| #filter_path::filter(#names, _table, _context.clone()))*),
                     )
                 })
                 .unzip();
             quote!(
                 #[automatically_derived]
                 impl #impl_generics #filter_path for #ident #type_generics #where_clauses {
-                    fn filter(&self, _table: &#table_path, _database: &#database_path) -> bool {
+                    fn filter(&self, _table: &#table_path, _context: #context_path) -> bool {
                         match self { #(#all,)* _ => true }
                     }
                 }
 
                 #[automatically_derived]
                 impl #impl_generics #filter_path for #any_path<#ident #type_generics> #where_clauses {
-                    fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
+                    fn filter(&self,_table: &#table_path, _context: #context_path) -> bool {
                         match self.inner() { #(#any,)* _ => false }
                     }
                 }

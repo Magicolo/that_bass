@@ -1,8 +1,9 @@
 use crate::{
     core::{tuples, utility::get_unchecked},
     key::Key,
+    resources::Resources,
     table::{Column, Table},
-    Database, Datum, Error, Meta,
+    Datum, Error, Meta,
 };
 use std::{marker::PhantomData, sync::Arc};
 
@@ -93,8 +94,8 @@ impl<'a> ApplyContext<'a> {
 }
 
 impl<T: Template> ShareMeta<T> {
-    pub fn from(database: &Database) -> Result<Arc<Box<[&'static Meta]>>, Error> {
-        let share = database.resources().try_global(|| {
+    pub fn from(resources: &Resources) -> Result<Arc<Box<[&'static Meta]>>, Error> {
+        let share = resources.try_global(|| {
             let metas = DeclareContext::metas::<T>()?;
             Ok(Self(Arc::new(metas.into_boxed_slice()), PhantomData))
         })?;

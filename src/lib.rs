@@ -2,6 +2,7 @@ pub mod add;
 pub mod core;
 pub mod create;
 pub mod destroy;
+pub mod event;
 pub mod filter;
 pub mod key;
 pub mod query;
@@ -11,6 +12,7 @@ pub mod row;
 pub mod table;
 pub mod template;
 
+use event::Listen;
 pub use that_base_derive::{Datum, Filter, Template};
 
 #[cfg(test)]
@@ -185,10 +187,14 @@ impl fmt::Display for Error {
 impl error::Error for Error {}
 
 pub struct Database<L = ()> {
+    inner: Inner,
+    listen: L,
+}
+
+struct Inner {
     keys: Keys,
     tables: Tables,
     resources: Resources,
-    listen: L,
 }
 
 pub struct Meta {
@@ -200,25 +206,6 @@ pub struct Meta {
     copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), NonZeroUsize),
     drop: (fn() -> bool, unsafe fn(NonNull<()>, usize, NonZeroUsize)),
 }
-
-/// Allows to listen to database events. These events are guaranteed to be coherent (ex. `create` always happens before
-/// `destroy` for a given key).
-///
-/// **All listen methods should be considered as time critical** since they are called while holding table locks and may add
-/// contention on many other database operations. If these events need to be processed in some way, it is recommended to queue
-/// the events and defer the processing.
-pub trait Listen: Send + Sync + 'static {
-    #[inline]
-    fn created(&self, _: &[Key], _: &Table) {}
-    #[inline]
-    fn destroyed(&self, _: &[Key], _: &Table) {}
-    #[inline]
-    fn added(&self, _: &[Key], _: TypeId) {}
-    #[inline]
-    fn removed(&self, _: &[Key], _: TypeId) {}
-}
-
-impl Listen for () {}
 
 pub trait Datum: Sized + 'static {
     #[inline]
@@ -266,15 +253,13 @@ impl Meta {
 
 impl Database {
     pub fn new() -> Database {
-        Self::new_with(())
-    }
-
-    pub fn new_with<L: Listen>(listen: L) -> Database<L> {
         Database {
-            keys: Keys::new(),
-            tables: Tables::new(),
-            resources: Resources::new(),
-            listen,
+            inner: Inner {
+                keys: Keys::new(),
+                tables: Tables::new(),
+                resources: Resources::new(),
+            },
+            listen: (),
         }
     }
 }
@@ -282,17 +267,17 @@ impl Database {
 impl<L> Database<L> {
     #[inline]
     pub const fn keys(&self) -> &Keys {
-        &self.keys
+        &self.inner.keys
     }
 
     #[inline]
     pub const fn tables(&self) -> &Tables {
-        &self.tables
+        &self.inner.tables
     }
 
     #[inline]
     pub const fn resources(&self) -> &Resources {
-        &self.resources
+        &self.inner.resources
     }
 }
 
@@ -300,19 +285,105 @@ mod messages {
     use std::error::Error;
 
     use super::*;
-    use crossbeam_channel::unbounded;
+    use crossbeam_channel::{unbounded, Receiver, Sender};
+
+    enum Event {
+        OnCreate(Key),
+        OnDestroy(Key),
+        OnAdd(Key, TypeId),
+        OnRemove(Key, TypeId),
+    }
+
+    struct Events {
+        receive: Receiver<Event>,
+        created: Vec<Box<dyn FnMut(Key) -> bool>>,
+        destroyed: Vec<Box<dyn FnMut(Key) -> bool>>,
+        added: Vec<Box<dyn FnMut(Key, TypeId) -> bool>>,
+        removed: Vec<Box<dyn FnMut(Key, TypeId) -> bool>>,
+    }
+
+    impl Events {
+        pub fn resolve(&mut self) {
+            while let Ok(event) = self.receive.try_recv() {
+                match event {
+                    Event::OnCreate(key) => self.created.retain_mut(|listen| listen(key)),
+                    Event::OnDestroy(key) => self.destroyed.retain_mut(|listen| listen(key)),
+                    Event::OnAdd(key, identifier) => {
+                        self.added.retain_mut(|listen| listen(key, identifier))
+                    }
+                    Event::OnRemove(key, identifier) => {
+                        self.removed.retain_mut(|listen| listen(key, identifier))
+                    }
+                }
+            }
+        }
+
+        pub fn on_create(&mut self, listen: impl FnMut(Key) -> bool + 'static) {
+            self.created.push(Box::new(listen));
+        }
+
+        pub fn on_add(&mut self, listen: impl FnMut(Key, TypeId) -> bool + 'static) {
+            self.added.push(Box::new(listen))
+        }
+
+        pub fn on_add_of<D: Datum>(&mut self, mut listen: impl FnMut(Key) -> bool + 'static) {
+            self.on_add(move |key, identifier| {
+                if identifier == TypeId::of::<D>() {
+                    listen(key)
+                } else {
+                    true
+                }
+            })
+        }
+    }
+
+    impl Listen for Sender<Event> {
+        #[inline]
+        fn created(&self, keys: &[Key], _: &Table) {
+            send(self, keys, Event::OnCreate)
+        }
+        #[inline]
+        fn destroyed(&self, keys: &[Key], _: &Table) {
+            send(self, keys, Event::OnDestroy)
+        }
+
+        fn added(&self, keys: &[Key], source: &Table, target: &Table) {
+            // send(self, keys, |key| Event::OnAdd(key, identifier));
+        }
+
+        fn removed(&self, keys: &[Key], source: &Table, target: &Table) {
+            // send(self, keys, |key| Event::OnRemove(key, identifier))
+        }
+    }
+
+    fn send(sender: &Sender<Event>, keys: &[Key], mut with: impl FnMut(Key) -> Event) {
+        for &key in keys {
+            let Ok(_) = sender.try_send(with(key)) else {
+                return;
+            };
+        }
+    }
 
     fn boba() -> Result<(), Box<dyn Error>> {
+        let (send, receive) = unbounded::<Event>();
+        let database = Database::new().listen(send);
         struct OnKill(Key);
-        let database = Database::new();
-        let (send, receive) = database
+        let on_kill = database
             .resources()
             .global(|| unbounded::<OnKill>())
             .read()
             .clone();
+        while let Ok(event) = receive.try_recv() {
+            match event {
+                Event::OnCreate(_) => todo!(),
+                Event::OnDestroy(_) => todo!(),
+                Event::OnAdd(_, _) => todo!(),
+                Event::OnRemove(_, _) => todo!(),
+            }
+        }
         let a = receive.clone();
         let b = receive.clone();
-        send.send(OnKill(Key::NULL))?;
+        on_kill.0.send(OnKill(Key::NULL))?;
         let c = a.recv()?;
         let d = b.recv()?;
         Ok(())
