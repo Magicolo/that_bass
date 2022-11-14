@@ -156,7 +156,7 @@ impl<T: Template, L: Listen> Create<'_, T, L> {
         inner.commit(count);
         self.database
             .listen
-            .created(&keys[start..start + count.get()], &self.table);
+            .on_create(&keys[start..start + count.get()], &self.table);
         count.get()
     }
 }

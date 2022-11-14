@@ -12,16 +12,49 @@ pub mod row;
 pub mod table;
 pub mod template;
 
-use event::Listen;
 pub use that_base_derive::{Datum, Filter, Template};
 
 #[cfg(test)]
 mod test;
 
 /*
-    TODO: A mechanism to detect `OnAdd<D>/OnRemove<D>/OnCreate<D>`:
-        - An additional hidden datum `Added/Removed/Created` would be added to rows when....
-        - What to do about `OnDestroy`.
+    TODO: It should be possible to `Add` and `Remove` at the same time.
+        - Define a `Modify<A: Template = (), R: Template = ()>` operator.
+        - Since the code for add and remove is very similar, it may be unifiable without any additionnal cost.
+        - `Add` could then be defined as `type Add<T> = Modify<T, ()>;`.
+        - `Remove` could then be defined as `type Remove<T> = Modify<(), T>;`.
+    TODO: Replace table locks with keys locks.
+        - Allows to merge `Table` and `table::Inner` together.
+        - No longer require a lock to inspect the `count` or `capacity`.
+        - `Table::metas` will no longer be required.
+        - Combine `count` and `capacity` in an `AtomicU64`.
+        - Grow:
+            1. Read the combined `count + capacity` and check for the need of a grow (no locks taken).
+            3. If a grow is required, take a hard write lock on `keys` (if not, return).
+            4. Double check with `keys.len()` if a grow is required (another thread might've beat us to the race of growing) (if not, return).
+            5. Grow the keys and downgrade the lock to a read lock immediately (reads are fine while the grow is in progress).
+                - Keep the read `keys` lock for the duration of the grow.
+                - The read lock prevents other grow and move operations from taking place.
+            6. One by one, take hard write locks on each `Column`, grow them and drop the lock.
+                - `fold_swap` may be usable here; make sure is won't deadlock (it won't if `keys` is always the first lock taken).
+            7. Drop the `keys` lock, then update the `count + capacity`.
+                - Updating `capacity` could be done under the `keys` lock, but since capacity must always be double checked with `keys.len()`,
+                it should not be necessary to hold the lock for longer.
+        - Query:
+            - Queries won't change much other than reads to `keys` should be removed when they are not declared through `Row::declare`.
+            - `fold_swap` can still be used by using the first `keys/column` (use `keys` if required) to try to take a lock.
+        - Move:
+            - Move operations such as `Destroy/Add/Remove` will still be able to use `fold_swap` by trying to take a write lock on `keys`
+            first.
+            - Whenever the `keys` lock is acquired, all move operations could be completed on `keys` before taking other locks (if possible).
+                - Move operations could be stored in `moves: Vec<(source: usize, target: usize, count: usize)>` to be reused with the columns.
+                - After acquiring a `keys` lock, slots still have to be validated/filtered.
+            - Then, take and hold one more column lock and complete all move operations before locking the next one (always lock in order).
+                - If it weren't for interior mutability, locks could be downgraded during the process?
+            - When all `keys` and column locks are held, update the slots.
+            - Only release the locks when all is done.
+    TODO: Implement a `Trace` that keeps a history for every key.
+        - struct Trace; impl Listen for Trace {}
     TODO: Remove empty tables when calling `Tables::shrink`.
         - Requires to stop using `Table::index`.
     TODO: Queries don't prevent visiting a key twice if another thread resolves a move operation from a visited table to an unvisited
@@ -42,6 +75,9 @@ mod test;
     created keys are reported to not be present in a corresponding query.
         - This happens because `Table::commit` can technically fail for an unlimited amount of time...
         - Would require to force a successful commit at key moments.
+    TODO: Share some query state using a COW pattern.
+        - Investigate `arc-swap`.
+        - Gains are likely marginal and memory will remain in use for the lifetime of the database...
     TODO: Implement `Permute`.
         - Returns all permutations (with repetitions) of two queries.
         - Order of items matters, so (A, B) is considered different than (B, A), thus both will be returned.
@@ -55,8 +91,6 @@ mod test;
     TODO: Test the database with generative tests.
 
     TODO (POSTPONED): Allow querying with a struct or enum with a `#[derive(Row)]`.
-    TODO (POSTPONED): Share some query state using a COW pattern.
-        - Gains are likely marginal and memory will remain in use for the lifetime of the database...
     TODO (POSTPONED): Add an option to split large table stores in chunks of fixed size.
         - Large stores have better locality but might cause more contention on their locks.
         - Small stores cause less contention but have worse locality.
@@ -162,7 +196,7 @@ use std::{
     num::NonZeroUsize,
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
 };
-use table::{Table, Tables};
+use table::Tables;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -281,147 +315,147 @@ impl<L> Database<L> {
     }
 }
 
-mod messages {
-    use std::error::Error;
+// mod messages {
+//     use std::error::Error;
 
-    use super::*;
-    use crossbeam_channel::{unbounded, Receiver, Sender};
+//     use super::*;
+//     use crossbeam_channel::{unbounded, Receiver, Sender};
 
-    enum Event {
-        OnCreate(Key),
-        OnDestroy(Key),
-        OnAdd(Key, TypeId),
-        OnRemove(Key, TypeId),
-    }
+//     enum Event {
+//         OnCreate(Key),
+//         OnDestroy(Key),
+//         OnAdd(Key, TypeId),
+//         OnRemove(Key, TypeId),
+//     }
 
-    struct Events {
-        receive: Receiver<Event>,
-        created: Vec<Box<dyn FnMut(Key) -> bool>>,
-        destroyed: Vec<Box<dyn FnMut(Key) -> bool>>,
-        added: Vec<Box<dyn FnMut(Key, TypeId) -> bool>>,
-        removed: Vec<Box<dyn FnMut(Key, TypeId) -> bool>>,
-    }
+//     struct Events {
+//         receive: Receiver<Event>,
+//         created: Vec<Box<dyn FnMut(Key) -> bool>>,
+//         destroyed: Vec<Box<dyn FnMut(Key) -> bool>>,
+//         added: Vec<Box<dyn FnMut(Key, TypeId) -> bool>>,
+//         removed: Vec<Box<dyn FnMut(Key, TypeId) -> bool>>,
+//     }
 
-    impl Events {
-        pub fn resolve(&mut self) {
-            while let Ok(event) = self.receive.try_recv() {
-                match event {
-                    Event::OnCreate(key) => self.created.retain_mut(|listen| listen(key)),
-                    Event::OnDestroy(key) => self.destroyed.retain_mut(|listen| listen(key)),
-                    Event::OnAdd(key, identifier) => {
-                        self.added.retain_mut(|listen| listen(key, identifier))
-                    }
-                    Event::OnRemove(key, identifier) => {
-                        self.removed.retain_mut(|listen| listen(key, identifier))
-                    }
-                }
-            }
-        }
+//     impl Events {
+//         pub fn resolve(&mut self) {
+//             while let Ok(event) = self.receive.try_recv() {
+//                 match event {
+//                     Event::OnCreate(key) => self.created.retain_mut(|listen| listen(key)),
+//                     Event::OnDestroy(key) => self.destroyed.retain_mut(|listen| listen(key)),
+//                     Event::OnAdd(key, identifier) => {
+//                         self.added.retain_mut(|listen| listen(key, identifier))
+//                     }
+//                     Event::OnRemove(key, identifier) => {
+//                         self.removed.retain_mut(|listen| listen(key, identifier))
+//                     }
+//                 }
+//             }
+//         }
 
-        pub fn on_create(&mut self, listen: impl FnMut(Key) -> bool + 'static) {
-            self.created.push(Box::new(listen));
-        }
+//         pub fn on_create(&mut self, listen: impl FnMut(Key) -> bool + 'static) {
+//             self.created.push(Box::new(listen));
+//         }
 
-        pub fn on_add(&mut self, listen: impl FnMut(Key, TypeId) -> bool + 'static) {
-            self.added.push(Box::new(listen))
-        }
+//         pub fn on_add(&mut self, listen: impl FnMut(Key, TypeId) -> bool + 'static) {
+//             self.added.push(Box::new(listen))
+//         }
 
-        pub fn on_add_of<D: Datum>(&mut self, mut listen: impl FnMut(Key) -> bool + 'static) {
-            self.on_add(move |key, identifier| {
-                if identifier == TypeId::of::<D>() {
-                    listen(key)
-                } else {
-                    true
-                }
-            })
-        }
-    }
+//         pub fn on_add_of<D: Datum>(&mut self, mut listen: impl FnMut(Key) -> bool + 'static) {
+//             self.on_add(move |key, identifier| {
+//                 if identifier == TypeId::of::<D>() {
+//                     listen(key)
+//                 } else {
+//                     true
+//                 }
+//             })
+//         }
+//     }
 
-    impl Listen for Sender<Event> {
-        #[inline]
-        fn created(&self, keys: &[Key], _: &Table) {
-            send(self, keys, Event::OnCreate)
-        }
-        #[inline]
-        fn destroyed(&self, keys: &[Key], _: &Table) {
-            send(self, keys, Event::OnDestroy)
-        }
+//     impl Listen for Sender<Event> {
+//         #[inline]
+//         fn created(&self, keys: &[Key], _: &Table) {
+//             send(self, keys, Event::OnCreate)
+//         }
+//         #[inline]
+//         fn destroyed(&self, keys: &[Key], _: &Table) {
+//             send(self, keys, Event::OnDestroy)
+//         }
 
-        fn added(&self, keys: &[Key], source: &Table, target: &Table) {
-            // send(self, keys, |key| Event::OnAdd(key, identifier));
-        }
+//         fn added(&self, keys: &[Key], source: &Table, target: &Table) {
+//             // send(self, keys, |key| Event::OnAdd(key, identifier));
+//         }
 
-        fn removed(&self, keys: &[Key], source: &Table, target: &Table) {
-            // send(self, keys, |key| Event::OnRemove(key, identifier))
-        }
-    }
+//         fn removed(&self, keys: &[Key], source: &Table, target: &Table) {
+//             // send(self, keys, |key| Event::OnRemove(key, identifier))
+//         }
+//     }
 
-    fn send(sender: &Sender<Event>, keys: &[Key], mut with: impl FnMut(Key) -> Event) {
-        for &key in keys {
-            let Ok(_) = sender.try_send(with(key)) else {
-                return;
-            };
-        }
-    }
+//     fn send(sender: &Sender<Event>, keys: &[Key], mut with: impl FnMut(Key) -> Event) {
+//         for &key in keys {
+//             let Ok(_) = sender.try_send(with(key)) else {
+//                 return;
+//             };
+//         }
+//     }
 
-    fn boba() -> Result<(), Box<dyn Error>> {
-        let (send, receive) = unbounded::<Event>();
-        let database = Database::new().listen(send);
-        struct OnKill(Key);
-        let on_kill = database
-            .resources()
-            .global(|| unbounded::<OnKill>())
-            .read()
-            .clone();
-        while let Ok(event) = receive.try_recv() {
-            match event {
-                Event::OnCreate(_) => todo!(),
-                Event::OnDestroy(_) => todo!(),
-                Event::OnAdd(_, _) => todo!(),
-                Event::OnRemove(_, _) => todo!(),
-            }
-        }
-        let a = receive.clone();
-        let b = receive.clone();
-        on_kill.0.send(OnKill(Key::NULL))?;
-        let c = a.recv()?;
-        let d = b.recv()?;
-        Ok(())
-    }
-    // use std::{cell::RefCell, collections::VecDeque};
+//     fn boba() -> Result<(), Box<dyn Error>> {
+//         let (send, receive) = unbounded::<Event>();
+//         let database = Database::new().listen(send);
+//         struct OnKill(Key);
+//         let on_kill = database
+//             .resources()
+//             .global(|| unbounded::<OnKill>())
+//             .read()
+//             .clone();
+//         while let Ok(event) = receive.try_recv() {
+//             match event {
+//                 Event::OnCreate(_) => todo!(),
+//                 Event::OnDestroy(_) => todo!(),
+//                 Event::OnAdd(_, _) => todo!(),
+//                 Event::OnRemove(_, _) => todo!(),
+//             }
+//         }
+//         let a = receive.clone();
+//         let b = receive.clone();
+//         on_kill.0.send(OnKill(Key::NULL))?;
+//         let c = a.recv()?;
+//         let d = b.recv()?;
+//         Ok(())
+//     }
+//     // use std::{cell::RefCell, collections::VecDeque};
 
-    // pub struct Messages<T> {
-    //     messages: VecDeque<T>,
-    //     receivers: usize,
-    //     index: usize,
-    //     count: usize,
-    // }
-    // pub struct Receive<'a, T> {
-    //     messages: &'a RefCell<Messages<T>>,
-    //     index: usize,
-    //     last: usize,
-    // }
+//     // pub struct Messages<T> {
+//     //     messages: VecDeque<T>,
+//     //     receivers: usize,
+//     //     index: usize,
+//     //     count: usize,
+//     // }
+//     // pub struct Receive<'a, T> {
+//     //     messages: &'a RefCell<Messages<T>>,
+//     //     index: usize,
+//     //     last: usize,
+//     // }
 
-    // impl<'a, T: Clone> Receive<'a, T> {
-    //     pub fn next(&mut self) -> Option<T> {
-    //         let mut messages = self.messages.borrow_mut();
-    //         if self.last == messages.index {
-    //             let message = messages.messages.get(self.index)?.clone();
-    //             self.index += 1;
-    //             if self.index == messages.index {
-    //                 if messages.count == messages.receivers {
-    //                     messages.index = self.index;
-    //                 } else {
-    //                     messages.count += 1;
-    //                 }
-    //             }
-    //             Some(message)
-    //         } else {
-    //             None
-    //         }
-    //     }
-    // }
-}
+//     // impl<'a, T: Clone> Receive<'a, T> {
+//     //     pub fn next(&mut self) -> Option<T> {
+//     //         let mut messages = self.messages.borrow_mut();
+//     //         if self.last == messages.index {
+//     //             let message = messages.messages.get(self.index)?.clone();
+//     //             self.index += 1;
+//     //             if self.index == messages.index {
+//     //                 if messages.count == messages.receivers {
+//     //                     messages.index = self.index;
+//     //                 } else {
+//     //                     messages.count += 1;
+//     //                 }
+//     //             }
+//     //             Some(message)
+//     //         } else {
+//     //             None
+//     //         }
+//     //     }
+//     // }
+// }
 
 // mod locks {
 //     use std::marker::PhantomData;

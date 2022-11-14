@@ -1,5 +1,5 @@
 use crate::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
+    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, unreachable, ONE},
     event::Listen,
     filter::Filter,
     key::{Key, Slot},
@@ -187,7 +187,7 @@ impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
             (&mut self.states, &mut self.pending),
             |sum, (states, pending), index| {
                 let Some(Ok(state)) = states.get_mut(*index) else {
-                    unreachable!();
+                    unsafe { unreachable() };
                 };
                 if state.rows.len() == 0 {
                     return Ok(sum);
@@ -243,14 +243,14 @@ impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
                     |keys| {
                         self.database
                             .listen
-                            .added(keys, &state.source, &state.target)
+                            .on_add(keys, &state.source, &state.target)
                     },
                 );
                 Ok(sum + count.get())
             },
             |sum, (states, pending), index| {
                 let Some(Ok(state)) = states.get_mut(*index) else {
-                    unreachable!();
+                    unsafe { unreachable() };
                 };
                 if state.rows.len() == 0 {
                     return sum;
@@ -316,7 +316,7 @@ impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
                     |keys| {
                         self.database
                             .listen
-                            .added(keys, &state.source, &state.target)
+                            .on_add(keys, &state.source, &state.target)
                     },
                 );
                 sum + count.get()
@@ -554,7 +554,7 @@ impl<'d, T: Template, F: Filter, L: Listen> AddAll<'d, T, F, L> {
         drop(source);
         // Although `source` has been dropped, coherence with be maintained since the `target` lock prevent the keys
         // moving again before `on_add` is done.
-        database.listen.added(
+        database.listen.on_add(
             &target_keys[start..start + count.get()],
             &state.source,
             &state.target,

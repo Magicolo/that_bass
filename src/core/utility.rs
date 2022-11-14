@@ -38,6 +38,15 @@ pub unsafe fn swap_unchecked<T>(items: &mut [T], a: usize, b: usize) {
     }
 }
 
+#[inline(always)]
+pub unsafe fn unreachable() -> ! {
+    if cfg!(debug_assertions) {
+        unreachable!();
+    } else {
+        core::hint::unreachable_unchecked()
+    }
+}
+
 pub fn try_fold_swap<T, S, C>(
     items: &mut [T],
     mut state: S,

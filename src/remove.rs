@@ -2,7 +2,7 @@ use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
 
 use crate::{
     add::{copy_to, move_to},
-    core::utility::{fold_swap, get_unchecked_mut},
+    core::utility::{fold_swap, get_unchecked_mut, unreachable},
     event::Listen,
     filter::Filter,
     key::{Key, Slot},
@@ -191,7 +191,7 @@ impl<'d, T: Template, F: Filter, L: Listen> Remove<'d, T, F, L> {
             (&mut self.states, &mut self.pending),
             |sum, (states, pending), index| {
                 let Some(Ok(state)) = states.get_mut(*index) else {
-                    unreachable!();
+                    unsafe { unreachable() };
                 };
                 debug_assert_ne!(state.source.index(), state.target.index());
                 if state.rows.len() == 0 {
@@ -216,14 +216,14 @@ impl<'d, T: Template, F: Filter, L: Listen> Remove<'d, T, F, L> {
                     |keys| {
                         self.database
                             .listen
-                            .removed(keys, &state.source, &state.target)
+                            .on_remove(keys, &state.source, &state.target)
                     },
                 );
                 Ok(sum + count.get())
             },
             |sum, (states, pending), index| {
                 let Some(Ok(state)) = states.get_mut(*index) else {
-                    unreachable!();
+                    unsafe { unreachable() };
                 };
                 debug_assert_ne!(state.source.index(), state.target.index());
                 if state.rows.len() == 0 {
@@ -262,7 +262,7 @@ impl<'d, T: Template, F: Filter, L: Listen> Remove<'d, T, F, L> {
                     |keys| {
                         self.database
                             .listen
-                            .removed(keys, &state.source, &state.target)
+                            .on_remove(keys, &state.source, &state.target)
                     },
                 );
                 sum + count.get()
@@ -451,7 +451,7 @@ impl<'d, T: Template, F: Filter, L: Listen> RemoveAll<'d, T, F, L> {
         drop(source);
         // Although `source` has been dropped, coherence with be maintained since the `target` lock prevent the keys
         // moving again before `on_remove` is done.
-        database.listen.removed(
+        database.listen.on_remove(
             &target_keys[start..start + count.get()],
             &state.source,
             &state.target,

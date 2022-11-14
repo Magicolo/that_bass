@@ -1,5 +1,7 @@
 use crate::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, ONE},
+    core::utility::{
+        fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, unreachable, ONE,
+    },
     event::Listen,
     filter::Filter,
     key::{Key, Slot},
@@ -159,7 +161,7 @@ impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
             (&mut self.states, &mut self.pending),
             |sum, (states, pending), index| {
                 let Some(Ok(state)) = states.get_mut(*index) else {
-                    unreachable!();
+                    unsafe { unreachable() };
                 };
                 if state.rows.len() == 0 {
                     return Ok(sum);
@@ -174,7 +176,7 @@ impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
             },
             |sum, (states, pending), index| {
                 let Some(Ok(state)) = states.get_mut(*index) else {
-                    unreachable!();
+                    unsafe { unreachable() };
                 };
                 if state.rows.len() == 0 {
                     return sum;
@@ -268,7 +270,7 @@ impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
         }
         database
             .listen
-            .destroyed(&keys[head..head + count.get()], state.table);
+            .on_destroy(&keys[head..head + count.get()], state.table);
         drop(table);
         // The `recycle` step can be done outside of the lock. This means that the keys within `state.rows` may be very briefly
         // non-reusable for other threads, which is fine.
@@ -401,7 +403,7 @@ impl<'d, F: Filter, L: Listen> DestroyAll<'d, F, L> {
         }
         let keys = inner.keys.get_mut();
         database.keys().release(&keys[..count.get()]);
-        database.listen.destroyed(&keys[..count.get()], table);
+        database.listen.on_destroy(&keys[..count.get()], table);
         return count.get();
     }
 }
