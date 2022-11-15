@@ -1,12 +1,13 @@
-pub mod add;
+// pub mod add;
 pub mod core;
 pub mod create;
 pub mod destroy;
 pub mod event;
 pub mod filter;
 pub mod key;
+pub mod modify;
 pub mod query;
-pub mod remove;
+// pub mod remove;
 pub mod resources;
 pub mod row;
 pub mod table;
@@ -18,8 +19,8 @@ pub use that_base_derive::{Datum, Filter, Template};
 mod test;
 
 /*
-    TODO: It should be possible to `Add` and `Remove` at the same time.
-        - Define a `Modify<A: Template = (), R: Template = ()>` operator.
+    TODO: It should be possible to `Add` and `Remove` in a single operation.
+        - Define a `Modify/Alter<A: Template = (), R: Template = ()>` operator.
         - Since the code for add and remove is very similar, it may be unifiable without any additionnal cost.
         - `Add` could then be defined as `type Add<T> = Modify<T, ()>;`.
         - `Remove` could then be defined as `type Remove<T> = Modify<(), T>;`.

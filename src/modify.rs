@@ -1,5 +1,7 @@
+use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
+
 use crate::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, unreachable, ONE},
+    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
     event::Listen,
     filter::Filter,
     key::{Key, Slot},
@@ -8,33 +10,40 @@ use crate::{
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
     Database, Error,
 };
-use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     mem::MaybeUninit,
     num::NonZeroUsize,
     sync::{atomic::Ordering, Arc},
 };
 
 /// Adds template `T` to accumulated add operations.
-pub struct Add<'d, T: Template, F, L> {
+pub struct Modify<'d, A: Template, R: Template, F, L> {
     database: &'d Database<L>,
-    pairs: HashMap<Key, MaybeUninit<T>>, // A `HashMap` is used because the move algorithm assumes that rows will be unique.
+    pairs: HashMap<Key, MaybeUninit<A>>, // A `HashMap` is used because the move algorithm assumes that rows will be unique.
     indices: Vec<usize>,                 // May be reordered (ex: by `fold_swap`).
-    states: Vec<Result<State<'d, T>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
-    pending: Vec<(Key, &'d Slot, T, u32)>,
+    states: Vec<Result<State<'d, A>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
+    pending: Vec<(Key, &'d Slot, A, u32)>,
     moves: Vec<(usize, usize, NonZeroUsize)>,
     copies: Vec<(usize, usize, NonZeroUsize)>,
     filter: F,
+    _marker: PhantomData<fn(R)>,
 }
 
+pub type Add<'d, T, F, L> = Modify<'d, T, (), F, L>;
+pub type Remove<'d, T, F, L> = Modify<'d, (), T, F, L>;
+
 /// Adds template `T` to all keys in tables that satisfy the filter `F`.
-pub struct AddAll<'d, T: Template, F, L> {
+pub struct ModifyAll<'d, A: Template, R: Template, F, L> {
     database: &'d Database<L>,
     index: usize,
-    states: Vec<StateAll<T>>,
+    states: Vec<StateAll<A>>,
     filter: F,
+    _marker: PhantomData<fn(R)>,
 }
+pub type AddAll<'d, T, F, L> = ModifyAll<'d, T, (), F, L>;
+pub type RemoveAll<'d, T, F, L> = ModifyAll<'d, (), T, F, L>;
 
 type Rows<'d> = Vec<(Key, &'d Slot, u32)>;
 
@@ -57,16 +66,17 @@ struct Inner<T: Template> {
     apply: Box<[usize]>,
 }
 
-struct ShareTable<T: Template> {
+struct ShareTable<A: Template, R: Template> {
     source: Arc<Table>,
     target: Arc<Table>,
-    inner: Arc<Inner<T>>,
+    inner: Arc<Inner<A>>,
+    _marker: PhantomData<fn(R)>,
 }
 
 impl<L> Database<L> {
-    pub fn add<T: Template>(&self) -> Result<Add<T, (), L>, Error> {
-        // Validate metas here, but there is no need to store them.
-        ShareMeta::<T>::from(self.resources()).map(|_| Add {
+    pub fn modify<A: Template, R: Template>(&self) -> Result<Modify<A, R, (), L>, Error> {
+        // Validate metas here (no duplicates allowed), but there is no need to store them.
+        ShareMeta::<(A, R)>::from(self.resources()).map(|_| Modify {
             database: self,
             pairs: HashMap::new(),
             pending: Vec::new(),
@@ -75,40 +85,74 @@ impl<L> Database<L> {
             copies: Vec::new(),
             moves: Vec::new(),
             filter: (),
+            _marker: PhantomData,
         })
     }
 
-    pub fn add_all<T: Template>(&self) -> Result<AddAll<T, (), L>, Error> {
-        // Validate metas here, but there is no need to store them.
-        ShareMeta::<T>::from(self.resources()).map(|_| AddAll {
+    pub fn modify_all<A: Template, R: Template>(&self) -> Result<ModifyAll<A, R, (), L>, Error> {
+        // Validate metas here (no duplicates allowed), but there is no need to store them.
+        ShareMeta::<(A, R)>::from(self.resources()).map(|_| ModifyAll {
             database: self,
             index: 0,
             states: Vec::new(),
             filter: (),
+            _marker: PhantomData,
         })
+    }
+
+    pub fn add<T: Template>(&self) -> Result<Add<T, (), L>, Error> {
+        self.modify()
+    }
+
+    pub fn add_all<T: Template>(&self) -> Result<AddAll<T, (), L>, Error> {
+        self.modify_all()
+    }
+
+    pub fn remove<T: Template>(&self) -> Result<Remove<T, (), L>, Error> {
+        self.modify()
+    }
+
+    pub fn remove_all<T: Template>(&self) -> Result<RemoveAll<T, (), L>, Error> {
+        self.modify_all()
     }
 }
 
-impl<'d, T: Template, F, L> Add<'d, T, F, L> {
+impl<'d, A: Template, R: Template, F, L> Modify<'d, A, R, F, L> {
     #[inline]
-    pub fn one(&mut self, key: Key, template: T) {
+    pub fn one(&mut self, key: Key)
+    where
+        A: Default,
+    {
+        self.one_with(key, A::default())
+    }
+
+    #[inline]
+    pub fn one_with(&mut self, key: Key, template: A) {
         self.pairs.insert(key, MaybeUninit::new(template));
     }
 
     #[inline]
-    pub fn all<I: IntoIterator<Item = (Key, T)>>(&mut self, templates: I) {
+    pub fn all<I: IntoIterator<Item = Key>>(&mut self, keys: I)
+    where
+        A: Default,
+    {
+        self.all_with(keys.into_iter().map(|key| (key, A::default())))
+    }
+
+    #[inline]
+    pub fn all_with<I: IntoIterator<Item = (Key, A)>>(&mut self, pairs: I) {
         self.pairs.extend(
-            templates
+            pairs
                 .into_iter()
                 .map(|pair| (pair.0, MaybeUninit::new(pair.1))),
         );
     }
 
-    pub fn filter<G: Filter + Default>(self) -> Add<'d, T, (F, G), L> {
+    pub fn filter<G: Filter + Default>(self) -> Modify<'d, A, R, (F, G), L> {
         self.filter_with(G::default())
     }
 
-    pub fn filter_with<G: Filter>(mut self, filter: G) -> Add<'d, T, (F, G), L> {
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> Modify<'d, A, R, (F, G), L> {
         for state in self.states.iter_mut() {
             let index = match state {
                 Ok(state) if filter.filter(&state.source, self.database.into()) => None,
@@ -119,7 +163,7 @@ impl<'d, T: Template, F, L> Add<'d, T, F, L> {
                 *state = Err(index);
             }
         }
-        Add {
+        Modify {
             database: self.database,
             pairs: self.pairs,
             pending: self.pending,
@@ -128,6 +172,7 @@ impl<'d, T: Template, F, L> Add<'d, T, F, L> {
             copies: self.copies,
             moves: self.moves,
             filter: (self.filter, filter),
+            _marker: PhantomData,
         }
     }
 
@@ -136,13 +181,13 @@ impl<'d, T: Template, F, L> Add<'d, T, F, L> {
         self.pairs.len()
     }
 
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (Key, &T)> {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (Key, &A)> {
         self.pairs
             .iter()
             .map(|pair| (*pair.0, unsafe { pair.1.assume_init_ref() }))
     }
 
-    pub fn drain(&mut self) -> impl ExactSizeIterator<Item = (Key, T)> + '_ {
+    pub fn drain(&mut self) -> impl ExactSizeIterator<Item = (Key, A)> + '_ {
         debug_assert_eq!(self.pending.len(), 0);
         debug_assert_eq!(self.indices.len(), 0);
         self.pairs
@@ -157,7 +202,7 @@ impl<'d, T: Template, F, L> Add<'d, T, F, L> {
     }
 }
 
-impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
+impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> {
     pub fn resolve(&mut self) -> usize {
         for (&key, template) in self.pairs.iter() {
             if let Ok((slot, table)) = self.database.keys().get(key) {
@@ -214,12 +259,9 @@ impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
                 &mut self.copies,
             ),
             |sum, (states, pending, moves, copies), index| {
-                let Some(Ok(state)) = states.get_mut(*index) else {
-                    unsafe { unreachable() };
-                };
-                if state.rows.len() == 0 {
-                    return Ok(sum);
-                }
+                let result = unsafe { get_unchecked_mut(states, *index) };
+                let state = unsafe { result.as_mut().unwrap_unchecked() };
+                debug_assert!(state.rows.len() > 0);
                 if state.source.index() == state.target.index() {
                     let keys = state.source.keys.try_read().ok_or(sum)?;
                     Self::retain(
@@ -268,12 +310,9 @@ impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
                 Ok(sum + count.get())
             },
             |sum, (states, pending, moves, copies), index| {
-                let Some(Ok(state)) = states.get_mut(*index) else {
-                    unsafe { unreachable() };
-                };
-                if state.rows.len() == 0 {
-                    return sum;
-                }
+                let result = unsafe { get_unchecked_mut(states, *index) };
+                let state = unsafe { result.as_mut().unwrap_unchecked() };
+                debug_assert!(state.rows.len() > 0);
                 if state.source.index() == state.target.index() {
                     let keys = state.source.keys.read();
                     Self::retain(
@@ -337,9 +376,9 @@ impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
     fn resolve_set<'a>(
         table: &Table,
         keys: RwLockReadGuard<'a, Vec<Key>>,
-        state: &T::State,
+        state: &A::State,
         rows: &mut Rows<'d>,
-        templates: &mut Vec<T>,
+        templates: &mut Vec<A>,
         apply: &[usize],
     ) {
         // The keys do not need to be moved, simply write the row data.
@@ -355,10 +394,10 @@ impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
     fn sort(
         key: Key,
         slot: &'d Slot,
-        template: T,
+        template: A,
         table: u32,
         indices: &mut Vec<usize>,
-        states: &mut Vec<Result<State<'d, T>, u32>>,
+        states: &mut Vec<Result<State<'d, A>, u32>>,
         filter: &F,
         database: &'d crate::Inner,
     ) {
@@ -369,7 +408,7 @@ impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
             Ok(index) => index,
             Err(index) => {
                 let result =
-                    match ShareTable::<T>::from(table, &database.tables, &database.resources) {
+                    match ShareTable::<A, R>::from(table, &database.tables, &database.resources) {
                         Ok((source, target, inner)) if filter.filter(&source, database.into()) => {
                             Ok(State {
                                 source,
@@ -401,8 +440,8 @@ impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
     fn retain<'a>(
         table: &'a Table,
         rows: &mut Rows<'d>,
-        templates: &mut Vec<T>,
-        pending: &mut Vec<(Key, &'d Slot, T, u32)>,
+        templates: &mut Vec<A>,
+        pending: &mut Vec<(Key, &'d Slot, A, u32)>,
     ) -> (u32, u32) {
         let mut low = u32::MAX;
         let mut high = 0;
@@ -428,36 +467,37 @@ impl<'d, T: Template, F: Filter, L: Listen> Add<'d, T, F, L> {
     }
 }
 
-impl<'d, T: Template, F, L> AddAll<'d, T, F, L> {
-    pub fn filter<G: Filter + Default>(self) -> AddAll<'d, T, (F, G), L> {
+impl<'d, A: Template, R: Template, F, L> ModifyAll<'d, A, R, F, L> {
+    pub fn filter<G: Filter + Default>(self) -> ModifyAll<'d, A, R, (F, G), L> {
         self.filter_with(G::default())
     }
 
-    pub fn filter_with<G: Filter>(mut self, filter: G) -> AddAll<'d, T, (F, G), L> {
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> ModifyAll<'d, A, R, (F, G), L> {
         self.states
             .retain(|state| filter.filter(&state.source, self.database.into()));
-        AddAll {
+        ModifyAll {
             database: self.database,
             index: self.index,
             states: self.states,
             filter: (self.filter, filter),
+            _marker: PhantomData,
         }
     }
 }
 
-impl<'d, T: Template, F: Filter, L: Listen> AddAll<'d, T, F, L> {
+impl<'d, A: Template, R: Template, F: Filter, L: Listen> ModifyAll<'d, A, R, F, L> {
     #[inline]
     pub fn resolve(&mut self) -> usize
     where
-        T: Default,
+        A: Default,
     {
-        self.resolve_with(true, T::default)
+        self.resolve_with(true, A::default)
     }
 
-    pub fn resolve_with<G: FnMut() -> T>(&mut self, set: bool, with: G) -> usize {
+    pub fn resolve_with<G: FnMut() -> A>(&mut self, set: bool, with: G) -> usize {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
-            match ShareTable::from(
+            match ShareTable::<A, R>::from(
                 table.index(),
                 self.database.tables(),
                 self.database.resources(),
@@ -511,15 +551,15 @@ impl<'d, T: Template, F: Filter, L: Listen> AddAll<'d, T, F, L> {
     fn resolve_tables(
         mut source: RwLockWriteGuard<Vec<Key>>,
         target: RwLockUpgradableReadGuard<Vec<Key>>,
-        state: &StateAll<T>,
+        state: &StateAll<A>,
         database: &Database<impl Listen>,
-        mut with: impl FnMut() -> T,
+        mut with: impl FnMut() -> A,
     ) -> usize {
         let count = state.source.count.swap(0, Ordering::AcqRel);
         let Some(count) = NonZeroUsize::new(count) else {
             return 0;
         };
-        let (start, target) = Table::reserve(&state.target, target, count);
+        let (start, target) = state.target.reserve(target, count);
         let target_keys = unsafe { &mut *RwLockUpgradableReadGuard::rwlock(&target).data_ptr() };
         target_keys[start..start + count.get()].copy_from_slice(&source[..count.get()]);
         resolve_copy_move(
@@ -550,7 +590,7 @@ impl<'d, T: Template, F: Filter, L: Listen> AddAll<'d, T, F, L> {
         drop(source);
         // Although `source` has been dropped, coherence with be maintained since the `target` lock prevent the keys
         // moving again before `on_remove` is done.
-        database.listen.on_add(
+        database.listen.on_modify(
             &target[start..start + count.get()],
             &state.source,
             &state.target,
@@ -560,10 +600,11 @@ impl<'d, T: Template, F: Filter, L: Listen> AddAll<'d, T, F, L> {
 
     fn resolve_table(
         keys: RwLockReadGuard<Vec<Key>>,
-        state: &StateAll<T>,
-        with: &mut impl FnMut() -> T,
+        state: &StateAll<A>,
+        with: &mut impl FnMut() -> A,
     ) -> usize {
         debug_assert_eq!(state.source.index(), state.target.index());
+        debug_assert!(state.inner.apply.len() > 0); // `apply.len() == 0` should've been filtered by `ShareTable`
         let Some(count) = NonZeroUsize::new(state.source.count()) else {
             return 0;
         };
@@ -577,51 +618,51 @@ impl<'d, T: Template, F: Filter, L: Listen> AddAll<'d, T, F, L> {
     }
 }
 
-impl<T: Template> ShareTable<T> {
+impl<A: Template, R: Template> ShareTable<A, R> {
     pub fn from(
         table: u32,
         tables: &Tables,
         resources: &Resources,
-    ) -> Result<(Arc<Table>, Arc<Table>, Arc<Inner<T>>), Error> {
+    ) -> Result<(Arc<Table>, Arc<Table>, Arc<Inner<A>>), Error> {
         let share = resources.try_global_with(table, || {
-            let metas = ShareMeta::<T>::from(resources)?;
+            let adds = ShareMeta::<A>::from(resources)?;
+            let removes = ShareMeta::<R>::from(resources)?;
             let source = tables.get_shared(table as usize)?;
             let target = {
-                let mut metas = metas.to_vec();
+                let mut metas = adds.to_vec();
                 for meta in source.metas() {
-                    match metas.binary_search_by_key(&meta.identifier(), |meta| meta.identifier()) {
-                        Ok(_) => {}
-                        Err(index) => metas.insert(index, meta),
+                    match (
+                        metas.binary_search_by_key(&meta.identifier(), |meta| meta.identifier()),
+                        removes.binary_search_by_key(&meta.identifier(), |meta| meta.identifier()),
+                    ) {
+                        (Ok(_), Ok(_)) => return Err(Error::DuplicateMeta),
+                        (Err(index), Err(_)) => metas.insert(index, meta),
+                        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {}
                     }
                 }
                 tables.find_or_add(&metas)
             };
-            let state = T::initialize(InitializeContext::new(&target))?;
-
-            let mut copy = Vec::new();
-            for source in source.metas().enumerate() {
-                let target = target.column_with(source.1.identifier())?;
-                debug_assert_eq!(source.1.identifier(), target.1.meta().identifier());
-                if target.1.meta().size > 0 {
-                    copy.push((source.0, target.0));
-                }
-            }
-
+            let state = A::initialize(InitializeContext::new(&target))?;
             let mut apply = Vec::new();
-            for meta in metas.iter() {
+            for meta in adds.iter() {
                 let (index, column) = target.column_with(meta.identifier())?;
                 if column.meta().size > 0 {
                     apply.push(index);
                 }
             }
 
-            Ok(ShareTable::<T> {
+            if apply.len() == 0 && source.index() == target.index() {
+                return Err(Error::TablesMustDiffer(source.index() as _));
+            }
+
+            Ok(Self {
                 source,
                 target,
                 inner: Arc::new(Inner {
                     state,
                     apply: apply.into_boxed_slice(),
                 }),
+                _marker: PhantomData,
             })
         })?;
         let share = share.read();
@@ -633,11 +674,11 @@ impl<T: Template> ShareTable<T> {
     }
 }
 
-pub(crate) fn move_to<'d, 'a, V, T: Template>(
+fn move_to<'d, 'a, V, A: Template>(
     database: &Database<impl Listen>,
     set: &HashMap<Key, V>,
-    state: &T::State,
-    templates: &mut Vec<T>,
+    state: &A::State,
+    templates: &mut Vec<A>,
     moves: &mut Vec<(usize, usize, NonZeroUsize)>,
     copies: &mut Vec<(usize, usize, NonZeroUsize)>,
     (source_table, source_keys): (&Table, RwLockUpgradableReadGuard<'a, Vec<Key>>),
@@ -717,7 +758,7 @@ pub(crate) fn move_to<'d, 'a, V, T: Template>(
     drop(source_keys);
     // Although `source_keys` has been dropped, coherence will be maintained since the `target` lock prevents the keys from
     // moving again before `emit` is done.
-    database.listen.on_add(
+    database.listen.on_modify(
         &target_keys[start..start + count.get()],
         source_table,
         target_table,
@@ -744,11 +785,14 @@ fn resolve_copy_move(
     }
 
     let mut index = 0;
-    for target_column in target_table.columns() {
-        if let Some(source_column) = source_table.columns().get(index) {
+    for source_column in source_table.columns() {
+        let copy = source_column.meta().size > 0;
+        let mut drop = source_column.meta().drop.0();
+        while let Some(target_column) = target_table.columns().get(index) {
             if source_column.meta().identifier() == target_column.meta().identifier() {
                 index += 1;
-                if source_column.meta().size > 0 {
+                drop = false;
+                if copy {
                     for &(source, target, count) in copies {
                         unsafe {
                             Column::copy_to(
@@ -758,14 +802,25 @@ fn resolve_copy_move(
                             )
                         };
                     }
-                    for &(source, target, count) in moves {
-                        unsafe { source_column.copy(source, target, count) };
-                    }
                 }
+                break;
+            } else if source_column.meta().identifier() < target_column.meta().identifier() {
+                break;
+            } else {
+                index += 1;
+            }
+        }
+        if drop {
+            for &(index, _, count) in copies {
+                unsafe { source_column.drop(index, count) }
+            }
+        }
+        if copy {
+            for &(source, target, count) in moves {
+                unsafe { source_column.copy(source, target, count) };
             }
         }
     }
-    debug_assert_eq!(index, source_table.columns().len());
 }
 
 #[inline]

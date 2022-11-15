@@ -11,8 +11,7 @@ use std::{any::TypeId, collections::VecDeque, marker::PhantomData, num::NonZeroU
 pub trait Listen {
     fn on_create(&self, keys: &[Key], table: &Table);
     fn on_destroy(&self, keys: &[Key], table: &Table);
-    fn on_add(&self, keys: &[Key], source: &Table, target: &Table);
-    fn on_remove(&self, keys: &[Key], source: &Table, target: &Table);
+    fn on_modify(&self, keys: &[Key], source: &Table, target: &Table);
 }
 
 pub trait Event {
@@ -242,12 +241,8 @@ macro_rules! tuple {
                 $(self.$i.on_destroy(_keys, _table);)*
             }
             #[inline]
-            fn on_add(&self, _keys: &[Key], _source: &Table, _target: &Table) {
-                $(self.$i.on_add(_keys, _source, _target);)*
-            }
-            #[inline]
-            fn on_remove(&self, _keys: &[Key], _source: &Table, _target: &Table) {
-                $(self.$i.on_remove(_keys, _source, _target);)*
+            fn on_modify(&self, _keys: &[Key], _source: &Table, _target: &Table) {
+                $(self.$i.on_modify(_keys, _source, _target);)*
             }
         }
     };
