@@ -18,7 +18,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
-/// Adds template `T` to accumulated add operations.
+/// Adds template `A` and removes template `R` to accumulated keys that satisfy the filter `F`.
 pub struct Modify<'d, A: Template, R: Template, F, L> {
     database: &'d Database<L>,
     pairs: HashMap<Key, MaybeUninit<A>>, // A `HashMap` is used because the move algorithm assumes that rows will be unique.
@@ -31,10 +31,7 @@ pub struct Modify<'d, A: Template, R: Template, F, L> {
     _marker: PhantomData<fn(R)>,
 }
 
-pub type Add<'d, T, F, L> = Modify<'d, T, (), F, L>;
-pub type Remove<'d, T, F, L> = Modify<'d, (), T, F, L>;
-
-/// Adds template `T` to all keys in tables that satisfy the filter `F`.
+/// Adds template `A` and removes template `R` to all keys in tables that satisfy the filter `F`.
 pub struct ModifyAll<'d, A: Template, R: Template, F, L> {
     database: &'d Database<L>,
     index: usize,
@@ -42,8 +39,6 @@ pub struct ModifyAll<'d, A: Template, R: Template, F, L> {
     filter: F,
     _marker: PhantomData<fn(R)>,
 }
-pub type AddAll<'d, T, F, L> = ModifyAll<'d, T, (), F, L>;
-pub type RemoveAll<'d, T, F, L> = ModifyAll<'d, (), T, F, L>;
 
 type Rows<'d> = Vec<(Key, &'d Slot, u32)>;
 
@@ -100,19 +95,19 @@ impl<L> Database<L> {
         })
     }
 
-    pub fn add<T: Template>(&self) -> Result<Add<T, (), L>, Error> {
+    pub fn add<T: Template>(&self) -> Result<Modify<T, (), (), L>, Error> {
         self.modify()
     }
 
-    pub fn add_all<T: Template>(&self) -> Result<AddAll<T, (), L>, Error> {
+    pub fn add_all<T: Template>(&self) -> Result<ModifyAll<T, (), (), L>, Error> {
         self.modify_all()
     }
 
-    pub fn remove<T: Template>(&self) -> Result<Remove<T, (), L>, Error> {
+    pub fn remove<T: Template>(&self) -> Result<Modify<(), T, (), L>, Error> {
         self.modify()
     }
 
-    pub fn remove_all<T: Template>(&self) -> Result<RemoveAll<T, (), L>, Error> {
+    pub fn remove_all<T: Template>(&self) -> Result<ModifyAll<(), T, (), L>, Error> {
         self.modify_all()
     }
 }
