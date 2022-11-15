@@ -3,7 +3,7 @@ use crate::{
     key::Key,
     Datum, Error, Meta,
 };
-use parking_lot::{RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
+use parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
     any::TypeId,
     cell::UnsafeCell,
@@ -11,21 +11,15 @@ use std::{
     ptr::NonNull,
     slice::from_raw_parts_mut,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
 
 pub struct Table {
     index: u32,
-    metas: Box<[&'static Meta]>,
-    pub(crate) inner: RwLock<Inner>,
-}
-
-pub(crate) struct Inner {
-    pub(crate) count: AtomicU32,
-    pub(crate) pending: AtomicU64,
-    pub(crate) keys: UnsafeCell<Vec<Key>>,
+    pub(crate) count: AtomicUsize,
+    pub(crate) keys: RwLock<Vec<Key>>,
     /// Columns are ordered consistently between tables.
     pub(crate) columns: Box<[Column]>,
 }
@@ -62,22 +56,22 @@ impl Column {
     }
 
     #[inline]
-    pub unsafe fn copy_to(source: (&mut Self, usize), target: (&Self, usize), count: NonZeroUsize) {
+    pub unsafe fn copy_to(source: (&Self, usize), target: (&Self, usize), count: NonZeroUsize) {
         debug_assert_eq!(source.0.meta().identifier(), target.0.meta().identifier());
         let &Meta { copy, .. } = source.0.meta();
         copy(
-            (*source.0.data.get_mut(), source.1),
+            (*source.0.data.data_ptr(), source.1),
             (*target.0.data.data_ptr(), target.1),
             count,
         );
     }
 
-    pub unsafe fn grow(&mut self, old_capacity: usize, new_capacity: NonZeroUsize) {
+    pub unsafe fn grow(&self, old_capacity: usize, new_capacity: NonZeroUsize) {
         debug_assert!(old_capacity < new_capacity.get());
         let &Meta {
             new, free, copy, ..
         } = self.meta();
-        let data = self.data.get_mut();
+        let data = &mut *self.data.data_ptr();
         let old_data = *data;
         let new_data = new(new_capacity.get());
         if let Some(old_capacity) = NonZeroUsize::new(old_capacity) {
@@ -114,9 +108,9 @@ impl Column {
     /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the column.
     /// The ranges 'source_index..source_index + count' and 'target_index..target_index + count' must not overlap.
     #[inline]
-    pub unsafe fn squash(&mut self, source_index: usize, target_index: usize, count: NonZeroUsize) {
+    pub unsafe fn squash(&self, source_index: usize, target_index: usize, count: NonZeroUsize) {
         let &Meta { copy, drop, .. } = self.meta();
-        let data = *self.data.get_mut();
+        let data = unsafe { *self.data.data_ptr() };
         drop.1(data, target_index, count);
         copy((data, source_index), (data, target_index), count);
     }
@@ -124,16 +118,16 @@ impl Column {
     /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the column.
     /// The ranges 'source_index..source_index + count' and 'target_index..target_index + count' must not overlap.
     #[inline]
-    pub unsafe fn copy(&mut self, source_index: usize, target_index: usize, count: NonZeroUsize) {
+    pub unsafe fn copy(&self, source_index: usize, target_index: usize, count: NonZeroUsize) {
         let &Meta { copy, .. } = self.meta();
-        let data = *self.data.get_mut();
+        let data = *self.data.data_ptr();
         copy((data, source_index), (data, target_index), count);
     }
 
     #[inline]
-    pub unsafe fn drop(&mut self, index: usize, count: NonZeroUsize) {
+    pub unsafe fn drop(&self, index: usize, count: NonZeroUsize) {
         let &Meta { drop, .. } = self.meta();
-        let data = *self.data.get_mut();
+        let data = unsafe { *self.data.data_ptr() };
         drop.1(data, index, count);
     }
 
@@ -255,16 +249,11 @@ impl Tables {
 
         let columns = metas.iter().map(|&meta| Column::new(meta, 0)).collect();
         let index = tables.len();
-        let inner = Inner {
-            count: 0.into(),
-            pending: 0.into(),
-            keys: Vec::new().into(),
-            columns,
-        };
         let table = Arc::new(Table {
             index: index as _,
-            metas: metas.iter().copied().collect(),
-            inner: RwLock::new(inner),
+            count: 0.into(),
+            keys: RwLock::new(Vec::new()),
+            columns,
         });
         let write = RwLockUpgradableReadGuard::upgrade(upgrade);
         // SAFETY: The lock has been upgraded so `self.tables` can be mutated.
@@ -273,12 +262,6 @@ impl Tables {
         let table = unsafe { get_unchecked(tables, index) }.clone();
         drop(read);
         table
-    }
-
-    pub fn shrink(&self) {
-        for table in self.iter() {
-            table.inner.write().shrink();
-        }
     }
 }
 
@@ -292,8 +275,18 @@ impl Table {
     }
 
     #[inline]
-    pub fn metas(&self) -> &[&'static Meta] {
-        &self.metas
+    pub fn count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn metas(&self) -> impl FullIterator<Item = &'static Meta> + '_ {
+        self.columns().iter().map(|column| column.meta())
+    }
+
+    #[inline]
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
     }
 
     #[inline]
@@ -303,9 +296,57 @@ impl Table {
 
     #[inline]
     pub fn has_with(&self, identifier: TypeId) -> bool {
-        self.metas
-            .binary_search_by_key(&identifier, |meta| meta.identifier())
+        self.columns()
+            .binary_search_by_key(&identifier, |column| column.meta().identifier())
             .is_ok()
+    }
+
+    pub fn shrink(&mut self) {
+        let keys = self.keys.get_mut();
+        let Some(old_capacity) = NonZeroUsize::new(keys.len()) else {
+            return;
+        };
+        let new_capacity = *self.count.get_mut() as usize;
+        if new_capacity == old_capacity.get() {
+            return;
+        }
+
+        debug_assert!(new_capacity <= old_capacity.get());
+        keys.truncate(new_capacity as _);
+        keys.shrink_to_fit();
+
+        let new_capacity = keys.len();
+        for column in self.columns.iter_mut() {
+            unsafe { column.shrink(old_capacity, new_capacity) };
+        }
+    }
+
+    pub(crate) fn reserve<'a>(
+        &self,
+        keys: RwLockUpgradableReadGuard<'a, Vec<Key>>,
+        count: NonZeroUsize,
+    ) -> (usize, RwLockUpgradableReadGuard<'a, Vec<Key>>) {
+        let start = self.count.load(Ordering::Acquire);
+        assert!(
+            start < u32::MAX as usize - count.get(),
+            "There can not be more than `u32::MAX` keys at a given time."
+        );
+
+        let old_capacity = keys.len();
+        let new_capacity = count.saturating_add(start as _);
+        if new_capacity.get() <= old_capacity {
+            return (start, keys);
+        }
+
+        let mut keys = RwLockUpgradableReadGuard::upgrade(keys);
+        keys.resize(new_capacity.get(), Key::NULL);
+        let keys = RwLockWriteGuard::downgrade_to_upgradable(keys);
+        for column in self.columns.iter() {
+            let guard = column.data().write();
+            unsafe { column.grow(old_capacity, new_capacity) };
+            drop(guard);
+        }
+        (start, keys)
     }
 
     /// `types` must be ordered and deduplicated.
@@ -336,128 +377,23 @@ impl Table {
         return true;
     }
 
-    pub(crate) fn column<D: Datum>(&self) -> Result<(usize, &'static Meta), Error> {
+    pub(crate) fn column<D: Datum>(&self) -> Result<(usize, &Column), Error> {
         self.column_with(TypeId::of::<D>())
     }
 
-    pub(crate) fn column_with(&self, identifier: TypeId) -> Result<(usize, &'static Meta), Error> {
+    pub(crate) fn column_with(&self, identifier: TypeId) -> Result<(usize, &Column), Error> {
         let index = self
-            .metas
-            .binary_search_by_key(&identifier, |meta| meta.identifier())
+            .columns
+            .binary_search_by_key(&identifier, |column| column.meta().identifier())
             .map_err(|_| Error::MissingColumn(identifier))?;
-        Ok((index, self.metas[index]))
+        Ok((index, &self.columns[index]))
     }
 }
 
 unsafe impl Send for Table {}
 unsafe impl Sync for Table {}
 
-impl Inner {
-    #[inline]
-    pub fn count(&self) -> usize {
-        self.count.load(Ordering::Acquire) as _
-    }
-
-    #[inline]
-    pub fn keys(&self) -> &[Key] {
-        unsafe { get_unchecked(&**self.keys.get(), ..self.count()) }
-    }
-
-    #[inline]
-    pub fn columns(&self) -> &[Column] {
-        &self.columns
-    }
-
-    #[inline]
-    pub const fn decompose_pending(pending: u64) -> (u32, u32) {
-        ((pending >> 32) as u32, pending as u32)
-    }
-
-    #[inline]
-    pub const fn recompose_pending(begun: u32, ended: u32) -> u64 {
-        ((begun as u64) << 32) | (ended as u64)
-    }
-
-    pub fn reserve<'a>(
-        inner: RwLockUpgradableReadGuard<'a, Inner>,
-        count: NonZeroUsize,
-    ) -> (usize, RwLockReadGuard<'a, Inner>) {
-        let (start, inner) = {
-            let (start, _) = {
-                let add = Self::recompose_pending(count.get() as _, 0);
-                let pending = inner.pending.fetch_add(add, Ordering::AcqRel);
-                Self::decompose_pending(pending)
-            };
-            // There can not be more than `u32::MAX` keys at a given time.
-            assert!(start < u32::MAX - count.get() as u32);
-
-            let old_capacity = unsafe { &*inner.keys.get() }.len();
-            let new_capacity = count.saturating_add(start as _);
-            let inner = if new_capacity.get() <= old_capacity {
-                RwLockUpgradableReadGuard::downgrade(inner)
-            } else {
-                let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
-                let keys = inner.keys.get_mut();
-                keys.resize(new_capacity.get(), Key::NULL);
-                debug_assert_eq!(keys.len(), new_capacity.get());
-                for column in inner.columns.iter_mut() {
-                    unsafe { column.grow(old_capacity, new_capacity) };
-                }
-                RwLockWriteGuard::downgrade(inner)
-            };
-            (start as usize, inner)
-        };
-        (start, inner)
-    }
-
-    pub fn commit(&self, count: NonZeroUsize) {
-        let add = Self::recompose_pending(0, count.get() as _);
-        let pending = self.pending.fetch_add(add, Ordering::AcqRel);
-        let (begun, ended) = Self::decompose_pending(pending);
-        debug_assert!(begun > ended);
-        if begun == ended + count.get() as u32 {
-            // Only update `self.count` if it can be ensured that no other add operations are in progress.
-            self.count.fetch_max(begun, Ordering::Relaxed);
-        }
-    }
-
-    pub fn release(&mut self, count: NonZeroUsize) -> usize {
-        let current = self.count.get_mut();
-        let pending = self.pending.get_mut();
-        let (begun, ended) = Self::decompose_pending(*pending);
-
-        // Sanity checks. If this is not the case, there is a bug in the locking logic.
-        debug_assert_eq!(begun, ended);
-        debug_assert_eq!(begun, *current);
-        debug_assert!(*current >= count.get() as u32);
-        *current -= count.get() as u32;
-        *pending = Self::recompose_pending(begun - count.get() as u32, ended - count.get() as u32);
-        *current as usize
-    }
-
-    pub fn shrink(&mut self) {
-        let keys = self.keys.get_mut();
-        let Some(old_capacity) = NonZeroUsize::new(keys.len()) else {
-            return;
-        };
-        let new_capacity = *self.count.get_mut() as usize;
-        if new_capacity == old_capacity.get() {
-            return;
-        }
-        debug_assert!(new_capacity <= old_capacity.get());
-
-        keys.truncate(new_capacity as _);
-        keys.shrink_to_fit();
-        debug_assert_eq!(keys.len(), new_capacity);
-
-        let new_capacity = keys.len();
-        for column in self.columns.iter_mut() {
-            unsafe { column.shrink(old_capacity, new_capacity) };
-        }
-    }
-}
-
-impl Drop for Inner {
+impl Drop for Table {
     fn drop(&mut self) {
         let count = *self.count.get_mut() as usize;
         let capacity = self.keys.get_mut().len();

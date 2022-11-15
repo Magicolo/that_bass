@@ -2,11 +2,15 @@ use crate::{
     event::Listen,
     key::Key,
     resources::Resources,
-    table::{self, Table, Tables},
+    table::{Table, Tables},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
     Database, Error,
 };
-use std::{num::NonZeroUsize, sync::Arc};
+use parking_lot::RwLockUpgradableReadGuard;
+use std::{
+    num::NonZeroUsize,
+    sync::{atomic::Ordering, Arc},
+};
 
 pub struct Create<'d, T: Template, L> {
     database: &'d Database<L>,
@@ -127,36 +131,49 @@ impl<T: Template, L: Listen> Create<'_, T, L> {
             return 0;
         };
 
-        let (start, inner) = table::Inner::reserve(self.table.inner.upgradable_read(), count);
-        // SAFETY: The range `start..start + count` is reserved to this thread by `table::Inner::reserve` and will not be modified
-        // until `table::Inner::commit` is called and as long as a table lock is held.
-        let keys = unsafe { &mut **inner.keys.get() };
-        keys[start..start + count.get()].copy_from_slice(&self.keys);
-        let context = ApplyContext::new(keys, inner.columns());
+        // The upgradable lock serves 2 purposes:
+        // 1- It can be upgraded to grow the columns if required.
+        // 2- It prevents this operation from overlaping with the end of `destroy/remove` operations, which is important since `create`
+        // writes to keys and columns without locking.
+        let keys = self.table.keys.upgradable_read();
+        let (start, keys) = self.table.reserve(keys, count);
+        let context = ApplyContext::new(&self.table, &keys);
         for (i, template) in self.templates.drain(..).enumerate() {
+            debug_assert!(i < count.get());
             // SAFETY: This is safe by the guarantees of `T::apply` and by the fact that only the rows in the range
             // `start..start + count` are modified.
-            let index = start + i;
-            debug_assert!(index < start + count.get());
-            // SAFETY: No locks are required because of the guarantee above and `index` is guaranteed to hold no previous
+            // SAFETY: No locks are required because of the guarantee above and the `start + i` row is guaranteed to hold no previous
             // valid data.
-            unsafe { template.apply(&self.state, context.with(index)) };
+            unsafe { template.apply(&self.state, context.with(start + i)) };
+        }
+        {
+            // SAFETY: The range `start..start + count` is reserved to this thread by `table::Inner::reserve` and will not be modified
+            // until `table::Inner::commit` is called and as long as a table lock is held.
+            let keys = unsafe { &mut *RwLockUpgradableReadGuard::rwlock(&keys).data_ptr() };
+            keys[start..start + count.get()].copy_from_slice(&self.keys);
         }
 
         /*
             Initialize table keys.
-            - Calling `commit` first means that another thread may query the created rows and observe that their key in invalid through
-            `Database::keys().get()`.
             - Calling `initialize` first means that another thread may try to use a `Query::find` and access a `row >= count`. Although
-            this is an uncomfortable state of affairs, queries can detect this state and report an appropriate error.
+            this is an uncomfortable state of affairs (because it is easy to forget), queries can detect this state and report an
+            appropriate error.
+            - Calling `fetch_add` first means that another thread may query the created rows and observe that their key in invalid through
+            `Database::keys().get()`. This is not acceptable and there doesn't seem to be a good fix.
         */
         self.database
             .keys()
-            .initialize(keys, self.table.index(), start..start + count.get());
-        inner.commit(count);
+            .initialize(&keys, self.table.index(), start..start + count.get());
+        self.table
+            .count
+            .fetch_add(count.get() as _, Ordering::Release);
         self.database
             .listen
             .on_create(&keys[start..start + count.get()], &self.table);
+        drop(keys);
+        self.keys.clear();
+        debug_assert_eq!(self.keys.len(), 0);
+        debug_assert_eq!(self.templates.len(), 0);
         count.get()
     }
 }
@@ -193,7 +210,7 @@ pub(crate) fn is<T: Template>(table: &Table, tables: &Tables, resources: &Resour
 
 pub(crate) fn has<T: Template>(table: &Table, tables: &Tables, resources: &Resources) -> bool {
     match Share::<T>::from(tables, resources) {
-        Ok(pair) => table.has_all(pair.1.metas().iter().map(|meta| meta.identifier())),
+        Ok(pair) => table.has_all(pair.1.metas().map(|meta| meta.identifier())),
         Err(_) => false,
     }
 }

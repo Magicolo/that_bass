@@ -1,17 +1,21 @@
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
 
 use crate::{
-    add::{copy_to, move_to},
-    core::utility::{fold_swap, get_unchecked_mut, unreachable},
+    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
     event::Listen,
     filter::Filter,
     key::{Key, Slot},
     resources::Resources,
-    table::{self, Table, Tables},
+    table::{Column, Table, Tables},
     template::{ShareMeta, Template},
     Database, Error,
 };
-use std::{collections::HashSet, marker::PhantomData, num::NonZeroUsize, sync::Arc};
+use std::{
+    collections::HashSet,
+    marker::PhantomData,
+    num::NonZeroUsize,
+    sync::{atomic::Ordering, Arc},
+};
 
 pub struct Remove<'d, T: Template, F, L> {
     database: &'d Database<L>,
@@ -19,6 +23,8 @@ pub struct Remove<'d, T: Template, F, L> {
     indices: Vec<usize>, // May be reordered (ex: by `fold_swap`).
     states: Vec<Result<State<'d>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
     pending: Vec<(Key, &'d Slot, u32)>,
+    moves: Vec<(usize, usize, NonZeroUsize)>,
+    copies: Vec<(usize, usize, NonZeroUsize)>,
     filter: F,
     _marker: PhantomData<fn(T)>,
 }
@@ -37,25 +43,17 @@ type Rows<'d> = Vec<(Key, &'d Slot, u32)>;
 struct State<'d> {
     source: Arc<Table>,
     target: Arc<Table>,
-    inner: Arc<Inner>,
     rows: Rows<'d>,
 }
 
 struct StateAll {
     source: Arc<Table>,
     target: Arc<Table>,
-    inner: Arc<Inner>,
-}
-
-struct Inner {
-    copy: Box<[(usize, usize)]>,
-    drop: Box<[usize]>,
 }
 
 struct ShareTable<T> {
     source: Arc<Table>,
     target: Arc<Table>,
-    inner: Arc<Inner>,
     _marker: PhantomData<fn(T)>,
 }
 
@@ -68,6 +66,8 @@ impl<L> Database<L> {
             pending: Vec::new(),
             states: Vec::new(),
             indices: Vec::new(),
+            copies: Vec::new(),
+            moves: Vec::new(),
             filter: (),
             _marker: PhantomData,
         })
@@ -120,6 +120,8 @@ impl<'d, T: Template, F, L> Remove<'d, T, F, L> {
             filter: (self.filter, filter),
             indices: self.indices,
             states: self.states,
+            copies: self.copies,
+            moves: self.moves,
             _marker: PhantomData,
         }
     }
@@ -148,7 +150,7 @@ impl<'d, T: Template, F, L> Remove<'d, T, F, L> {
 
 impl<'d, T: Template, F: Filter, L: Listen> Remove<'d, T, F, L> {
     pub fn resolve(&mut self) -> usize {
-        for (key, result) in self.database.keys().get_all(self.keys.drain()) {
+        for (key, result) in self.database.keys().get_all(self.keys.iter().copied()) {
             if let Ok((slot, table)) = result {
                 Self::sort(
                     key,
@@ -181,6 +183,11 @@ impl<'d, T: Template, F: Filter, L: Listen> Remove<'d, T, F, L> {
                 );
             }
         }
+        self.keys.clear();
+        debug_assert_eq!(self.keys.len(), 0);
+        debug_assert_eq!(self.moves.len(), 0);
+        debug_assert_eq!(self.copies.len(), 0);
+        debug_assert_eq!(self.indices.len(), 0);
         sum
     }
 
@@ -188,61 +195,55 @@ impl<'d, T: Template, F: Filter, L: Listen> Remove<'d, T, F, L> {
         fold_swap(
             &mut self.indices,
             0,
-            (&mut self.states, &mut self.pending),
-            |sum, (states, pending), index| {
-                let Some(Ok(state)) = states.get_mut(*index) else {
-                    unsafe { unreachable() };
-                };
+            (
+                &mut self.states,
+                &mut self.pending,
+                &mut self.moves,
+                &mut self.copies,
+            ),
+            |sum, (states, pending, moves, copies), index| {
+                let result = unsafe { get_unchecked_mut(states, *index) };
+                let state = unsafe { result.as_mut().unwrap_unchecked() };
                 debug_assert_ne!(state.source.index(), state.target.index());
-                if state.rows.len() == 0 {
-                    return Ok(sum);
-                }
-                let source = state.source.inner.try_write().ok_or(sum)?;
-                let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
+                debug_assert!(state.rows.len() > 0);
+                let source = state.source.keys.try_upgradable_read().ok_or(sum)?;
+                let target = state.target.keys.try_upgradable_read().ok_or(sum)?;
                 let (low, high) = Self::retain(&state.source, &mut state.rows, pending);
                 let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                     // Happens if all keys from this table have been moved or destroyed between here and the sorting.
                     return Ok(sum);
                 };
                 move_to(
-                    &self.database.inner,
-                    source,
-                    (state.target.index(), target),
+                    self.database,
+                    &self.keys,
+                    moves,
+                    copies,
+                    (&state.source, source),
+                    (&state.target, target),
                     (low, high, count),
                     &mut state.rows,
-                    &state.inner.copy,
-                    &state.inner.drop,
-                    |_, _, _| {},
-                    |keys| {
-                        self.database
-                            .listen
-                            .on_remove(keys, &state.source, &state.target)
-                    },
                 );
                 Ok(sum + count.get())
             },
-            |sum, (states, pending), index| {
-                let Some(Ok(state)) = states.get_mut(*index) else {
-                    unsafe { unreachable() };
-                };
+            |sum, (states, pending, moves, copies), index| {
+                let result = unsafe { get_unchecked_mut(states, *index) };
+                let state = unsafe { result.as_mut().unwrap_unchecked() };
                 debug_assert_ne!(state.source.index(), state.target.index());
-                if state.rows.len() == 0 {
-                    return sum;
-                }
+                debug_assert!(state.rows.len() > 0);
                 let (source, target, low, high, count) =
                     // If locks are always taken in order (lower index first), there can not be a deadlock between move operations.
                     if state.source.index() < state.target.index() {
-                        let source = state.source.inner.write();
+                        let source = state.source.keys.upgradable_read();
                         let (low, high) = Self::retain(&state.source, &mut state.rows, pending);
                         let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                             // Happens if all keys from this table have been moved or destroyed between here and the sorting.
                             return sum;
                         };
-                        let target = state.target.inner.upgradable_read();
+                        let target = state.target.keys.upgradable_read();
                         (source, target, low, high, count)
                     } else {
-                        let target = state.target.inner.upgradable_read();
-                        let source = state.source.inner.write();
+                        let target = state.target.keys.upgradable_read();
+                        let source = state.source.keys.upgradable_read();
                         let (low, high) = Self::retain(&state.source, &mut state.rows, pending);
                         let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                             // Happens if all keys from this table have been moved or destroyed between here and the sorting.
@@ -251,19 +252,14 @@ impl<'d, T: Template, F: Filter, L: Listen> Remove<'d, T, F, L> {
                         (source, target, low, high, count)
                     };
                 move_to(
-                    &self.database.inner,
-                    source,
-                    (state.target.index(), target),
+                    self.database,
+                    &self.keys,
+                    moves,
+                    copies,
+                    (&state.source, source),
+                    (&state.target, target),
                     (low, high, count),
                     &mut state.rows,
-                    &state.inner.copy,
-                    &state.inner.drop,
-                    |_, _, _| {},
-                    |keys| {
-                        self.database
-                            .listen
-                            .on_remove(keys, &state.source, &state.target)
-                    },
                 );
                 sum + count.get()
             },
@@ -287,11 +283,10 @@ impl<'d, T: Template, F: Filter, L: Listen> Remove<'d, T, F, L> {
             Err(index) => {
                 let result =
                     match ShareTable::<T>::from(table, &database.tables, &database.resources) {
-                        Ok((source, target, inner)) if filter.filter(&source, database.into()) => {
+                        Ok((source, target)) if filter.filter(&source, database.into()) => {
                             Ok(State {
                                 source,
                                 target,
-                                inner,
                                 rows: Vec::new(),
                             })
                         }
@@ -367,12 +362,8 @@ impl<'d, T: Template, F: Filter, L: Listen> RemoveAll<'d, T, F, L> {
                 self.database.tables(),
                 self.database.resources(),
             ) {
-                Ok((source, target, inner)) if self.filter.filter(table, self.database.into()) => {
-                    self.states.push(StateAll {
-                        source,
-                        target,
-                        inner,
-                    })
+                Ok((source, target)) if self.filter.filter(table, self.database.into()) => {
+                    self.states.push(StateAll { source, target })
                 }
                 _ => {}
             }
@@ -384,78 +375,65 @@ impl<'d, T: Template, F: Filter, L: Listen> RemoveAll<'d, T, F, L> {
             (),
             |sum, _, state| {
                 debug_assert_ne!(state.source.index(), state.target.index());
-                let mut source = state.source.inner.try_write().ok_or(sum)?;
-                let Some(count) = NonZeroUsize::new(*source.count.get_mut() as _) else {
-                    return Ok(sum);
-                };
-                let target = state.target.inner.try_upgradable_read().ok_or(sum)?;
-                Self::resolve_tables(source, target, state, count, self.database);
-                Ok(sum + count.get())
+                let source = state.source.keys.try_write().ok_or(sum)?;
+                let target = state.target.keys.try_upgradable_read().ok_or(sum)?;
+                Ok(sum + Self::resolve_tables(source, target, state, self.database))
             },
             |sum, _, state| {
                 debug_assert_ne!(state.source.index(), state.target.index());
                 if state.source.index() < state.target.index() {
-                    let mut source = state.source.inner.write();
-                    let Some(count) = NonZeroUsize::new(*source.count.get_mut() as _) else {
-                        return sum;
-                    };
-                    let target = state.target.inner.upgradable_read();
-                    Self::resolve_tables(source, target, state, count, self.database);
-                    sum + count.get()
+                    let source = state.source.keys.write();
+                    let target = state.target.keys.upgradable_read();
+                    sum + Self::resolve_tables(source, target, state, self.database)
                 } else {
-                    let target = state.target.inner.upgradable_read();
-                    let mut source = state.source.inner.write();
-                    let Some(count) = NonZeroUsize::new(*source.count.get_mut() as _) else {
-                        return sum;
-                    };
-                    Self::resolve_tables(source, target, state, count, self.database);
-                    sum + count.get()
+                    let target = state.target.keys.upgradable_read();
+                    let source = state.source.keys.write();
+                    sum + Self::resolve_tables(source, target, state, self.database)
                 }
             },
         )
     }
 
     fn resolve_tables(
-        mut source: RwLockWriteGuard<table::Inner>,
-        target: RwLockUpgradableReadGuard<table::Inner>,
+        mut source: RwLockWriteGuard<Vec<Key>>,
+        target: RwLockUpgradableReadGuard<Vec<Key>>,
         state: &StateAll,
-        count: NonZeroUsize,
         database: &Database<impl Listen>,
-    ) {
-        let (start, target) = table::Inner::reserve(target, count);
-        let remain = source.release(count);
-        debug_assert_eq!(remain, 0);
-
-        let source_inner = &mut *source;
-        let source_keys = source_inner.keys.get_mut();
-        let target_inner = &*target;
-        let target_keys = unsafe { &mut *target_inner.keys.get() };
-        copy_to(
-            (0, source_keys, &mut source_inner.columns),
-            (start, target_keys, target_inner.columns()),
-            count,
-            &state.inner.copy,
-            &state.inner.drop,
+    ) -> usize {
+        let count = state.source.count.swap(0, Ordering::AcqRel);
+        let Some(count) = NonZeroUsize::new(count) else {
+            return 0;
+        };
+        let (start, target) = state.target.reserve(target, count);
+        let target_keys = unsafe { &mut *RwLockUpgradableReadGuard::rwlock(&target).data_ptr() };
+        target_keys[start..start + count.get()].copy_from_slice(&source[..count.get()]);
+        resolve_copy_move(
+            (&mut source, &state.source),
+            &state.target,
+            &[(0, start, count)],
+            &[],
+            &database.inner,
         );
-
-        target_inner.commit(count);
-        // Slots must be updated after the table `commit` to prevent a `query::find` to be able to observe a row which
+        state
+            .target
+            .count
+            .fetch_add(count.get() as _, Ordering::Release);
+        // Slots must be updated after the table `fetch_add` to prevent a `query::find` to be able to observe a row which
         // has an index greater than the `table.count()`. As long as the slots remain in the source table, all accesses
         // to these keys will block at the table access and will correct their table index after they acquire the source
         // table lock.
-        database.keys().initialize(
-            target_keys,
-            state.target.index(),
-            start..start + count.get(),
-        );
+        database
+            .keys()
+            .initialize(&target, state.target.index(), start..start + count.get());
         drop(source);
         // Although `source` has been dropped, coherence with be maintained since the `target` lock prevent the keys
         // moving again before `on_remove` is done.
         database.listen.on_remove(
-            &target_keys[start..start + count.get()],
+            &target[start..start + count.get()],
             &state.source,
             &state.target,
         );
+        count.get()
     }
 }
 
@@ -464,13 +442,13 @@ impl<T: Template> ShareTable<T> {
         table: u32,
         tables: &Tables,
         resources: &Resources,
-    ) -> Result<(Arc<Table>, Arc<Table>, Arc<Inner>), Error> {
+    ) -> Result<(Arc<Table>, Arc<Table>), Error> {
         let share = resources.try_global_with(table, || {
             let metas = ShareMeta::<T>::from(resources)?;
             let source = tables.get_shared(table as usize)?;
             let target = {
                 let mut targets = Vec::new();
-                for &meta in source.metas() {
+                for meta in source.metas() {
                     match metas.binary_search_by_key(&meta.identifier(), |meta| meta.identifier()) {
                         Ok(_) => {}
                         Err(_) => targets.push(meta),
@@ -483,18 +461,18 @@ impl<T: Template> ShareTable<T> {
             }
 
             let mut copy = Vec::new();
-            for target in target.metas().iter().enumerate() {
+            for target in target.metas().enumerate() {
                 let source = source.column_with(target.1.identifier())?;
-                debug_assert_eq!(source.1.identifier(), target.1.identifier());
-                if source.1.size > 0 {
+                debug_assert_eq!(source.1.meta().identifier(), target.1.identifier());
+                if source.1.meta().size > 0 {
                     copy.push((source.0, target.0));
                 }
             }
 
             let mut drop = Vec::new();
             for meta in metas.iter() {
-                if let Ok((index, meta)) = source.column_with(meta.identifier()) {
-                    if meta.drop.0() {
+                if let Ok((index, column)) = source.column_with(meta.identifier()) {
+                    if column.meta().drop.0() {
                         drop.push(index);
                     }
                 }
@@ -503,18 +481,151 @@ impl<T: Template> ShareTable<T> {
             Ok(Self {
                 source,
                 target,
-                inner: Arc::new(Inner {
-                    copy: copy.into_boxed_slice(),
-                    drop: drop.into_boxed_slice(),
-                }),
                 _marker: PhantomData,
             })
         })?;
         let share = share.read();
-        Ok((
-            share.source.clone(),
-            share.target.clone(),
-            share.inner.clone(),
-        ))
+        Ok((share.source.clone(), share.target.clone()))
     }
+}
+
+fn move_to<'d, 'a>(
+    database: &Database<impl Listen>,
+    set: &HashSet<Key>,
+    moves: &mut Vec<(usize, usize, NonZeroUsize)>,
+    copies: &mut Vec<(usize, usize, NonZeroUsize)>,
+    (source_table, source_keys): (&Table, RwLockUpgradableReadGuard<'a, Vec<Key>>),
+    (target_table, target_keys): (&Table, RwLockUpgradableReadGuard<'a, Vec<Key>>),
+    (low, high, count): (u32, u32, NonZeroUsize),
+    rows: &mut Rows<'d>,
+) {
+    let (start, target_keys) = target_table.reserve(target_keys, count);
+    // Move data from source to target.
+    let range = low..high + 1;
+    let head = source_table.count.load(Ordering::Acquire) - count.get();
+    let (low, high) = (range.start as usize, range.end as usize);
+
+    if range.len() == count.get() {
+        // Fast path. The move range is contiguous. Copy everything from source to target at once.
+        copies.push((low, start, count));
+
+        let over = high.saturating_sub(head);
+        if let Some(end) = NonZeroUsize::new(count.get() - over) {
+            moves.push((head + over, low, end));
+        }
+    } else {
+        // Range is not contiguous; use the slow path.
+        let mut cursor = head;
+        for (i, &(.., row)) in rows.iter().enumerate() {
+            let row = row as usize;
+            copies.push((row, start + i, ONE));
+
+            if row < head {
+                // Find the next valid row to move.
+                while set.contains(unsafe { get_unchecked(&source_keys, cursor) }) {
+                    cursor += 1;
+                }
+                debug_assert!(cursor < head + count.get());
+                moves.push((cursor, row, ONE));
+                cursor += 1;
+            }
+        }
+    }
+
+    // Target keys can be copied over without requiring the `source_keys` write lock since the range `start..start + count` is
+    // reserved to this operation.
+    {
+        let target_keys =
+            unsafe { &mut *RwLockUpgradableReadGuard::rwlock(&target_keys).data_ptr() };
+        for &(source, target, count) in copies.iter() {
+            debug_assert!(target >= start);
+            target_keys[target..target + count.get()]
+                .copy_from_slice(&source_keys[source..source + count.get()]);
+        }
+    }
+
+    let mut source_keys = RwLockUpgradableReadGuard::upgrade(source_keys);
+    resolve_copy_move(
+        (&mut source_keys, source_table),
+        target_table,
+        copies,
+        moves,
+        &database.inner,
+    );
+    source_table.count.fetch_sub(count.get(), Ordering::Release);
+    target_table.count.fetch_add(count.get(), Ordering::Release);
+    // Slots must be updated after the table `fetch_add` to prevent a `query::find` to be able to observe a row which
+    // has an index greater than the `table.count()`. As long as the slots remain in the source table, all accesses
+    // to these keys will block at the table access and will correct their table index after they acquire the source
+    // table lock.
+    for (i, (key, slot, _)) in rows.drain(..).enumerate() {
+        slot.initialize(key.generation(), target_table.index(), (start + i) as u32);
+    }
+
+    drop(source_keys);
+    // Although `source_keys` has been dropped, coherence will be maintained since the `target` lock prevents the keys from
+    // moving again before `emit` is done.
+    database.listen.on_remove(
+        &target_keys[start..start + count.get()],
+        source_table,
+        target_table,
+    );
+    drop(target_keys);
+    copies.clear();
+    moves.clear();
+}
+
+/// SAFETY: A write lock over `source_table.keys` must be held when calling this.
+/// - Since a write lock is held over the `source_keys`, it is guaranteed that there is no reader/writer in
+/// the columns, so there is no need to take column locks.
+fn resolve_copy_move(
+    (source_keys, source_table): (&mut [Key], &Table),
+    target_table: &Table,
+    copies: &[(usize, usize, NonZeroUsize)],
+    moves: &[(usize, usize, NonZeroUsize)],
+    database: &crate::Inner,
+) {
+    for &(source, target, count) in moves.iter() {
+        source_keys.copy_within(source..source + count.get(), target);
+        database
+            .keys
+            .update(&source_keys, target..target + count.get());
+    }
+
+    let mut index = 0;
+    for source_column in source_table.columns() {
+        let copy = source_column.meta().size > 0;
+        // SAFETY: Since a write lock is held over the `source_keys`, it is guaranteed that there is no reader/writer in
+        // this `source_column`, so there is no need to take a column lock for its operations.
+        match target_table.columns().get(index) {
+            Some(target_column)
+                if source_column.meta().identifier() == target_column.meta().identifier() =>
+            {
+                index += 1;
+                if copy {
+                    for &(source, target, count) in copies {
+                        unsafe {
+                            Column::copy_to(
+                                (&source_column, source),
+                                (&target_column, target),
+                                count,
+                            )
+                        };
+                    }
+                }
+            }
+            _ if source_column.meta().drop.0() => {
+                for &(index, _, count) in copies {
+                    unsafe { source_column.drop(index, count) }
+                }
+            }
+            _ => {}
+        }
+        if copy {
+            for &(source, target, count) in moves {
+                unsafe { source_column.copy(source, target, count) };
+            }
+        }
+    }
+    debug_assert_eq!(index, target_table.columns().len());
 }

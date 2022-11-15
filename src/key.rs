@@ -238,10 +238,12 @@ impl Keys {
 }
 
 impl Slot {
+    #[inline]
     const fn recompose_indices(generation: u32, table: u32) -> u64 {
         ((generation as u64) << 32) | (table as u64)
     }
 
+    #[inline]
     const fn decompose_indices(indices: u64) -> (u32, u32) {
         ((indices >> 32) as u32, indices as u32)
     }

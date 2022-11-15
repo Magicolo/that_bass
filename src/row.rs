@@ -2,10 +2,10 @@ use crate::{
     core::{tuples, utility::get_unchecked},
     key::Key,
     resources::Resources,
-    table::{Column, Table},
+    table::Table,
     Datum, Error,
 };
-use std::{any::TypeId, collections::HashSet, marker::PhantomData, sync::Arc};
+use std::{any::TypeId, collections::HashSet, marker::PhantomData, num::NonZeroUsize, sync::Arc};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Access {
@@ -21,13 +21,12 @@ pub struct InitializeContext<'a>(&'a Table);
 pub struct ItemContext<'a> {
     table: &'a Table,
     keys: &'a [Key],
-    columns: &'a [Column],
     row: usize,
 }
 pub struct ChunkContext<'a> {
     table: &'a Table,
     keys: &'a [Key],
-    columns: &'a [Column],
+    count: NonZeroUsize,
 }
 
 pub unsafe trait Row: 'static {
@@ -124,11 +123,10 @@ impl<'a> InitializeContext<'a> {
 
 impl<'a> ItemContext<'a> {
     #[inline]
-    pub const fn new(table: &'a Table, keys: &'a [Key], columns: &'a [Column]) -> Self {
+    pub const fn new(table: &'a Table, keys: &'a [Key]) -> Self {
         Self {
             table,
             keys,
-            columns,
             row: 0,
         }
     }
@@ -138,18 +136,16 @@ impl<'a> ItemContext<'a> {
         Self {
             table: self.table,
             keys: self.keys,
-            columns: self.columns,
             row: self.row,
         }
     }
 
     #[inline]
-    pub const fn with(&self, row: usize) -> Self {
-        debug_assert!(row < self.keys.len());
+    pub fn with(&self, row: usize) -> Self {
+        debug_assert!(row < self.table.count());
         Self {
             table: self.table,
             keys: self.keys,
-            columns: self.columns,
             row,
         }
     }
@@ -172,24 +168,20 @@ impl<'a> ItemContext<'a> {
     #[inline]
     pub unsafe fn read<D: Datum>(&self, state: &Read<D>) -> &'a D {
         debug_assert!(self.table.has::<D>());
-        get_unchecked(self.columns, state.0).get(self.row)
+        get_unchecked(self.table.columns(), state.0).get(self.row)
     }
 
     #[inline]
     pub unsafe fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut D {
         debug_assert!(self.table.has::<D>());
-        get_unchecked(self.columns, state.0).get(self.row)
+        get_unchecked(self.table.columns(), state.0).get(self.row)
     }
 }
 
 impl<'a> ChunkContext<'a> {
     #[inline]
-    pub const fn new(table: &'a Table, keys: &'a [Key], columns: &'a [Column]) -> Self {
-        Self {
-            table,
-            keys,
-            columns,
-        }
+    pub const fn new(table: &'a Table, keys: &'a [Key], count: NonZeroUsize) -> Self {
+        Self { table, keys, count }
     }
 
     #[inline]
@@ -197,7 +189,7 @@ impl<'a> ChunkContext<'a> {
         Self {
             table: self.table,
             keys: self.keys,
-            columns: self.columns,
+            count: self.count,
         }
     }
 
@@ -213,12 +205,12 @@ impl<'a> ChunkContext<'a> {
 
     #[inline]
     pub unsafe fn read<D: Datum>(&self, state: &Read<D>) -> &'a [D] {
-        get_unchecked(self.columns, state.0).get_all(self.keys.len())
+        get_unchecked(self.table.columns(), state.0).get_all(self.count.get())
     }
 
     #[inline]
     pub unsafe fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut [D] {
-        get_unchecked(self.columns, state.0).get_all(self.keys.len())
+        get_unchecked(self.table.columns(), state.0).get_all(self.count.get())
     }
 }
 

@@ -2,7 +2,7 @@ use crate::{
     core::{tuples, utility::get_unchecked},
     key::Key,
     resources::Resources,
-    table::{Column, Table},
+    table::Table,
     Datum, Error, Meta,
 };
 use std::{marker::PhantomData, sync::Arc};
@@ -10,7 +10,7 @@ use std::{marker::PhantomData, sync::Arc};
 pub struct Apply<D>(usize, PhantomData<fn(D)>);
 pub struct DeclareContext<'a>(&'a mut Vec<&'static Meta>);
 pub struct InitializeContext<'a>(&'a Table);
-pub struct ApplyContext<'a>(&'a [Key], &'a [Column], usize);
+pub struct ApplyContext<'a>(&'a Table, &'a [Key], usize);
 
 pub unsafe trait Template: 'static {
     type State: Send + Sync;
@@ -67,8 +67,8 @@ impl<'a> InitializeContext<'a> {
 
 impl<'a> ApplyContext<'a> {
     #[inline]
-    pub const fn new(keys: &'a [Key], columns: &'a [Column]) -> Self {
-        Self(keys, columns, 0)
+    pub const fn new(table: &'a Table, keys: &'a [Key]) -> Self {
+        Self(table, keys, 0)
     }
 
     #[inline]
@@ -78,18 +78,18 @@ impl<'a> ApplyContext<'a> {
 
     #[inline]
     pub const fn with(&self, index: usize) -> Self {
-        debug_assert!(index < self.0.len());
+        debug_assert!(index < self.1.len());
         Self(self.0, self.1, index)
     }
 
     #[inline]
     pub fn key(&self) -> Key {
-        unsafe { *get_unchecked(self.0, self.2) }
+        unsafe { *get_unchecked(self.1, self.2) }
     }
 
     #[inline]
     pub fn apply<D: Datum>(&self, state: &Apply<D>, value: D) {
-        unsafe { get_unchecked(self.1, state.0).set(self.2, value) };
+        unsafe { get_unchecked(self.0.columns(), state.0).set(self.2, value) };
     }
 }
 

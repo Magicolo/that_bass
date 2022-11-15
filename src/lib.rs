@@ -89,6 +89,8 @@ mod test;
     TODO: Implement compile-time checking of `Columns`, if possible.
     TODO: Prevent using a query within a query using an auto trait `Nest` that is negatively implemented for `Query`.
     TODO: Test the database with generative tests.
+    TODO: Make `Table::columns` inline rather than with an indirection.
+        - See `thin-dst` and/or `slice-dst` libraries.
 
     TODO (POSTPONED): Allow querying with a struct or enum with a `#[derive(Row)]`.
     TODO (POSTPONED): Add an option to split large table stores in chunks of fixed size.

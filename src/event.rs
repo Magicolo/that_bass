@@ -123,6 +123,7 @@ impl<E: Event> Listener<'_, E> {
         entry.high += 1;
         debug_assert!(entry.high <= entry.listeners);
 
+        // TODO: Use an enum to represent the state.
         if self.low {
         } else if entry.low == entry.listeners {
         } else if entry.high == entry.listeners {
