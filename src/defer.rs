@@ -32,8 +32,8 @@ struct Creates {
 trait Resolve {
     fn resolve_create();
     fn resolve_destroy();
-    fn resolve_non_ordered_move();
-    fn resolve_ordered_move();
+    fn resolve_non_ordered_modify();
+    fn resolve_ordered_modify();
 }
 
 // struct Destroys {

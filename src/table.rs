@@ -56,7 +56,11 @@ impl Column {
     }
 
     #[inline]
-    pub unsafe fn copy_to(source: (&Self, usize), target: (&Self, usize), count: NonZeroUsize) {
+    pub(crate) unsafe fn copy_to(
+        source: (&Self, usize),
+        target: (&Self, usize),
+        count: NonZeroUsize,
+    ) {
         debug_assert_eq!(source.0.meta().identifier(), target.0.meta().identifier());
         let &Meta { copy, .. } = source.0.meta();
         copy(
@@ -66,7 +70,7 @@ impl Column {
         );
     }
 
-    pub unsafe fn grow(&self, old_capacity: usize, new_capacity: NonZeroUsize) {
+    pub(crate) unsafe fn grow(&self, old_capacity: usize, new_capacity: NonZeroUsize) {
         debug_assert!(old_capacity < new_capacity.get());
         let &Meta {
             new, free, copy, ..
@@ -82,7 +86,7 @@ impl Column {
         *data = new_data;
     }
 
-    pub unsafe fn shrink(&mut self, old_capacity: NonZeroUsize, new_capacity: usize) {
+    pub(crate) unsafe fn shrink(&mut self, old_capacity: NonZeroUsize, new_capacity: usize) {
         debug_assert!(old_capacity.get() > new_capacity);
         let &Meta {
             new,
@@ -108,7 +112,12 @@ impl Column {
     /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the column.
     /// The ranges 'source_index..source_index + count' and 'target_index..target_index + count' must not overlap.
     #[inline]
-    pub unsafe fn squash(&self, source_index: usize, target_index: usize, count: NonZeroUsize) {
+    pub(crate) unsafe fn squash(
+        &self,
+        source_index: usize,
+        target_index: usize,
+        count: NonZeroUsize,
+    ) {
         let &Meta { copy, drop, .. } = self.meta();
         let data = unsafe { *self.data.data_ptr() };
         drop.1(data, target_index, count);
@@ -118,42 +127,47 @@ impl Column {
     /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the column.
     /// The ranges 'source_index..source_index + count' and 'target_index..target_index + count' must not overlap.
     #[inline]
-    pub unsafe fn copy(&self, source_index: usize, target_index: usize, count: NonZeroUsize) {
+    pub(crate) unsafe fn copy(
+        &self,
+        source_index: usize,
+        target_index: usize,
+        count: NonZeroUsize,
+    ) {
         let &Meta { copy, .. } = self.meta();
         let data = *self.data.data_ptr();
         copy((data, source_index), (data, target_index), count);
     }
 
     #[inline]
-    pub unsafe fn drop(&self, index: usize, count: NonZeroUsize) {
+    pub(crate) unsafe fn drop(&self, index: usize, count: NonZeroUsize) {
         let &Meta { drop, .. } = self.meta();
         let data = unsafe { *self.data.data_ptr() };
         drop.1(data, index, count);
     }
 
     #[inline]
-    pub unsafe fn free(&mut self, count: usize, capacity: usize) {
+    pub(crate) unsafe fn free(&mut self, count: usize, capacity: usize) {
         let &Meta { free, .. } = self.meta();
         let data = *self.data.get_mut();
         free(data, count, capacity);
     }
 
     #[inline]
-    pub unsafe fn get<T: 'static>(&self, index: usize) -> &mut T {
+    pub(crate) unsafe fn get<T: 'static>(&self, index: usize) -> &mut T {
         debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
         let data = *self.data.data_ptr();
         &mut *data.as_ptr().cast::<T>().add(index)
     }
 
     #[inline]
-    pub unsafe fn get_all<T: 'static>(&self, count: usize) -> &mut [T] {
+    pub(crate) unsafe fn get_all<T: 'static>(&self, count: usize) -> &mut [T] {
         debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
         let data = *self.data.data_ptr();
         from_raw_parts_mut(data.as_ptr().cast::<T>(), count)
     }
 
     #[inline]
-    pub unsafe fn set<T: 'static>(&self, index: usize, value: T) {
+    pub(crate) unsafe fn set<T: 'static>(&self, index: usize, value: T) {
         debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
         let data = *self.data.data_ptr();
         data.as_ptr().cast::<T>().add(index).write(value);

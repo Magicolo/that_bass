@@ -259,24 +259,16 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
                 debug_assert!(state.rows.len() > 0);
                 if state.source.index() == state.target.index() {
                     let keys = state.source.keys.try_read().ok_or(sum)?;
-                    Self::retain(
-                        &state.source,
-                        &mut state.rows,
-                        &mut state.templates,
-                        pending,
-                    );
-                    let Some(count) = NonZeroUsize::new(state.rows.len()) else {
-                        return Ok(sum);
-                    };
-                    Self::resolve_set(
+                    let count = Self::resolve_set(
                         &state.source,
                         keys,
                         &state.inner.state,
                         &mut state.rows,
                         &mut state.templates,
+                        pending,
                         &state.inner.apply,
                     );
-                    return Ok(sum + count.get());
+                    return Ok(sum + count);
                 }
                 let source = state.source.keys.try_upgradable_read().ok_or(sum)?;
                 let target = state.target.keys.try_upgradable_read().ok_or(sum)?;
@@ -310,24 +302,16 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
                 debug_assert!(state.rows.len() > 0);
                 if state.source.index() == state.target.index() {
                     let keys = state.source.keys.read();
-                    Self::retain(
-                        &state.source,
-                        &mut state.rows,
-                        &mut state.templates,
-                        pending,
-                    );
-                    let Some(count) = NonZeroUsize::new(state.rows.len()) else {
-                        return sum;
-                    };
-                    Self::resolve_set(
+                    let count = Self::resolve_set(
                         &state.source,
                         keys,
                         &state.inner.state,
                         &mut state.rows,
                         &mut state.templates,
+                        pending,
                         &state.inner.apply,
                     );
-                    return sum + count.get();
+                    return sum + count;
                 }
 
                 let (source, target, low, high, count) =
@@ -368,14 +352,22 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
         )
     }
 
-    fn resolve_set<'a>(
+    fn resolve_set(
         table: &Table,
-        keys: RwLockReadGuard<'a, Vec<Key>>,
+        keys: RwLockReadGuard<Vec<Key>>,
         state: &A::State,
         rows: &mut Rows<'d>,
         templates: &mut Vec<A>,
+        pending: &mut Vec<(Key, &'d Slot, A, u32)>,
         apply: &[usize],
-    ) {
+    ) -> usize
+    where
+        L: 'd, // Why does the compiler requires this?
+    {
+        Self::retain(table, rows, templates, pending);
+        let Some(count) = NonZeroUsize::new(rows.len()) else {
+            return 0;
+        };
         // The keys do not need to be moved, simply write the row data.
         lock(apply, table, |table| {
             let context = ApplyContext::new(table, &keys);
@@ -384,6 +376,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
                 unsafe { template.apply(state, context.with(row as _)) };
             }
         });
+        count.get()
     }
 
     fn sort(
@@ -432,8 +425,8 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
     }
 
     /// Call this while holding a lock on `table`.
-    fn retain<'a>(
-        table: &'a Table,
+    fn retain(
+        table: &Table,
         rows: &mut Rows<'d>,
         templates: &mut Vec<A>,
         pending: &mut Vec<(Key, &'d Slot, A, u32)>,

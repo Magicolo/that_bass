@@ -854,11 +854,6 @@ impl<V> By<'_, V> {
     }
 
     #[inline]
-    pub fn len(&self) -> usize {
-        self.pairs.len()
-    }
-
-    #[inline]
     pub fn pair(&mut self, key: Key, value: V) {
         self.pairs.push((key, value));
     }
@@ -866,6 +861,26 @@ impl<V> By<'_, V> {
     #[inline]
     pub fn pairs<I: IntoIterator<Item = (Key, V)>>(&mut self, pairs: I) {
         self.pairs.extend(pairs);
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.pairs.len()
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl FullIterator<Item = (Key, &V)> {
+        self.pairs.iter().map(|(key, value)| (*key, value))
+    }
+
+    #[inline]
+    pub fn iter_mut(&mut self) -> impl FullIterator<Item = (Key, &mut V)> {
+        self.pairs.iter_mut().map(|(key, value)| (*key, value))
+    }
+
+    #[inline]
+    pub fn drain(&mut self) -> impl FullIterator<Item = (Key, V)> + '_ {
+        self.pairs.drain(..)
     }
 
     #[inline]
