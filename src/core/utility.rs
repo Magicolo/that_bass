@@ -1,4 +1,6 @@
 use std::{
+    cmp::Ordering,
+    iter::from_fn,
     num::NonZeroUsize,
     ops::ControlFlow::{self, *},
     ptr::swap,
@@ -137,4 +139,53 @@ pub fn fold_swap<T, S, C>(
     }
 
     state
+}
+
+#[inline]
+pub fn sorted_difference<T: Ord + 'static>(
+    left: impl IntoIterator<Item = T>,
+    right: impl IntoIterator<Item = T>,
+) -> impl Iterator<Item = T> {
+    let mut right_pair = (None, right.into_iter());
+    left.into_iter().filter_map(move |left| {
+        while let Some(right) = Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()) {
+            match left.cmp(&right) {
+                Ordering::Equal => return None,
+                Ordering::Less => {
+                    right_pair.0 = Some(right);
+                    return Some(left);
+                }
+                Ordering::Greater => continue,
+            }
+        }
+        Some(left)
+    })
+}
+
+#[inline]
+pub fn sorted_symmetric_difference<T: Ord + 'static>(
+    left: impl IntoIterator<Item = T>,
+    right: impl IntoIterator<Item = T>,
+) -> impl Iterator<Item = T> {
+    let mut left_pair = (None, left.into_iter());
+    let mut right_pair = (None, right.into_iter());
+    from_fn(move || loop {
+        match Option::take(&mut left_pair.0).or_else(|| left_pair.1.next()) {
+            Some(left) => match Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()) {
+                Some(right) => match left.cmp(&right) {
+                    Ordering::Equal => continue,
+                    Ordering::Less => {
+                        right_pair.0 = Some(right);
+                        break Some(left);
+                    }
+                    Ordering::Greater => {
+                        left_pair.0 = Some(left);
+                        break Some(right);
+                    }
+                },
+                None => break Some(left),
+            },
+            None => break Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()),
+        }
+    })
 }

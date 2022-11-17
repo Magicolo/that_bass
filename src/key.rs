@@ -71,12 +71,11 @@ impl Keys {
     const SHIFT: usize = 8;
     pub const CHUNK: usize = 1 << Self::SHIFT;
 
-    #[inline]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            free: RwLock::new((Vec::new(), 0.into())),
+            free: RwLock::new((Vec::new(), AtomicI64::new(0))),
             count: RwLock::new(0),
-            chunks: Vec::new().into(),
+            chunks: UnsafeCell::new(Vec::new()),
         }
     }
 

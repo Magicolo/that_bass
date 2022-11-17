@@ -1,11 +1,11 @@
-use crate::{self as that_bass, event::Listen};
+use crate as that_bass;
 use std::{any::TypeId, collections::HashSet, marker::PhantomData, thread::scope};
 use that_bass::{
     filter::{Filter, Has, Is, Not},
     key::Key,
     query::By,
     template::Template,
-    Database, Datum, Error, Filter, Template,
+    Database, Datum, Error, Filter, Listen, Template,
 };
 
 #[derive(Debug, Clone, Copy, Default, Datum)]
@@ -801,5 +801,61 @@ fn swap() -> Result<(), Error> {
     sources.each_by_ok(&mut by_source, |target, c| by_target.pair(target, c.0));
     targets.each_by_ok(&mut by_target, |value, c| c.0 = value);
     // TODO: Add assertions.
+    Ok(())
+}
+
+#[test]
+fn broadcast_on_add() -> Result<(), Error> {
+    #[derive(Default, Debug)]
+    struct A;
+    impl Datum for A {}
+    const COUNT: usize = 100;
+
+    let (database, broadcast) = Database::new().broadcast();
+    let mut create = database.create::<()>()?;
+    let mut destroy = database.destroy_all();
+    let mut on_add1 = broadcast.on_add().with_key().with_type::<A>();
+    let mut on_add2 = broadcast.on_add().with_key().with_type::<A>();
+    let mut keys2 = Vec::new();
+    let mut on_add3 = broadcast.on_add().with_key().with_type::<A>();
+    let mut keys3 = Vec::new();
+
+    for i in 0..COUNT {
+        assert!(on_add1.next().is_none());
+        let keys = create.defaults(i).to_vec();
+        keys2.extend(keys.iter().copied());
+        keys3.extend(keys.iter().copied());
+        let on_add4 = broadcast.on_add().with_key().with_type::<A>();
+        assert_eq!(create.resolve(), i);
+        assert!(on_add1.next().is_none());
+        let mut add = database.add::<A>()?;
+        add.all(keys.iter().copied());
+        assert_eq!(add.resolve(), i);
+        assert!((&mut on_add1).map(|e| e.key).eq(keys.iter().copied()));
+        assert!(on_add4.map(|e| e.key).eq(keys.iter().copied()));
+        assert!(broadcast
+            .on_add()
+            .with_key()
+            .with_type::<A>()
+            .next()
+            .is_none());
+
+        if i % 13 == 0 {
+            on_add3.clear();
+            keys3.clear();
+        }
+        if i % 11 == 0 {
+            assert!((&mut on_add3).map(|e| e.key).eq(keys3.drain(..)));
+        }
+        if i % 7 == 0 {
+            on_add2.clear();
+            keys2.clear();
+        }
+        if i % 3 == 0 {
+            assert!((&mut on_add2).map(|e| e.key).eq(keys2.drain(..)));
+        }
+
+        assert_eq!(destroy.resolve(), i);
+    }
     Ok(())
 }

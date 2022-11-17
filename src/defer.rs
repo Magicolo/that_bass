@@ -10,6 +10,12 @@ use std::{
 };
 
 /*
+    There would be 3 operations internally:
+    - Create
+    - Destroy
+    - Move(source, target) -> Will be sorted in the lowest index table.
+
+
     - Link mutably the operations with `Defer` such that no conflicting operations may happen at once.
     - Determine at 'operation-time' if an ordering is required between the previous operations and the new ones.
     - Only `Defer` has a public resolve method?
@@ -20,9 +26,12 @@ use std::{
 pub struct Defer<'d> {
     database: &'d Database,
     creates: RefCell<Creates>,
+    states: Vec<State>,
 }
 
 pub(crate) struct Inner {}
+
+struct State {}
 
 struct Creates {
     indices: HashMap<TypeId, usize>,

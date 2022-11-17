@@ -1,7 +1,8 @@
+pub mod broadcast;
 pub mod core;
 pub mod create;
+pub mod defer;
 pub mod destroy;
-pub mod event;
 pub mod filter;
 pub mod key;
 pub mod modify;
@@ -13,10 +14,24 @@ pub mod template;
 
 pub use that_base_derive::{Datum, Filter, Template};
 
+use key::{Key, Keys};
+use resources::Resources;
+use std::{
+    any::{type_name, TypeId},
+    error, fmt,
+    mem::{needs_drop, size_of, ManuallyDrop},
+    num::NonZeroUsize,
+    ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
+    sync::Arc,
+};
+use table::{Table, Tables};
+
 #[cfg(test)]
 mod test;
 
 /*
+    TODO: Add capacity to `broadcast::Listener`:
+        pub enum Capacity { #[default] All, First(usize), Last(usize) }
     TODO: Replace table locks with keys locks.
         - Allows to merge `Table` and `table::Inner` together.
         - No longer require a lock to inspect the `count` or `capacity`.
@@ -183,17 +198,6 @@ Scheduler library:
     }
 */
 
-use key::{Key, Keys};
-use resources::Resources;
-use std::{
-    any::{type_name, TypeId},
-    error, fmt,
-    mem::{needs_drop, size_of, ManuallyDrop},
-    num::NonZeroUsize,
-    ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
-};
-use table::Tables;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     DuplicateMeta,
@@ -221,9 +225,21 @@ pub struct Database<L = ()> {
     listen: L,
 }
 
+/// Allows to listen to database events. These events are guaranteed to be coherent (ex. `create` always happens before
+/// `destroy` for a given key).
+///
+/// **All listen methods should be considered as time critical** since they are called while holding locks and may add significant
+/// contention on other database operations. If these events need to be processed in any way, it is recommended to queue
+/// the events and defer the processing.
+pub trait Listen {
+    fn on_create(&self, keys: &[Key], table: &Table);
+    fn on_destroy(&self, keys: &[Key], table: &Table);
+    fn on_modify(&self, keys: &[Key], source: &Table, target: &Table);
+}
+
 struct Inner {
     keys: Keys,
-    tables: Tables,
+    tables: Arc<Tables>,
     resources: Resources,
 }
 
@@ -282,11 +298,11 @@ impl Meta {
 }
 
 impl Database {
-    pub fn new() -> Database {
+    pub fn new() -> Self {
         Database {
             inner: Inner {
                 keys: Keys::new(),
-                tables: Tables::new(),
+                tables: Tables::new().into(),
                 resources: Resources::new(),
             },
             listen: (),
@@ -301,7 +317,7 @@ impl<L> Database<L> {
     }
 
     #[inline]
-    pub const fn tables(&self) -> &Tables {
+    pub fn tables(&self) -> &Tables {
         &self.inner.tables
     }
 
@@ -309,7 +325,34 @@ impl<L> Database<L> {
     pub const fn resources(&self) -> &Resources {
         &self.inner.resources
     }
+
+    pub fn listen<M: Listen>(self, listen: M) -> Database<(L, M)> {
+        Database {
+            inner: self.inner,
+            listen: (self.listen, listen),
+        }
+    }
 }
+
+macro_rules! tuple {
+    ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
+        impl<$($t: Listen,)*> Listen for ($($t,)*) {
+            #[inline]
+            fn on_create(&self, _keys: &[Key], _table: &Table) {
+                $(self.$i.on_create(_keys, _table);)*
+            }
+            #[inline]
+            fn on_destroy(&self, _keys: &[Key], _table: &Table) {
+                $(self.$i.on_destroy(_keys, _table);)*
+            }
+            #[inline]
+            fn on_modify(&self, _keys: &[Key], _source: &Table, _target: &Table) {
+                $(self.$i.on_modify(_keys, _source, _target);)*
+            }
+        }
+    };
+}
+core::tuples!(tuple);
 
 // mod messages {
 //     use std::error::Error;

@@ -1,10 +1,9 @@
 use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, ONE},
-    event::Listen,
     filter::Filter,
     key::{Key, Slot},
     table::Table,
-    Database,
+    Database, Listen,
 };
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{collections::HashSet, num::NonZeroUsize, sync::atomic::Ordering};

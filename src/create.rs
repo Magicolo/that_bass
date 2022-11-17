@@ -1,10 +1,9 @@
 use crate::{
-    event::Listen,
     key::Key,
     resources::Resources,
     table::{Table, Tables},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
-    Database, Error,
+    Database, Error, Listen,
 };
 use parking_lot::RwLockUpgradableReadGuard;
 use std::{
@@ -210,7 +209,7 @@ pub(crate) fn is<T: Template>(table: &Table, tables: &Tables, resources: &Resour
 
 pub(crate) fn has<T: Template>(table: &Table, tables: &Tables, resources: &Resources) -> bool {
     match Share::<T>::from(tables, resources) {
-        Ok(pair) => table.has_all(pair.1.metas().map(|meta| meta.identifier())),
+        Ok(pair) => table.has_all(pair.1.types()),
         Err(_) => false,
     }
 }

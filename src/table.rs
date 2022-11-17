@@ -175,11 +175,10 @@ impl Column {
 }
 
 impl Tables {
-    #[inline]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             lock: RwLock::new(()),
-            tables: Vec::new().into(),
+            tables: UnsafeCell::new(Vec::new()),
         }
     }
 
@@ -299,6 +298,11 @@ impl Table {
     }
 
     #[inline]
+    pub fn types(&self) -> impl FullIterator<Item = TypeId> + '_ {
+        self.metas().map(Meta::identifier)
+    }
+
+    #[inline]
     pub fn columns(&self) -> &[Column] {
         &self.columns
     }
@@ -364,11 +368,13 @@ impl Table {
     }
 
     /// `types` must be ordered and deduplicated.
-    pub(crate) fn is_all(&self, types: impl IntoIterator<Item = TypeId>) -> bool {
-        let mut types = types.into_iter();
-        for meta in self.metas() {
-            if let Some(identifier) = types.next() {
-                if meta.identifier() == identifier {
+    pub(crate) fn is_all(&self, mut types: impl ExactSizeIterator<Item = TypeId>) -> bool {
+        if self.columns().len() != types.len() {
+            return false;
+        }
+        for left in self.types() {
+            if let Some(right) = types.next() {
+                if left == right {
                     continue;
                 }
             }
@@ -378,11 +384,13 @@ impl Table {
     }
 
     /// `types` must be ordered and deduplicated.
-    pub(crate) fn has_all(&self, types: impl IntoIterator<Item = TypeId>) -> bool {
-        let mut types = types.into_iter();
-        for meta in self.metas() {
-            while let Some(identifier) = types.next() {
-                if meta.identifier() == identifier {
+    pub(crate) fn has_all(&self, mut types: impl ExactSizeIterator<Item = TypeId>) -> bool {
+        if self.columns().len() < types.len() {
+            return false;
+        }
+        for left in self.types() {
+            while let Some(right) = types.next() {
+                if left == right {
                     continue;
                 }
             }

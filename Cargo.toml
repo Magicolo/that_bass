@@ -7,8 +7,6 @@ authors = ["Magicolo <magicololand@gmail.com>"]
 [dependencies]
 that_base_derive = { path = "./that_base_derive" }
 parking_lot = "*"
-concurrent-queue = "*"
-dashmap = "*"
 
 [workspace]
 members = ["that_base_derive"]

@@ -2,13 +2,12 @@ use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 
 use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
-    event::Listen,
     filter::Filter,
     key::{Key, Slot},
     resources::Resources,
     table::{Column, Table, Tables},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
-    Database, Error,
+    Database, Error, Listen,
 };
 use std::{
     collections::HashMap,
@@ -285,7 +284,6 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
                 move_to(
                     &self.database,
                     &self.pairs,
-                    &state.inner.state,
                     &mut state.templates,
                     moves,
                     copies,
@@ -293,6 +291,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
                     (&state.target, target),
                     (low, high, count),
                     &mut state.rows,
+                    &state.inner,
                 );
                 Ok(sum + count.get())
             },
@@ -338,7 +337,6 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
                 move_to(
                     &self.database,
                     &self.pairs,
-                    &state.inner.state,
                     &mut state.templates,
                     moves,
                     copies,
@@ -346,6 +344,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
                     (&state.target, target),
                     (low, high, count),
                     &mut state.rows,
+                    &state.inner,
                 );
                 sum + count.get()
             },
@@ -612,9 +611,9 @@ impl<A: Template, R: Template> ShareTable<A, R> {
         tables: &Tables,
         resources: &Resources,
     ) -> Result<(Arc<Table>, Arc<Table>, Arc<Inner<A>>), Error> {
+        let adds = ShareMeta::<A>::from(resources)?;
+        let removes = ShareMeta::<R>::from(resources)?;
         let share = resources.try_global_with(table, || {
-            let adds = ShareMeta::<A>::from(resources)?;
-            let removes = ShareMeta::<R>::from(resources)?;
             let source = tables.get_shared(table as usize)?;
             let target = {
                 let mut metas = adds.to_vec();
@@ -631,6 +630,7 @@ impl<A: Template, R: Template> ShareTable<A, R> {
                 tables.find_or_add(&metas)
             };
             let state = A::initialize(InitializeContext::new(&target))?;
+
             let mut apply = Vec::new();
             for meta in adds.iter() {
                 let (index, column) = target.column_with(meta.identifier())?;
@@ -665,7 +665,6 @@ impl<A: Template, R: Template> ShareTable<A, R> {
 fn move_to<'d, 'a, V, A: Template>(
     database: &Database<impl Listen>,
     set: &HashMap<Key, V>,
-    state: &A::State,
     templates: &mut Vec<A>,
     moves: &mut Vec<(usize, usize, NonZeroUsize)>,
     copies: &mut Vec<(usize, usize, NonZeroUsize)>,
@@ -673,6 +672,7 @@ fn move_to<'d, 'a, V, A: Template>(
     (target_table, target_keys): (&Table, RwLockUpgradableReadGuard<'a, Vec<Key>>),
     (low, high, count): (u32, u32, NonZeroUsize),
     rows: &mut Rows<'d>,
+    inner: &Inner<A>,
 ) {
     let (start, target_keys) = target_table.reserve(target_keys, count);
     // Move data from source to target.
@@ -731,7 +731,7 @@ fn move_to<'d, 'a, V, A: Template>(
     // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
     let context = ApplyContext::new(target_table, &target_keys);
     for (i, template) in templates.drain(..).enumerate() {
-        unsafe { template.apply(state, context.with(start + i)) };
+        unsafe { template.apply(&inner.state, context.with(start + i)) };
     }
     source_table.count.fetch_sub(count.get(), Ordering::Release);
     target_table.count.fetch_add(count.get(), Ordering::Release);
