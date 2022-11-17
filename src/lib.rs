@@ -24,7 +24,6 @@ use std::{
     mem::{needs_drop, size_of, ManuallyDrop},
     num::NonZeroUsize,
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
-    sync::Arc,
 };
 use table::Tables;
 
@@ -226,7 +225,7 @@ pub struct Database<L = ()> {
 
 struct Inner {
     keys: Keys,
-    tables: Arc<Tables>,
+    tables: Tables,
     resources: Resources,
 }
 
