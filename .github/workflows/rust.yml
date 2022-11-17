@@ -21,9 +21,13 @@ jobs:
         rustup toolchain install nightly --component miri
         rustup override set nightly
         cargo miri setup
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+    - name: Build Debug
+      run: cargo clean && cargo build --debug --verbose
+    - name: Build Release
+      run: cargo clean && cargo build --release --verbose
+    - name: Run Debug tests
+      run: cargo clean && cargo test --verbose
+    - name: Run Release tests
+      run: cargo clean && cargo test --release --verbose
     - name: Run Miri tests
-      run: cargo miri test --verbose
+      run: cargo clean && cargo miri test --verbose
