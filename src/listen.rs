@@ -26,7 +26,7 @@ pub trait Listen {
 }
 
 pub trait Event: Sized {
-    fn process(raw: &Raw, context: Context<Self>) -> ControlFlow<(), bool>;
+    fn process(raw: &Raw, context: Context<Self>) -> ControlFlow<()>;
 }
 
 #[derive(Clone)]
@@ -362,43 +362,6 @@ pub mod events {
         pub remove: usize,
     }
 
-    // pub enum OnAny {
-    //     OnCreate(OnCreate),
-    //     OnDestroy(OnDestroy),
-    //     OnModify(OnModify),
-    // }
-
-    // impl Broadcast {
-    //     pub fn on_any(&self) -> Receive<OnAny> {
-    //         self.on()
-    //     }
-    //     pub fn on_any_with(&self, keep: Keep) -> Receive<OnAny> {
-    //         self.on_with(keep)
-    //     }
-    // }
-
-    // impl Event for OnAny {
-    //     #[inline]
-    //     fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<(), bool> {
-    //         context.one(match *raw {
-    //             Raw::Create { keys, types } => OnAny::OnCreate {
-    //                 keys: keys.1 as _,
-    //                 types: types.1 as _,
-    //             },
-    //             Raw::Destroy { keys, types } => OnAny::OnDestroy {
-    //                 keys: keys.1 as _,
-    //                 types: types.1 as _,
-    //             },
-    //             Raw::Modify { keys, types } => OnAny::OnModify {
-    //                 keys: keys.1 as _,
-    //                 add: types.1 as _,
-    //                 remove: types.2 as _,
-    //             },
-    //         })?;
-    //         Continue(true)
-    //     }
-    // }
-
     macro_rules! with {
         ($n:ident, $nw:ident, $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident) => {
             impl Broadcast {
@@ -515,78 +478,73 @@ pub mod events {
 
             impl Event for $on {
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<(), bool> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(false); };
-                    let Some(types) = $count(types) else { return Continue(false); };
+                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
+                    let Some(types) = $count(types) else { return Continue(()); };
                     context.one(Self {
                         keys: keys.1 as _,
                         types: types,
-                    })?;
-                    Continue(true)
+                    })
                 }
             }
 
             impl Event for $on_key {
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<(), bool> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(false); };
-                    let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(false); };
-                    let Some(types) = $count(types) else { return Continue(false); };
-                    context.all(keys.iter().map(|&key| Self { key, types }))?;
-                    Continue(true)
+                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
+                    let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(()); };
+                    let Some(types) = $count(types) else { return Continue(()); };
+                    context.all(keys.iter().map(|&key| Self { key, types }))
                 }
             }
 
             impl Event for $on_types {
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<(), bool> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(false); };
-                    let Some(types) = $types(&context, types) else { return Continue(false); };
+                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
+                    let Some(types) = $types(&context, types) else { return Continue(()); };
                     context.all(types.map(|r#type| Self {
                         keys: keys.1 as _,
                         r#type,
-                    }))?;
-                    Continue(true)
+                    }))
                 }
             }
 
             impl Event for $on_key_types {
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<(), bool> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(false); };
-                    let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(false); };
-                    let Some(types) = $types(&context, types) else { return Continue(false); };
+                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
+                    let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(()); };
+                    let Some(types) = $types(&context, types) else { return Continue(()); };
                     for r#type in types {
                         context.all(keys.iter().map(move |&key| Self { key, r#type }))?;
                     }
-                    Continue(true)
+                    Continue(())
                 }
             }
 
             impl<D: Datum> Event for $on_type<D> {
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<(), bool> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(false); };
-                    let Some(true) = $has::<D>(&context, types) else { return Continue(false); };
+                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
+                    let Some(true) = $has::<D>(&context, types) else { return Continue(()); };
                     context.one(Self {
                         keys: keys.1 as _,
                         _marker: PhantomData,
-                    })?;
-                    Continue(true)
+                    })
                 }
             }
 
             impl<D: Datum> Event for $on_key_type<D> {
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<(), bool> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(false); };
-                    let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(false); };
-                    let Some(true) = $has::<D>(&context, types) else { return Continue(false); };
+                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
+                    let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(()); };
+                    let Some(true) = $has::<D>(&context, types) else { return Continue(()); };
                     context.all(keys.iter().map(|&key| Self {
                         key,
                         _marker: PhantomData,
-                    }))?;
-                    Continue(true)
+                    }))
                 }
             }
         };

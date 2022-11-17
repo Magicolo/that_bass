@@ -197,7 +197,7 @@ pub mod template {
 //     }
 // }
 
-const COUNT: usize = 17;
+const COUNT: usize = 37;
 
 fn create_one(database: &Database<impl Listen>, template: impl Template) -> Result<Key, Error> {
     let mut create = database.create()?;
@@ -810,7 +810,6 @@ fn broadcast_on_add() -> Result<(), Error> {
     #[derive(Default, Debug)]
     struct A;
     impl Datum for A {}
-    const COUNT: usize = 100;
 
     let (database, broadcast) = Database::new().broadcast();
     let mut create = database.create::<()>()?;
