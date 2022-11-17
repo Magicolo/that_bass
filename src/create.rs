@@ -1,9 +1,10 @@
 use crate::{
     key::Key,
+    listen::Listen,
     resources::Resources,
     table::{Table, Tables},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
-    Database, Error, Listen,
+    Database, Error,
 };
 use parking_lot::RwLockUpgradableReadGuard;
 use std::{

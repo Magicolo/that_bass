@@ -2,8 +2,9 @@ use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, ONE},
     filter::Filter,
     key::{Key, Slot},
+    listen::Listen,
     table::Table,
-    Database, Listen,
+    Database,
 };
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{collections::HashSet, num::NonZeroUsize, sync::atomic::Ordering};

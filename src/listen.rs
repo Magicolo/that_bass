@@ -1,15 +1,18 @@
 use crate::{
-    core::utility::{sorted_difference, sorted_symmetric_difference},
+    core::{
+        tuples,
+        utility::{sorted_difference, sorted_symmetric_difference},
+    },
     key::Key,
     table::{Table, Tables},
-    Database, Datum, Listen,
+    Database, Datum,
 };
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::{
     any::TypeId,
     collections::VecDeque,
     marker::PhantomData,
-    mem::replace,
+    mem::{replace, ManuallyDrop},
     num::NonZeroUsize,
     ops::ControlFlow::{self, *},
     sync::{
@@ -17,6 +20,25 @@ use std::{
         Arc,
     },
 };
+
+/// Allows to listen to database events. These events are guaranteed to be coherent (ex. `create` always happens before
+/// `destroy` for a given key).
+///
+/// **All listen methods should be considered as time critical** since they are called while holding locks and may add significant
+/// contention on other database operations. If these events need to be processed in any way, it is recommended to queue
+/// the events and defer the processing.
+pub trait Listen {
+    fn on_create(&self, keys: &[Key], table: &Table);
+    fn on_destroy(&self, keys: &[Key], table: &Table);
+    fn on_modify(&self, keys: &[Key], source: &Table, target: &Table);
+}
+
+pub trait Event: Sized {
+    fn process(raw: &Raw, context: Context<Self>) -> ControlFlow<(), bool>;
+}
+
+#[derive(Clone)]
+pub struct Broadcast(Arc<Inner>);
 
 pub struct Receive<'a, E> {
     pub keep: Keep,
@@ -26,19 +48,12 @@ pub struct Receive<'a, E> {
     version: usize,
 }
 
-#[derive(Clone)]
-pub struct Broadcast(Arc<Inner>);
-
 #[derive(Clone, Copy, Default)]
 pub enum Keep {
     #[default]
     All,
     First(NonZeroUsize),
     Last(NonZeroUsize),
-}
-
-pub trait Event: Sized {
-    fn process(raw: &Raw, context: Context<Self>) -> ControlFlow<(), bool>;
 }
 
 pub struct Context<'a, T> {
@@ -92,6 +107,13 @@ struct Chunk {
 }
 
 impl<L> Database<L> {
+    pub fn listen<M: Listen>(self, listen: M) -> Database<(L, M)> {
+        Database {
+            inner: self.inner,
+            listen: (self.listen, listen),
+        }
+    }
+
     pub fn broadcast(self) -> (Database<(L, Broadcast)>, Broadcast) {
         let inner = Arc::new(Inner {
             pending: Default::default(),
@@ -109,16 +131,7 @@ impl Broadcast {
     }
 
     pub fn on_with<E: Event>(&self, keep: Keep) -> Receive<E> {
-        let ready = self.0.ready.read();
-        ready.buffers.fetch_add(1, Ordering::Relaxed);
-        ready.seen.fetch_add(1, Ordering::Relaxed);
-        Receive {
-            keep,
-            inner: &self.0,
-            head: ready.chunks.len(),
-            events: VecDeque::new(),
-            version: ready.version,
-        }
+        Receive::new(&self.0, keep)
     }
 }
 
@@ -132,7 +145,7 @@ impl Listen for Broadcast {
             count: keys.len() as _,
             table: table.index(),
         });
-        pending.keys.extend(keys);
+        pending.keys.extend_from_slice(keys);
     }
     #[inline]
     fn on_destroy(&self, keys: &[Key], table: &Table) {
@@ -143,7 +156,7 @@ impl Listen for Broadcast {
             count: keys.len() as _,
             table: table.index(),
         });
-        pending.keys.extend(keys);
+        pending.keys.extend_from_slice(keys);
     }
     #[inline]
     fn on_modify(&self, keys: &[Key], source: &Table, target: &Table) {
@@ -155,7 +168,7 @@ impl Listen for Broadcast {
             source: source.index(),
             target: target.index(),
         });
-        pending.keys.extend(keys);
+        pending.keys.extend_from_slice(keys);
     }
 }
 
@@ -205,6 +218,19 @@ impl<'a, T> Context<'a, T> {
 }
 
 impl<'a, E: Event> Receive<'a, E> {
+    fn new(inner: &'a Inner, keep: Keep) -> Self {
+        let ready = inner.ready.read();
+        ready.buffers.fetch_add(1, Ordering::Relaxed);
+        ready.seen.fetch_add(1, Ordering::Relaxed);
+        Receive {
+            keep,
+            inner,
+            head: ready.chunks.len(),
+            events: VecDeque::new(),
+            version: ready.version,
+        }
+    }
+
     pub fn clear(&mut self) {
         self.events.clear();
         while let Some(_) = self.next() {
@@ -213,12 +239,13 @@ impl<'a, E: Event> Receive<'a, E> {
     }
 
     pub fn with_event<F: Event>(self) -> Receive<'a, F> {
+        let receive = ManuallyDrop::new(self);
         Receive {
-            inner: self.inner,
-            keep: self.keep,
+            inner: receive.inner,
+            keep: receive.keep,
             events: VecDeque::new(),
-            head: self.head,
-            version: self.version,
+            head: receive.head,
+            version: receive.version,
         }
     }
 
@@ -249,6 +276,7 @@ impl<E: Event> Iterator for Receive<'_, E> {
         }
 
         let ready = self.inner.ready.read();
+        debug_assert!(self.version + 1 >= ready.version);
         if self.version < ready.version {
             self.head -= ready.head;
             self.version = ready.version;
@@ -312,6 +340,26 @@ impl<E> Drop for Receive<'_, E> {
         }
     }
 }
+
+macro_rules! tuple {
+    ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
+        impl<$($t: Listen,)*> Listen for ($($t,)*) {
+            #[inline]
+            fn on_create(&self, _keys: &[Key], _table: &Table) {
+                $(self.$i.on_create(_keys, _table);)*
+            }
+            #[inline]
+            fn on_destroy(&self, _keys: &[Key], _table: &Table) {
+                $(self.$i.on_destroy(_keys, _table);)*
+            }
+            #[inline]
+            fn on_modify(&self, _keys: &[Key], _source: &Table, _target: &Table) {
+                $(self.$i.on_modify(_keys, _source, _target);)*
+            }
+        }
+    };
+}
+tuples!(tuple);
 
 pub mod events {
     use super::*;

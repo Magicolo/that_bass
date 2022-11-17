@@ -3,9 +3,10 @@ use std::{any::TypeId, collections::HashSet, marker::PhantomData, thread::scope}
 use that_bass::{
     filter::{Filter, Has, Is, Not},
     key::Key,
+    listen::Listen,
     query::By,
     template::Template,
-    Database, Datum, Error, Filter, Listen, Template,
+    Database, Datum, Error, Filter, Template,
 };
 
 #[derive(Debug, Clone, Copy, Default, Datum)]
@@ -816,8 +817,8 @@ fn broadcast_on_add() -> Result<(), Error> {
     let mut destroy = database.destroy_all();
     let mut on_add1 = broadcast.on_add().with_key().with_type::<A>();
     let mut on_add2 = broadcast.on_add().with_key().with_type::<A>();
-    let mut keys2 = Vec::new();
     let mut on_add3 = broadcast.on_add().with_key().with_type::<A>();
+    let mut keys2 = Vec::new();
     let mut keys3 = Vec::new();
 
     for i in 0..COUNT {

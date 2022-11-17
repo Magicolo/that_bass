@@ -4,10 +4,11 @@ use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
     filter::Filter,
     key::{Key, Slot},
+    listen::Listen,
     resources::Resources,
     table::{Column, Table, Tables},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
-    Database, Error, Listen,
+    Database, Error,
 };
 use std::{
     collections::HashMap,

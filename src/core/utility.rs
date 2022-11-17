@@ -142,6 +142,24 @@ pub fn fold_swap<T, S, C>(
 }
 
 #[inline]
+pub fn sorted_contains<T: Ord + 'static>(
+    left: impl IntoIterator<Item = T>,
+    right: impl IntoIterator<Item = T>,
+) -> bool {
+    let mut left = left.into_iter();
+    for right in right {
+        while let Some(left) = left.next() {
+            match left.cmp(&right) {
+                Ordering::Equal => break,
+                Ordering::Less => continue,
+                Ordering::Greater => return false,
+            }
+        }
+    }
+    true
+}
+
+#[inline]
 pub fn sorted_difference<T: Ord + 'static>(
     left: impl IntoIterator<Item = T>,
     right: impl IntoIterator<Item = T>,

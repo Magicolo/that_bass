@@ -1,5 +1,8 @@
 use crate::{
-    core::{iterate::FullIterator, utility::get_unchecked},
+    core::{
+        iterate::FullIterator,
+        utility::{get_unchecked, sorted_contains},
+    },
     key::Key,
     Datum, Error, Meta,
 };
@@ -319,6 +322,18 @@ impl Table {
             .is_ok()
     }
 
+    pub fn column<D: Datum>(&self) -> Result<(usize, &Column), Error> {
+        self.column_with(TypeId::of::<D>())
+    }
+
+    pub fn column_with(&self, identifier: TypeId) -> Result<(usize, &Column), Error> {
+        let index = self
+            .columns
+            .binary_search_by_key(&identifier, |column| column.meta().identifier())
+            .map_err(|_| Error::MissingColumn(identifier))?;
+        Ok((index, &self.columns[index]))
+    }
+
     pub fn shrink(&mut self) {
         let keys = self.keys.get_mut();
         let Some(old_capacity) = NonZeroUsize::new(keys.len()) else {
@@ -368,47 +383,15 @@ impl Table {
     }
 
     /// `types` must be ordered and deduplicated.
-    pub(crate) fn is_all(&self, mut types: impl ExactSizeIterator<Item = TypeId>) -> bool {
-        if self.columns().len() != types.len() {
-            return false;
-        }
-        for left in self.types() {
-            if let Some(right) = types.next() {
-                if left == right {
-                    continue;
-                }
-            }
-            return false;
-        }
-        return types.next().is_none();
+    #[inline]
+    pub(crate) fn is_all(&self, types: impl ExactSizeIterator<Item = TypeId>) -> bool {
+        self.columns().len() == types.len() && self.types().eq(types)
     }
 
     /// `types` must be ordered and deduplicated.
-    pub(crate) fn has_all(&self, mut types: impl ExactSizeIterator<Item = TypeId>) -> bool {
-        if self.columns().len() < types.len() {
-            return false;
-        }
-        for left in self.types() {
-            while let Some(right) = types.next() {
-                if left == right {
-                    continue;
-                }
-            }
-            return false;
-        }
-        return true;
-    }
-
-    pub(crate) fn column<D: Datum>(&self) -> Result<(usize, &Column), Error> {
-        self.column_with(TypeId::of::<D>())
-    }
-
-    pub(crate) fn column_with(&self, identifier: TypeId) -> Result<(usize, &Column), Error> {
-        let index = self
-            .columns
-            .binary_search_by_key(&identifier, |column| column.meta().identifier())
-            .map_err(|_| Error::MissingColumn(identifier))?;
-        Ok((index, &self.columns[index]))
+    #[inline]
+    pub(crate) fn has_all(&self, types: impl ExactSizeIterator<Item = TypeId>) -> bool {
+        self.columns().len() >= types.len() && sorted_contains(self.types(), types)
     }
 }
 
