@@ -1,4 +1,4 @@
-use crate::{core::utility::ONE, key::Key, Datum};
+use crate::{key::Key, Datum};
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::{
     any::TypeId,
@@ -36,8 +36,8 @@ pub struct Receive<'a, E: Event> {
 pub enum Keep {
     #[default]
     All,
-    First(NonZeroUsize),
-    Last(NonZeroUsize),
+    First(usize),
+    Last(usize),
 }
 
 pub struct DeclareContext<'a> {
@@ -272,17 +272,15 @@ impl<'a, T> ProcessContext<'a, T> {
 
 impl<'a, E: Event> Receive<'a, E> {
     pub fn clear(&mut self) {
-        self.buffer.clear();
-        let keep = replace(&mut self.keep, Keep::First(ONE));
-        while let Some(_) = self.next() {
-            self.buffer.clear();
-        }
-        self.keep = keep;
+        let keep = self.keep(Keep::First(0));
+        self.next();
+        self.keep(keep);
     }
 
-    pub fn keep(&mut self, keep: Keep) {
-        self.keep = keep;
-        keep.apply(&mut self.buffer);
+    pub fn keep(&mut self, keep: Keep) -> Keep {
+        let keep = replace(&mut self.keep, keep);
+        self.keep.apply(&mut self.buffer);
+        keep
     }
 
     pub fn with<F: Event>(self) -> Receive<'a, F> {
@@ -437,15 +435,20 @@ impl<E: Event> Drop for Receive<'_, E> {
 
 impl Keep {
     fn apply<T>(&self, items: &mut VecDeque<T>) -> bool {
-        match self {
+        match *self {
             Keep::All => true,
-            Keep::First(count) if items.len() < count.get() => true,
-            Keep::First(count) => {
-                items.truncate(count.get());
+            Keep::First(0) | Keep::Last(0) => {
+                items.clear();
                 false
             }
+            Keep::First(count) if items.len() < count => true,
+            Keep::First(count) => {
+                items.truncate(count);
+                false
+            }
+            Keep::Last(count) if items.len() < count => true,
             Keep::Last(count) => {
-                items.drain(..items.len() - count.get());
+                items.drain(..items.len() - count);
                 true
             }
         }

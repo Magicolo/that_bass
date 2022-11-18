@@ -29,8 +29,6 @@ use std::{
 use table::Tables;
 
 /*
-    TODO: Add capacity to `broadcast::Listener`:
-        pub enum Capacity { #[default] All, First(usize), Last(usize) }
     TODO: Replace table locks with keys locks.
         - Allows to merge `Table` and `table::Inner` together.
         - No longer require a lock to inspect the `count` or `capacity`.
