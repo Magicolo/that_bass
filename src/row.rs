@@ -1,5 +1,5 @@
 use crate::{
-    core::{tuples, utility::get_unchecked},
+    core::{tuple::tuples, utility::get_unchecked},
     key::Key,
     resources::Resources,
     table::Table,
