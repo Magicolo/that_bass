@@ -8,7 +8,7 @@ use std::{
     num::NonZeroUsize,
     ops::ControlFlow::{self, *},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -26,13 +26,14 @@ pub trait Listen {
 }
 
 pub trait Event: Sized {
-    fn process(raw: &Raw, context: Context<Self>) -> ControlFlow<()>;
+    fn declare(context: DeclareContext);
+    fn process(raw: &Raw, context: ProcessContext<Self>) -> ControlFlow<()>;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Broadcast(Arc<Inner>);
 
-pub struct Receive<'a, E> {
+pub struct Receive<'a, E: Event> {
     pub keep: Keep,
     inner: &'a Inner,
     events: VecDeque<E>,
@@ -48,7 +49,11 @@ pub enum Keep {
     Last(NonZeroUsize),
 }
 
-pub struct Context<'a, T> {
+pub struct DeclareContext<'a> {
+    values: &'a mut [bool; 9],
+}
+
+pub struct ProcessContext<'a, T> {
     items: &'a mut VecDeque<T>,
     keep: &'a Keep,
     keys: &'a [Key],
@@ -71,9 +76,13 @@ pub enum Raw {
     },
 }
 
+#[derive(Default)]
 struct Inner {
     ready: RwLock<Ready>,
     pending: Mutex<Chunk>,
+    create: AtomicU64, // 1 bit closed, 21 bits receivers, 21 bits requires keys, 21 bits requires types
+    destroy: AtomicU64, // 1 bit closed, 21 bits receivers, 21 bits requires keys, 21 bits requires types
+    modify: AtomicU64, // 1 bit closed, 21 bits receivers, 21 bits requires keys, 21 bits requires types
 }
 
 #[derive(Default)]
@@ -101,18 +110,13 @@ impl<L> Database<L> {
             listen: (self.listen, listen),
         }
     }
-
-    pub fn broadcast(self) -> (Database<(L, Broadcast)>, Broadcast) {
-        let inner = Arc::new(Inner {
-            pending: Default::default(),
-            ready: Default::default(),
-        });
-        let broadcast = Broadcast(inner);
-        (self.listen(broadcast.clone()), broadcast)
-    }
 }
 
 impl Broadcast {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn on<E: Event>(&self) -> Receive<E> {
         self.on_with(Keep::default())
     }
@@ -120,46 +124,113 @@ impl Broadcast {
     pub fn on_with<E: Event>(&self, keep: Keep) -> Receive<E> {
         Receive::new(&self.0, keep)
     }
+
+    pub fn open(&self) {
+        let value = recompose(false, u32::MAX, u32::MAX, u32::MAX);
+        self.0.create.fetch_and(value, Ordering::Relaxed);
+        self.0.destroy.fetch_and(value, Ordering::Relaxed);
+        self.0.modify.fetch_and(value, Ordering::Relaxed);
+    }
+
+    pub fn close(&self) {
+        let value = recompose(true, 0, 0, 0);
+        self.0.create.fetch_or(value, Ordering::Relaxed);
+        self.0.destroy.fetch_or(value, Ordering::Relaxed);
+        self.0.modify.fetch_or(value, Ordering::Relaxed);
+    }
 }
 
 impl Listen for Broadcast {
     #[inline]
     fn on_create(&self, keys: &[Key], types: &[TypeId]) {
+        let values = decompose(self.0.create.load(Ordering::Relaxed));
+        if values.0 || values.1 == 0 {
+            return;
+        }
+
         let mut pending = self.0.pending.lock();
         let indices = (pending.keys.len(), pending.types.len());
         pending.events.push(Raw::Create {
             keys: (indices.0 as _, keys.len() as _),
             types: (indices.1 as _, types.len() as _),
         });
-        pending.keys.extend_from_slice(keys);
-        pending.types.extend_from_slice(types);
+        if values.2 > 0 {
+            pending.keys.extend_from_slice(keys);
+        }
+        if values.3 > 0 {
+            pending.types.extend_from_slice(types);
+        }
     }
     #[inline]
     fn on_destroy(&self, keys: &[Key], types: &[TypeId]) {
+        let values = decompose(self.0.destroy.load(Ordering::Relaxed));
+        if values.0 || values.1 == 0 {
+            return;
+        }
+
         let mut pending = self.0.pending.lock();
         let indices = (pending.keys.len(), pending.types.len());
         pending.events.push(Raw::Destroy {
             keys: (indices.0 as _, keys.len() as _),
             types: (indices.1 as _, types.len() as _),
         });
-        pending.keys.extend_from_slice(keys);
-        pending.types.extend_from_slice(types);
+        if values.2 > 0 {
+            pending.keys.extend_from_slice(keys);
+        }
+        if values.3 > 0 {
+            pending.types.extend_from_slice(types);
+        }
     }
     #[inline]
     fn on_modify(&self, keys: &[Key], add: &[TypeId], remove: &[TypeId]) {
+        let values = decompose(self.0.modify.load(Ordering::Relaxed));
+        if values.0 || values.1 == 0 {
+            return;
+        }
+
         let mut pending = self.0.pending.lock();
         let indices = (pending.keys.len(), pending.types.len());
         pending.events.push(Raw::Modify {
             keys: (indices.0 as _, keys.len() as _),
             types: (indices.1 as _, add.len() as _, remove.len() as _),
         });
-        pending.keys.extend_from_slice(keys);
-        pending.types.extend_from_slice(add);
-        pending.types.extend_from_slice(remove);
+        if values.2 > 0 {
+            pending.keys.extend_from_slice(keys);
+        }
+        if values.3 > 0 {
+            pending.types.extend_from_slice(add);
+            pending.types.extend_from_slice(remove);
+        }
     }
 }
 
-impl<'a, T> Context<'a, T> {
+impl Drop for Broadcast {
+    fn drop(&mut self) {
+        self.close()
+    }
+}
+
+impl DeclareContext<'_> {
+    pub fn create(&mut self, keys: bool, types: bool) {
+        self.values[0] |= true;
+        self.values[1] |= keys;
+        self.values[2] |= types;
+    }
+
+    pub fn destroy(&mut self, keys: bool, types: bool) {
+        self.values[3] |= true;
+        self.values[4] |= keys;
+        self.values[5] |= types;
+    }
+
+    pub fn modify(&mut self, keys: bool, types: bool) {
+        self.values[6] |= true;
+        self.values[7] |= keys;
+        self.values[8] |= types;
+    }
+}
+
+impl<'a, T> ProcessContext<'a, T> {
     #[inline]
     pub fn one(&mut self, item: T) -> ControlFlow<()> {
         self.items.push_back(item);
@@ -182,8 +253,8 @@ impl<'a, T> Context<'a, T> {
         self.types.get(index as usize..(index + count) as usize)
     }
 
-    pub fn own(&mut self) -> Context<T> {
-        Context {
+    pub fn own(&mut self) -> ProcessContext<T> {
+        ProcessContext {
             items: self.items,
             keep: self.keep,
             keys: self.keys,
@@ -205,7 +276,28 @@ impl<'a, T> Context<'a, T> {
 }
 
 impl<'a, E: Event> Receive<'a, E> {
+    pub fn clear(&mut self) {
+        self.events.clear();
+        while let Some(_) = self.next() {
+            self.events.clear();
+        }
+    }
+
+    pub fn with_event<F: Event>(self) -> Receive<'a, F> {
+        let receive = ManuallyDrop::new(self);
+        Self::remove_declare(receive.inner);
+        Receive::<F>::add_declare(receive.inner);
+        Receive {
+            keep: receive.keep,
+            inner: receive.inner,
+            head: receive.head,
+            events: VecDeque::new(),
+            version: receive.version,
+        }
+    }
+
     fn new(inner: &'a Inner, keep: Keep) -> Self {
+        Self::add_declare(inner);
         let ready = inner.ready.read();
         ready.buffers.fetch_add(1, Ordering::Relaxed);
         ready.seen.fetch_add(1, Ordering::Relaxed);
@@ -218,27 +310,41 @@ impl<'a, E: Event> Receive<'a, E> {
         }
     }
 
-    pub fn clear(&mut self) {
-        self.events.clear();
-        while let Some(_) = self.next() {
-            self.events.clear();
-        }
+    fn add_declare(inner: &Inner) {
+        let mut values = [false; 9];
+        E::declare(DeclareContext {
+            values: &mut values,
+        });
+        Self::update(inner, values, |source, target| {
+            target.fetch_add(source, Ordering::Relaxed);
+        });
     }
 
-    pub fn with_event<F: Event>(self) -> Receive<'a, F> {
-        let receive = ManuallyDrop::new(self);
-        Receive {
-            inner: receive.inner,
-            keep: receive.keep,
-            events: VecDeque::new(),
-            head: receive.head,
-            version: receive.version,
+    fn remove_declare(inner: &Inner) {
+        let mut values = [false; 9];
+        E::declare(DeclareContext {
+            values: &mut values,
+        });
+        Self::update(inner, values, |source, target| {
+            target.fetch_sub(source, Ordering::Relaxed);
+        });
+    }
+
+    fn update(inner: &Inner, values: [bool; 9], update: impl Fn(u64, &AtomicU64)) {
+        let mut index = 0;
+        for event in [&inner.create, &inner.destroy, &inner.modify] {
+            if values[index] {
+                let keys = if values[index + 1] { 1 } else { 0 };
+                let types = if values[index + 2] { 1 } else { 0 };
+                update(recompose(false, 1, keys, types), event);
+            }
+            index += 3;
         }
     }
 
     fn process(&mut self, ready: &Ready) {
         for chunk in ready.chunks.range(self.head..) {
-            let mut context = Context {
+            let mut context = ProcessContext {
                 items: &mut self.events,
                 keep: &self.keep,
                 keys: &chunk.keys,
@@ -317,14 +423,36 @@ impl<E: Event> Iterator for Receive<'_, E> {
     }
 }
 
-impl<E> Drop for Receive<'_, E> {
+impl<E: Event> Drop for Receive<'_, E> {
     fn drop(&mut self) {
+        Self::remove_declare(self.inner);
         let ready = self.inner.ready.read();
         ready.buffers.fetch_sub(1, Ordering::Relaxed);
         if self.version == ready.version {
             ready.seen.fetch_sub(1, Ordering::Relaxed);
         }
     }
+}
+
+const MASK: u32 = 0x001FFFFF;
+
+#[inline]
+const fn decompose(value: u64) -> (bool, u32, u32, u32) {
+    (
+        value >> 63 == 1,
+        (value >> 42) as u32 & MASK,
+        (value >> 21) as u32 & MASK,
+        (value as u32 & MASK),
+    )
+}
+
+#[inline]
+const fn recompose(close: bool, receivers: u32, keys: u32, types: u32) -> u64 {
+    let close = if close { 1u8 } else { 0u8 };
+    ((close as u64) << 63)
+        | (((receivers & MASK) as u64) << 42)
+        | (((keys & MASK) as u64) << 21)
+        | ((types & MASK) as u64)
 }
 
 macro_rules! tuple {
@@ -427,7 +555,7 @@ pub mod events {
 
     macro_rules! event {
         (
-            $n:ident, $nw:ident, $t:ty, $ts:ty,
+            $n:ident, $nw:ident, $t:ty, $ts:ty, $d:ident,
             $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident,
             $raw:ident,
             $count:ident,
@@ -477,8 +605,12 @@ pub mod events {
             );
 
             impl Event for $on {
+                fn declare(mut context: DeclareContext) {
+                    context.$d(false, false)
+                }
+
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
                     let &Raw::$raw { keys, types } = raw else { return Continue(()); };
                     let Some(types) = $count(types) else { return Continue(()); };
                     context.one(Self {
@@ -489,8 +621,12 @@ pub mod events {
             }
 
             impl Event for $on_key {
+                fn declare(mut context: DeclareContext) {
+                    context.$d(true, false)
+                }
+
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
                     let &Raw::$raw { keys, types } = raw else { return Continue(()); };
                     let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(()); };
                     let Some(types) = $count(types) else { return Continue(()); };
@@ -499,8 +635,12 @@ pub mod events {
             }
 
             impl Event for $on_types {
+                fn declare(mut context: DeclareContext) {
+                    context.$d(false, true)
+                }
+
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
                     let &Raw::$raw { keys, types } = raw else { return Continue(()); };
                     let Some(types) = $types(&context, types) else { return Continue(()); };
                     context.all(types.map(|r#type| Self {
@@ -511,8 +651,12 @@ pub mod events {
             }
 
             impl Event for $on_key_types {
+                fn declare(mut context: DeclareContext) {
+                    context.$d(true, true)
+                }
+
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
                     let &Raw::$raw { keys, types } = raw else { return Continue(()); };
                     let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(()); };
                     let Some(types) = $types(&context, types) else { return Continue(()); };
@@ -524,8 +668,12 @@ pub mod events {
             }
 
             impl<D: Datum> Event for $on_type<D> {
+                fn declare(mut context: DeclareContext) {
+                    context.$d(false, true)
+                }
+
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
                     let &Raw::$raw { keys, types } = raw else { return Continue(()); };
                     let Some(true) = $has::<D>(&context, types) else { return Continue(()); };
                     context.one(Self {
@@ -536,8 +684,12 @@ pub mod events {
             }
 
             impl<D: Datum> Event for $on_key_type<D> {
+                fn declare(mut context: DeclareContext) {
+                    context.$d(true, true)
+                }
+
                 #[inline]
-                fn process(raw: &Raw, mut context: Context<Self>) -> ControlFlow<()> {
+                fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
                     let &Raw::$raw { keys, types } = raw else { return Continue(()); };
                     let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(()); };
                     let Some(true) = $has::<D>(&context, types) else { return Continue(()); };
@@ -556,14 +708,14 @@ pub mod events {
     }
     #[inline]
     fn create_destroy_types<'a>(
-        context: &Context<'a, impl Event>,
+        context: &ProcessContext<'a, impl Event>,
         types: (u32, u32),
     ) -> Option<impl Iterator<Item = TypeId> + 'a> {
         Some(context.types(types.0, types.1)?.iter().copied())
     }
     #[inline]
     fn create_destroy_has<D: Datum>(
-        context: &Context<impl Event>,
+        context: &ProcessContext<impl Event>,
         types: (u32, u32),
     ) -> Option<bool> {
         let types = context.types(types.0, types.1)?;
@@ -574,6 +726,7 @@ pub mod events {
         on_create_with,
         TypeId,
         usize,
+        create,
         OnCreate,
         OnCreateKey,
         OnCreateType,
@@ -590,6 +743,7 @@ pub mod events {
         on_destroy_with,
         TypeId,
         usize,
+        destroy,
         OnDestroy,
         OnDestroyKey,
         OnDestroyType,
@@ -611,7 +765,7 @@ pub mod events {
     }
     #[inline]
     fn modify_types<'a>(
-        context: &Context<'a, impl Event>,
+        context: &ProcessContext<'a, impl Event>,
         types: (u32, u32, u32),
     ) -> Option<impl Iterator<Item = Type> + 'a> {
         let add = context.types(types.0, types.1)?;
@@ -624,7 +778,10 @@ pub mod events {
         )
     }
     #[inline]
-    fn modify_has<D: Datum>(context: &Context<impl Event>, types: (u32, u32, u32)) -> Option<bool> {
+    fn modify_has<D: Datum>(
+        context: &ProcessContext<impl Event>,
+        types: (u32, u32, u32),
+    ) -> Option<bool> {
         let add = context.types(types.0, types.1)?;
         let remove = context.types(types.0 + types.1, types.2)?;
         Some(
@@ -637,6 +794,7 @@ pub mod events {
         on_modify_with,
         Type,
         Types,
+        modify,
         OnModify,
         OnModifyKey,
         OnModifyType,
@@ -655,13 +813,16 @@ pub mod events {
     }
     #[inline]
     fn add_types<'a>(
-        context: &Context<'a, impl Event>,
+        context: &ProcessContext<'a, impl Event>,
         types: (u32, u32, u32),
     ) -> Option<impl Iterator<Item = TypeId> + 'a> {
         Some(context.types(types.0, types.1)?.iter().copied())
     }
     #[inline]
-    fn add_has<D: Datum>(context: &Context<impl Event>, types: (u32, u32, u32)) -> Option<bool> {
+    fn add_has<D: Datum>(
+        context: &ProcessContext<impl Event>,
+        types: (u32, u32, u32),
+    ) -> Option<bool> {
         let types = context.types(types.0, types.1)?;
         Some(types.binary_search(&TypeId::of::<D>()).is_ok())
     }
@@ -670,6 +831,7 @@ pub mod events {
         on_add_with,
         TypeId,
         usize,
+        modify,
         OnAdd,
         OnAddKey,
         OnAddType,
@@ -688,13 +850,16 @@ pub mod events {
     }
     #[inline]
     fn remove_types<'a>(
-        context: &Context<'a, impl Event>,
+        context: &ProcessContext<'a, impl Event>,
         types: (u32, u32, u32),
     ) -> Option<impl Iterator<Item = TypeId> + 'a> {
         Some(context.types(types.0 + types.1, types.2)?.iter().copied())
     }
     #[inline]
-    fn remove_has<D: Datum>(context: &Context<impl Event>, types: (u32, u32, u32)) -> Option<bool> {
+    fn remove_has<D: Datum>(
+        context: &ProcessContext<impl Event>,
+        types: (u32, u32, u32),
+    ) -> Option<bool> {
         let types = context.types(types.0 + types.1, types.2)?;
         Some(types.binary_search(&TypeId::of::<D>()).is_ok())
     }
@@ -703,6 +868,7 @@ pub mod events {
         on_remove_with,
         TypeId,
         usize,
+        modify,
         OnRemove,
         OnRemoveKey,
         OnRemoveType,

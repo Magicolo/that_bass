@@ -3,7 +3,7 @@ use std::{any::TypeId, collections::HashSet, marker::PhantomData, thread::scope}
 use that_bass::{
     filter::{Filter, Has, Is, Not},
     key::Key,
-    listen::Listen,
+    listen::{Broadcast, Listen},
     query::By,
     template::Template,
     Database, Datum, Error, Filter, Template,
@@ -811,7 +811,8 @@ fn broadcast_on_add() -> Result<(), Error> {
     struct A;
     impl Datum for A {}
 
-    let (database, broadcast) = Database::new().broadcast();
+    let broadcast = Broadcast::new();
+    let database = Database::new().listen(broadcast.clone());
     let mut create = database.create::<()>()?;
     let mut destroy = database.destroy_all();
     let mut on_add1 = broadcast.on_add().with_key().with_type::<A>();
