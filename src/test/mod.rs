@@ -3,7 +3,6 @@ use std::{any::TypeId, collections::HashSet, marker::PhantomData, thread::scope}
 use that_bass::{
     filter::{Filter, Has, Is, Not},
     key::Key,
-    listen::{Broadcast, Listen},
     query::By,
     template::Template,
     Database, Datum, Error, Filter, Template,
@@ -199,7 +198,7 @@ pub mod template {
 
 const COUNT: usize = 37;
 
-fn create_one(database: &Database<impl Listen>, template: impl Template) -> Result<Key, Error> {
+fn create_one(database: &Database, template: impl Template) -> Result<Key, Error> {
     let mut create = database.create()?;
     let key = create.one(template);
     assert_eq!(create.resolve(), 1);
@@ -207,7 +206,7 @@ fn create_one(database: &Database<impl Listen>, template: impl Template) -> Resu
 }
 
 fn create_n<const N: usize>(
-    database: &Database<impl Listen>,
+    database: &Database,
     templates: [impl Template; N],
 ) -> Result<[Key; N], Error> {
     let mut create = database.create()?;
@@ -216,14 +215,14 @@ fn create_n<const N: usize>(
     Ok(keys)
 }
 
-fn destroy_one(database: &Database<impl Listen>, key: Key) -> Result<(), Error> {
+fn destroy_one(database: &Database, key: Key) -> Result<(), Error> {
     let mut destroy = database.destroy();
     destroy.one(key);
     assert_eq!(destroy.resolve(), 1);
     Ok(())
 }
 
-fn destroy_all(database: &Database<impl Listen>, keys: &[Key]) {
+fn destroy_all(database: &Database, keys: &[Key]) {
     let mut destroy = database.destroy();
     destroy.all(keys.iter().copied());
     assert_eq!(destroy.resolve(), keys.len());
@@ -811,13 +810,12 @@ fn broadcast_on_add() -> Result<(), Error> {
     struct A;
     impl Datum for A {}
 
-    let broadcast = Broadcast::new();
-    let database = Database::new().listen(broadcast.clone());
+    let database = Database::new();
     let mut create = database.create::<()>()?;
     let mut destroy = database.destroy_all();
-    let mut on_add1 = broadcast.on_add().with_key().with_type::<A>();
-    let mut on_add2 = broadcast.on_add().with_key().with_type::<A>();
-    let mut on_add3 = broadcast.on_add().with_key().with_type::<A>();
+    let mut on_add1 = database.events().on_add().with_key().with_type::<A>();
+    let mut on_add2 = database.events().on_add().with_key().with_type::<A>();
+    let mut on_add3 = database.events().on_add().with_key().with_type::<A>();
     let mut keys2 = Vec::new();
     let mut keys3 = Vec::new();
 
@@ -826,7 +824,7 @@ fn broadcast_on_add() -> Result<(), Error> {
         let keys = create.defaults(i).to_vec();
         keys2.extend(keys.iter().copied());
         keys3.extend(keys.iter().copied());
-        let on_add4 = broadcast.on_add().with_key().with_type::<A>();
+        let on_add4 = database.events().on_add().with_key().with_type::<A>();
         assert_eq!(create.resolve(), i);
         assert!(on_add1.next().is_none());
         let mut add = database.add::<A>()?;
@@ -834,7 +832,8 @@ fn broadcast_on_add() -> Result<(), Error> {
         assert_eq!(add.resolve(), i);
         assert!((&mut on_add1).map(|e| e.key).eq(keys.iter().copied()));
         assert!(on_add4.map(|e| e.key).eq(keys.iter().copied()));
-        assert!(broadcast
+        assert!(database
+            .events()
             .on_add()
             .with_key()
             .with_type::<A>()

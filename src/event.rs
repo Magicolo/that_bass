@@ -1,4 +1,4 @@
-use crate::{core::tuple::tuples, key::Key, Database, Datum};
+use crate::{core::utility::ONE, key::Key, Datum};
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::{
     any::TypeId,
@@ -7,36 +7,27 @@ use std::{
     mem::{replace, ManuallyDrop},
     num::NonZeroUsize,
     ops::ControlFlow::{self, *},
-    sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering::*},
 };
-
-/// Allows to listen to database events. These events are guaranteed to be coherent (ex. `create` always happens before
-/// `destroy` for a given key).
-///
-/// **All listen methods should be considered as time critical** since they are called while holding locks and may add significant
-/// contention on other database operations. If these events need to be processed in any way, it is recommended to queue
-/// the events and defer the processing.
-pub trait Listen {
-    fn on_create(&self, keys: &[Key], types: &[TypeId]);
-    fn on_destroy(&self, keys: &[Key], types: &[TypeId]);
-    fn on_modify(&self, keys: &[Key], add: &[TypeId], remove: &[TypeId]);
-}
 
 pub trait Event: Sized {
     fn declare(context: DeclareContext);
     fn process(raw: &Raw, context: ProcessContext<Self>) -> ControlFlow<()>;
 }
 
-#[derive(Clone, Default)]
-pub struct Broadcast(Arc<Inner>);
+pub struct Events {
+    ready: RwLock<Ready>,
+    pending: Mutex<Chunk>,
+    // 1 bit closed, 21 bits receivers, 21 bits requires keys, 21 bits requires types
+    create: AtomicU64,
+    destroy: AtomicU64,
+    modify: AtomicU64,
+}
 
 pub struct Receive<'a, E: Event> {
-    pub keep: Keep,
-    inner: &'a Inner,
-    events: VecDeque<E>,
+    events: &'a Events,
+    keep: Keep,
+    buffer: VecDeque<E>,
     head: usize,
     version: usize,
 }
@@ -55,7 +46,7 @@ pub struct DeclareContext<'a> {
 
 pub struct ProcessContext<'a, T> {
     items: &'a mut VecDeque<T>,
-    keep: &'a Keep,
+    keep: Keep,
     keys: &'a [Key],
     types: &'a [TypeId],
 }
@@ -76,13 +67,10 @@ pub enum Raw {
     },
 }
 
-#[derive(Default)]
-struct Inner {
-    ready: RwLock<Ready>,
-    pending: Mutex<Chunk>,
-    create: AtomicU64, // 1 bit closed, 21 bits receivers, 21 bits requires keys, 21 bits requires types
-    destroy: AtomicU64, // 1 bit closed, 21 bits receivers, 21 bits requires keys, 21 bits requires types
-    modify: AtomicU64, // 1 bit closed, 21 bits receivers, 21 bits requires keys, 21 bits requires types
+pub enum Channel {
+    Create,
+    Destroy,
+    Modify,
 }
 
 #[derive(Default)]
@@ -103,52 +91,61 @@ struct Chunk {
     types: Vec<TypeId>,
 }
 
-impl<L> Database<L> {
-    pub fn listen<M: Listen>(self, listen: M) -> Database<(L, M)> {
-        Database {
-            inner: self.inner,
-            listen: (self.listen, listen),
-        }
-    }
-}
-
-impl Broadcast {
+impl Events {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            pending: Default::default(),
+            ready: Default::default(),
+            create: AtomicU64::new(0),
+            destroy: AtomicU64::new(0),
+            modify: AtomicU64::new(0),
+        }
     }
 
     pub fn on<E: Event>(&self) -> Receive<E> {
-        self.on_with(Keep::default())
+        Receive::new(self)
     }
 
-    pub fn on_with<E: Event>(&self, keep: Keep) -> Receive<E> {
-        Receive::new(&self.0, keep)
+    pub fn open(&self) -> bool {
+        self.open_with(Channel::Create)
+            | self.open_with(Channel::Destroy)
+            | self.open_with(Channel::Modify)
     }
 
-    pub fn open(&self) {
+    pub fn open_with(&self, channel: Channel) -> bool {
         let value = recompose(false, u32::MAX, u32::MAX, u32::MAX);
-        self.0.create.fetch_and(value, Ordering::Relaxed);
-        self.0.destroy.fetch_and(value, Ordering::Relaxed);
-        self.0.modify.fetch_and(value, Ordering::Relaxed);
+        decompose(match channel {
+            Channel::Create => self.create.fetch_and(value, Relaxed),
+            Channel::Destroy => self.destroy.fetch_and(value, Relaxed),
+            Channel::Modify => self.modify.fetch_and(value, Relaxed),
+        })
+        .0 == true
     }
 
-    pub fn close(&self) {
+    pub fn close(&self) -> bool {
+        self.close_with(Channel::Create)
+            | self.close_with(Channel::Destroy)
+            | self.close_with(Channel::Modify)
+    }
+
+    pub fn close_with(&self, channel: Channel) -> bool {
         let value = recompose(true, 0, 0, 0);
-        self.0.create.fetch_or(value, Ordering::Relaxed);
-        self.0.destroy.fetch_or(value, Ordering::Relaxed);
-        self.0.modify.fetch_or(value, Ordering::Relaxed);
+        decompose(match channel {
+            Channel::Create => self.create.fetch_or(value, Relaxed),
+            Channel::Destroy => self.destroy.fetch_or(value, Relaxed),
+            Channel::Modify => self.modify.fetch_or(value, Relaxed),
+        })
+        .0 == false
     }
-}
 
-impl Listen for Broadcast {
     #[inline]
-    fn on_create(&self, keys: &[Key], types: &[TypeId]) {
-        let values = decompose(self.0.create.load(Ordering::Relaxed));
+    pub(crate) fn emit_create(&self, keys: &[Key], types: &[TypeId]) {
+        let values = decompose(self.create.load(Relaxed));
         if values.0 || values.1 == 0 {
             return;
         }
 
-        let mut pending = self.0.pending.lock();
+        let mut pending = self.pending.lock();
         let indices = (pending.keys.len(), pending.types.len());
         pending.events.push(Raw::Create {
             keys: (indices.0 as _, keys.len() as _),
@@ -161,14 +158,15 @@ impl Listen for Broadcast {
             pending.types.extend_from_slice(types);
         }
     }
+
     #[inline]
-    fn on_destroy(&self, keys: &[Key], types: &[TypeId]) {
-        let values = decompose(self.0.destroy.load(Ordering::Relaxed));
+    pub(crate) fn emit_destroy(&self, keys: &[Key], types: &[TypeId]) {
+        let values = decompose(self.destroy.load(Relaxed));
         if values.0 || values.1 == 0 {
             return;
         }
 
-        let mut pending = self.0.pending.lock();
+        let mut pending = self.pending.lock();
         let indices = (pending.keys.len(), pending.types.len());
         pending.events.push(Raw::Destroy {
             keys: (indices.0 as _, keys.len() as _),
@@ -181,14 +179,15 @@ impl Listen for Broadcast {
             pending.types.extend_from_slice(types);
         }
     }
+
     #[inline]
-    fn on_modify(&self, keys: &[Key], add: &[TypeId], remove: &[TypeId]) {
-        let values = decompose(self.0.modify.load(Ordering::Relaxed));
+    pub(crate) fn emit_modify(&self, keys: &[Key], add: &[TypeId], remove: &[TypeId]) {
+        let values = decompose(self.modify.load(Relaxed));
         if values.0 || values.1 == 0 {
             return;
         }
 
-        let mut pending = self.0.pending.lock();
+        let mut pending = self.pending.lock();
         let indices = (pending.keys.len(), pending.types.len());
         pending.events.push(Raw::Modify {
             keys: (indices.0 as _, keys.len() as _),
@@ -204,9 +203,9 @@ impl Listen for Broadcast {
     }
 }
 
-impl Drop for Broadcast {
+impl Drop for Events {
     fn drop(&mut self) {
-        self.close()
+        self.close();
     }
 }
 
@@ -234,13 +233,21 @@ impl<'a, T> ProcessContext<'a, T> {
     #[inline]
     pub fn one(&mut self, item: T) -> ControlFlow<()> {
         self.items.push_back(item);
-        self.keep()
+        if self.keep.apply(self.items) {
+            Continue(())
+        } else {
+            Break(())
+        }
     }
 
     #[inline]
     pub fn all<I: IntoIterator<Item = T>>(&mut self, items: I) -> ControlFlow<()> {
         self.items.extend(items);
-        self.keep()
+        if self.keep.apply(self.items) {
+            Continue(())
+        } else {
+            Break(())
+        }
     }
 
     #[inline]
@@ -261,102 +268,96 @@ impl<'a, T> ProcessContext<'a, T> {
             types: self.types,
         }
     }
-
-    fn keep(&mut self) -> ControlFlow<()> {
-        match self.keep {
-            Keep::All => Continue(()),
-            Keep::First(count) if self.items.len() < count.get() => Continue(()),
-            Keep::First(count) => Break(self.items.truncate(count.get())),
-            Keep::Last(count) => {
-                self.items.drain(..self.items.len() - count.get());
-                Continue(())
-            }
-        }
-    }
 }
 
 impl<'a, E: Event> Receive<'a, E> {
     pub fn clear(&mut self) {
-        self.events.clear();
+        self.buffer.clear();
+        let keep = replace(&mut self.keep, Keep::First(ONE));
         while let Some(_) = self.next() {
-            self.events.clear();
+            self.buffer.clear();
         }
+        self.keep = keep;
     }
 
-    pub fn with_event<F: Event>(self) -> Receive<'a, F> {
+    pub fn keep(&mut self, keep: Keep) {
+        self.keep = keep;
+        keep.apply(&mut self.buffer);
+    }
+
+    pub fn with<F: Event>(self) -> Receive<'a, F> {
         let receive = ManuallyDrop::new(self);
-        Self::remove_declare(receive.inner);
-        Receive::<F>::add_declare(receive.inner);
+        Self::remove_declare(receive.events);
+        Receive::<F>::add_declare(receive.events);
         Receive {
             keep: receive.keep,
-            inner: receive.inner,
+            events: receive.events,
             head: receive.head,
-            events: VecDeque::new(),
+            buffer: VecDeque::new(),
             version: receive.version,
         }
     }
 
-    fn new(inner: &'a Inner, keep: Keep) -> Self {
-        Self::add_declare(inner);
-        let ready = inner.ready.read();
-        ready.buffers.fetch_add(1, Ordering::Relaxed);
-        ready.seen.fetch_add(1, Ordering::Relaxed);
+    fn new(events: &'a Events) -> Self {
+        Self::add_declare(events);
+        let ready = events.ready.read();
+        ready.buffers.fetch_add(1, Relaxed);
+        ready.seen.fetch_add(1, Relaxed);
         Receive {
-            keep,
-            inner,
+            keep: Keep::All,
+            events,
             head: ready.chunks.len(),
-            events: VecDeque::new(),
+            buffer: VecDeque::new(),
             version: ready.version,
         }
     }
 
-    fn add_declare(inner: &Inner) {
+    fn declare() -> [bool; 9] {
         let mut values = [false; 9];
         E::declare(DeclareContext {
             values: &mut values,
         });
-        Self::update(inner, values, |source, target| {
-            target.fetch_add(source, Ordering::Relaxed);
+        values
+    }
+
+    fn add_declare(events: &Events) {
+        Self::update(events, Self::declare(), |source, target| {
+            target.fetch_add(source, Relaxed);
         });
     }
 
-    fn remove_declare(inner: &Inner) {
-        let mut values = [false; 9];
-        E::declare(DeclareContext {
-            values: &mut values,
-        });
-        Self::update(inner, values, |source, target| {
-            target.fetch_sub(source, Ordering::Relaxed);
+    fn remove_declare(events: &Events) {
+        Self::update(events, Self::declare(), |source, target| {
+            target.fetch_sub(source, Relaxed);
         });
     }
 
-    fn update(inner: &Inner, values: [bool; 9], update: impl Fn(u64, &AtomicU64)) {
+    fn update(events: &Events, values: [bool; 9], update: impl Fn(u64, &AtomicU64)) {
         let mut index = 0;
-        for event in [&inner.create, &inner.destroy, &inner.modify] {
+        for channel in [&events.create, &events.destroy, &events.modify] {
             if values[index] {
                 let keys = if values[index + 1] { 1 } else { 0 };
                 let types = if values[index + 2] { 1 } else { 0 };
-                update(recompose(false, 1, keys, types), event);
+                update(recompose(false, 1, keys, types), channel);
             }
             index += 3;
         }
     }
 
-    fn process(&mut self, ready: &Ready) {
-        for chunk in ready.chunks.range(self.head..) {
+    fn process(&mut self, ready: &Ready) -> ControlFlow<()> {
+        let head = replace(&mut self.head, ready.chunks.len());
+        for chunk in ready.chunks.range(head..) {
             let mut context = ProcessContext {
-                items: &mut self.events,
-                keep: &self.keep,
+                items: &mut self.buffer,
+                keep: self.keep,
                 keys: &chunk.keys,
                 types: &chunk.types,
             };
             for event in chunk.events.iter() {
-                if let Break(_) = E::process(event, context.own()) {
-                    break;
-                };
+                E::process(event, context.own())?;
             }
         }
-        self.head = ready.chunks.len();
+        Continue(())
     }
 }
 
@@ -364,31 +365,31 @@ impl<E: Event> Iterator for Receive<'_, E> {
     type Item = E;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(event) = self.events.pop_front() {
+        if let Some(event) = self.buffer.pop_front() {
             return Some(event);
         }
 
-        let ready = self.inner.ready.read();
+        let ready = self.events.ready.read();
         debug_assert!(self.version + 1 >= ready.version);
         if self.version < ready.version {
             self.head -= ready.head;
             self.version = ready.version;
-            ready.seen.fetch_add(1, Ordering::Relaxed);
+            ready.seen.fetch_add(1, Relaxed);
         }
         self.process(&ready);
-        if let Some(event) = self.events.pop_front() {
+        if let Some(event) = self.buffer.pop_front() {
             return Some(event);
         }
 
         drop(ready);
 
-        let mut ready = self.inner.ready.write();
+        let mut ready = self.events.ready.write();
         let chunk = ready.last.take().unwrap_or_default();
         let chunk = {
             // The time spent with the `pending` lock is minimized as much as possible since it may block other threads
             // that hold database locks. The tradeoff here is that the `ready` write lock may be taken in vain when `pending`
             // has no new events.
-            let mut pending = self.inner.pending.lock();
+            let mut pending = self.events.pending.lock();
             if pending.events.len() == 0 {
                 ready.last = Some(chunk);
                 return None;
@@ -419,17 +420,34 @@ impl<E: Event> Iterator for Receive<'_, E> {
 
         let ready = RwLockWriteGuard::downgrade(ready);
         self.process(&ready);
-        self.events.pop_front()
+        self.buffer.pop_front()
     }
 }
 
 impl<E: Event> Drop for Receive<'_, E> {
     fn drop(&mut self) {
-        Self::remove_declare(self.inner);
-        let ready = self.inner.ready.read();
-        ready.buffers.fetch_sub(1, Ordering::Relaxed);
+        Self::remove_declare(self.events);
+        let ready = self.events.ready.read();
+        ready.buffers.fetch_sub(1, Relaxed);
         if self.version == ready.version {
-            ready.seen.fetch_sub(1, Ordering::Relaxed);
+            ready.seen.fetch_sub(1, Relaxed);
+        }
+    }
+}
+
+impl Keep {
+    fn apply<T>(&self, items: &mut VecDeque<T>) -> bool {
+        match self {
+            Keep::All => true,
+            Keep::First(count) if items.len() < count.get() => true,
+            Keep::First(count) => {
+                items.truncate(count.get());
+                false
+            }
+            Keep::Last(count) => {
+                items.drain(..items.len() - count.get());
+                true
+            }
         }
     }
 }
@@ -455,26 +473,6 @@ const fn recompose(close: bool, receivers: u32, keys: u32, types: u32) -> u64 {
         | ((types & MASK) as u64)
 }
 
-macro_rules! tuple {
-    ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
-        impl<$($t: Listen,)*> Listen for ($($t,)*) {
-            #[inline]
-            fn on_create(&self, _keys: &[Key], _types: &[TypeId]) {
-                $(self.$i.on_create(_keys, _types);)*
-            }
-            #[inline]
-            fn on_destroy(&self, _keys: &[Key], _types: &[TypeId]) {
-                $(self.$i.on_destroy(_keys, _types);)*
-            }
-            #[inline]
-            fn on_modify(&self, _keys: &[Key], _add: &[TypeId], _remove: &[TypeId]) {
-                $(self.$i.on_modify(_keys, _add, _remove);)*
-            }
-        }
-    };
-}
-tuples!(tuple);
-
 pub mod events {
     use super::*;
 
@@ -491,42 +489,39 @@ pub mod events {
     }
 
     macro_rules! with {
-        ($n:ident, $nw:ident, $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident) => {
-            impl Broadcast {
+        ($n:ident, $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident) => {
+            impl Events {
                 pub fn $n(&self) -> Receive<$on> {
                     self.on()
-                }
-                pub fn $nw(&self, keep: Keep) -> Receive<$on> {
-                    self.on_with(keep)
                 }
             }
             impl<'a> Receive<'a, $on> {
                 pub fn with_key(self) -> Receive<'a, $on_key> {
-                    self.with_event()
+                    self.with()
                 }
                 pub fn with_type<D: Datum>(self) -> Receive<'a, $on_type<D>> {
-                    self.with_event()
+                    self.with()
                 }
                 pub fn with_types(self) -> Receive<'a, $on_types> {
-                    self.with_event()
+                    self.with()
                 }
             }
             impl<'a> Receive<'a, $on_key> {
                 pub fn with_type<D: Datum>(self) -> Receive<'a, $on_key_type<D>> {
-                    self.with_event()
+                    self.with()
                 }
                 pub fn with_types(self) -> Receive<'a, $on_key_types> {
-                    self.with_event()
+                    self.with()
                 }
             }
             impl<'a, D: Datum> Receive<'a, $on_type<D>> {
                 pub fn with_key(self) -> Receive<'a, $on_key_type<D>> {
-                    self.with_event()
+                    self.with()
                 }
             }
             impl<'a> Receive<'a, $on_types> {
                 pub fn with_key(self) -> Receive<'a, $on_key_types> {
-                    self.with_event()
+                    self.with()
                 }
             }
 
@@ -555,7 +550,7 @@ pub mod events {
 
     macro_rules! event {
         (
-            $n:ident, $nw:ident, $t:ty, $ts:ty, $d:ident,
+            $n:ident, $t:ty, $ts:ty, $d:ident,
             $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident,
             $raw:ident,
             $count:ident,
@@ -595,7 +590,6 @@ pub mod events {
 
             with!(
                 $n,
-                $nw,
                 $on,
                 $on_key,
                 $on_type,
@@ -723,7 +717,6 @@ pub mod events {
     }
     event!(
         on_create,
-        on_create_with,
         TypeId,
         usize,
         create,
@@ -740,7 +733,6 @@ pub mod events {
     );
     event!(
         on_destroy,
-        on_destroy_with,
         TypeId,
         usize,
         destroy,
@@ -791,7 +783,6 @@ pub mod events {
     }
     event!(
         on_modify,
-        on_modify_with,
         Type,
         Types,
         modify,
@@ -828,7 +819,6 @@ pub mod events {
     }
     event!(
         on_add,
-        on_add_with,
         TypeId,
         usize,
         modify,
@@ -865,7 +855,6 @@ pub mod events {
     }
     event!(
         on_remove,
-        on_remove_with,
         TypeId,
         usize,
         modify,

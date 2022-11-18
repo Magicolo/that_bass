@@ -1,8 +1,6 @@
 use crate::{
     key::Key,
-    listen::Listen,
-    resources::Resources,
-    table::{Table, Tables},
+    table::Table,
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
     Database, Error,
 };
@@ -13,8 +11,8 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
-pub struct Create<'d, T: Template, L> {
-    database: &'d Database<L>,
+pub struct Create<'d, T: Template> {
+    database: &'d Database,
     inner: Arc<Inner<T>>,
     table: Arc<Table>,
     keys: Vec<Key>,
@@ -27,9 +25,9 @@ struct Inner<T: Template> {
     types: Box<[TypeId]>,
 }
 
-impl<L> Database<L> {
-    pub fn create<T: Template>(&self) -> Result<Create<T, L>, Error> {
-        Share::<T>::from(self.tables(), self.resources()).map(|(inner, table)| Create {
+impl Database {
+    pub fn create<T: Template>(&self) -> Result<Create<T>, Error> {
+        Share::<T>::from(self).map(|(inner, table)| Create {
             database: self,
             inner,
             table,
@@ -39,7 +37,7 @@ impl<L> Database<L> {
     }
 }
 
-impl<'d, T: Template, L> Create<'d, T, L> {
+impl<'d, T: Template> Create<'d, T> {
     #[inline]
     pub fn all<I: IntoIterator<Item = T>>(&mut self, templates: I) -> &[Key] {
         let start = self.templates.len();
@@ -125,7 +123,7 @@ impl<'d, T: Template, L> Create<'d, T, L> {
     }
 }
 
-impl<T: Template, L: Listen> Create<'_, T, L> {
+impl<T: Template> Create<'_, T> {
     /// Resolves the accumulated create operations.
     ///
     /// In order to prevent deadlocks, **do not call this method while using a `Query`** unless you can
@@ -173,8 +171,8 @@ impl<T: Template, L: Listen> Create<'_, T, L> {
             .count
             .fetch_add(count.get() as _, Ordering::Release);
         self.database
-            .listen
-            .on_create(&keys[start..start + count.get()], &self.inner.types);
+            .events()
+            .emit_create(&keys[start..start + count.get()], &self.inner.types);
         drop(keys);
         self.keys.clear();
         debug_assert_eq!(self.keys.len(), 0);
@@ -183,20 +181,17 @@ impl<T: Template, L: Listen> Create<'_, T, L> {
     }
 }
 
-impl<T: Template, L> Drop for Create<'_, T, L> {
+impl<T: Template> Drop for Create<'_, T> {
     fn drop(&mut self) {
         self.clear();
     }
 }
 
 impl<T: Template> Share<T> {
-    pub fn from(
-        tables: &Tables,
-        resources: &Resources,
-    ) -> Result<(Arc<Inner<T>>, Arc<Table>), Error> {
-        let metas = ShareMeta::<T>::from(resources)?;
-        let share = resources.try_global(|| {
-            let table = tables.find_or_add(&metas);
+    pub fn from(database: &Database) -> Result<(Arc<Inner<T>>, Arc<Table>), Error> {
+        let metas = ShareMeta::<T>::from(database)?;
+        let share = database.resources().try_global(|| {
+            let table = database.tables().find_or_add(&metas);
             let context = InitializeContext::new(&table);
             let state = T::initialize(context)?;
             let inner = Arc::new(Inner {
@@ -210,15 +205,15 @@ impl<T: Template> Share<T> {
     }
 }
 
-pub(crate) fn is<T: Template>(table: &Table, tables: &Tables, resources: &Resources) -> bool {
-    match Share::<T>::from(tables, resources) {
+pub(crate) fn is<T: Template>(table: &Table, database: &Database) -> bool {
+    match Share::<T>::from(database) {
         Ok(pair) => table.index() == pair.1.index(),
         Err(_) => false,
     }
 }
 
-pub(crate) fn has<T: Template>(table: &Table, tables: &Tables, resources: &Resources) -> bool {
-    match Share::<T>::from(tables, resources) {
+pub(crate) fn has<T: Template>(table: &Table, database: &Database) -> bool {
+    match Share::<T>::from(database) {
         Ok(pair) => table.has_all(pair.1.types()),
         Err(_) => false,
     }

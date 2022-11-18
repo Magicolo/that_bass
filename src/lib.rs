@@ -2,9 +2,9 @@ pub mod core;
 pub mod create;
 pub mod defer;
 pub mod destroy;
+pub mod event;
 pub mod filter;
 pub mod key;
-pub mod listen;
 pub mod modify;
 pub mod query;
 pub mod resources;
@@ -14,6 +14,7 @@ pub mod template;
 #[cfg(test)]
 mod test;
 
+use event::Events;
 pub use that_base_derive::{Datum, Filter, Template};
 
 use key::{Key, Keys};
@@ -218,15 +219,11 @@ impl fmt::Display for Error {
 }
 impl error::Error for Error {}
 
-pub struct Database<L = ()> {
-    inner: Inner,
-    listen: L,
-}
-
-struct Inner {
+pub struct Database {
     keys: Keys,
     tables: Tables,
     resources: Resources,
+    events: Events,
 }
 
 pub struct Meta {
@@ -286,30 +283,31 @@ impl Meta {
 impl Database {
     pub fn new() -> Self {
         Database {
-            inner: Inner {
-                keys: Keys::new(),
-                tables: Tables::new().into(),
-                resources: Resources::new(),
-            },
-            listen: (),
+            keys: Keys::new(),
+            tables: Tables::new(),
+            resources: Resources::new(),
+            events: Events::new(),
         }
     }
-}
 
-impl<L> Database<L> {
     #[inline]
     pub const fn keys(&self) -> &Keys {
-        &self.inner.keys
+        &self.keys
     }
 
     #[inline]
     pub fn tables(&self) -> &Tables {
-        &self.inner.tables
+        &self.tables
     }
 
     #[inline]
     pub const fn resources(&self) -> &Resources {
-        &self.inner.resources
+        &self.resources
+    }
+
+    #[inline]
+    pub const fn events(&self) -> &Events {
+        &self.events
     }
 }
 

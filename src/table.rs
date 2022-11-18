@@ -41,7 +41,7 @@ pub struct Tables {
 }
 
 impl Column {
-    pub fn new(meta: &'static Meta, capacity: usize) -> Self {
+    pub(crate) fn new(meta: &'static Meta, capacity: usize) -> Self {
         Self {
             data: RwLock::new(unsafe { (meta.new)(capacity) }),
             meta,

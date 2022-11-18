@@ -2,15 +2,14 @@ use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, ONE},
     filter::Filter,
     key::{Key, Slot},
-    listen::Listen,
     table::Table,
     Database,
 };
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{any::TypeId, collections::HashSet, num::NonZeroUsize, sync::atomic::Ordering};
 
-pub struct Destroy<'d, F, L> {
-    database: &'d Database<L>,
+pub struct Destroy<'d, F> {
+    database: &'d Database,
     keys: HashSet<Key>, // A `HashSet` is used because the move algorithm assumes that rows will be unique.
     indices: Vec<usize>, // May be reordered (ex: by `fold_swap`).
     states: Vec<Result<State<'d>, u32>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
@@ -21,8 +20,8 @@ pub struct Destroy<'d, F, L> {
 }
 
 /// Destroys all keys in tables that satisfy the filter `F`.
-pub struct DestroyAll<'d, F = (), L = ()> {
-    database: &'d Database<L>,
+pub struct DestroyAll<'d, F = ()> {
+    database: &'d Database,
     index: usize,
     states: Vec<StateAll<'d>>,
     filter: F,
@@ -41,8 +40,8 @@ struct StateAll<'d> {
     types: Box<[TypeId]>,
 }
 
-impl<L> Database<L> {
-    pub fn destroy(&self) -> Destroy<'_, (), L> {
+impl Database {
+    pub fn destroy(&self) -> Destroy<'_, ()> {
         Destroy {
             database: self,
             keys: HashSet::new(),
@@ -55,7 +54,7 @@ impl<L> Database<L> {
         }
     }
 
-    pub fn destroy_all(&self) -> DestroyAll<'_, (), L> {
+    pub fn destroy_all(&self) -> DestroyAll<'_, ()> {
         DestroyAll {
             database: self,
             index: 0,
@@ -65,7 +64,7 @@ impl<L> Database<L> {
     }
 }
 
-impl<'d, F, L> Destroy<'d, F, L> {
+impl<'d, F> Destroy<'d, F> {
     #[inline]
     pub fn one(&mut self, key: Key) {
         self.keys.insert(key);
@@ -76,11 +75,11 @@ impl<'d, F, L> Destroy<'d, F, L> {
         self.keys.extend(keys);
     }
 
-    pub fn filter<G: Filter + Default>(self) -> Destroy<'d, (F, G), L> {
+    pub fn filter<G: Filter + Default>(self) -> Destroy<'d, (F, G)> {
         self.filter_with(G::default())
     }
 
-    pub fn filter_with<G: Filter>(mut self, filter: G) -> Destroy<'d, (F, G), L> {
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> Destroy<'d, (F, G)> {
         for state in self.states.iter_mut() {
             let index = match state {
                 Ok(state) if filter.filter(&state.table, self.database.into()) => None,
@@ -125,7 +124,7 @@ impl<'d, F, L> Destroy<'d, F, L> {
     }
 }
 
-impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
+impl<'d, F: Filter> Destroy<'d, F> {
     pub fn resolve(&mut self) -> usize {
         for (key, result) in self.database.keys().get_all(self.keys.iter().copied()) {
             if let Ok((slot, table)) = result {
@@ -136,7 +135,7 @@ impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
                     &mut self.indices,
                     &mut self.states,
                     &self.filter,
-                    &self.database.inner,
+                    self.database,
                 );
             }
         }
@@ -157,7 +156,7 @@ impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
                     &mut self.indices,
                     &mut self.states,
                     &self.filter,
-                    &self.database.inner,
+                    self.database,
                 );
             }
         }
@@ -227,7 +226,7 @@ impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
         drops: &mut Vec<(usize, NonZeroUsize)>,
         keys: RwLockUpgradableReadGuard<'d, Vec<Key>>,
         (low, high, count): (u32, u32, NonZeroUsize),
-        database: &'d Database<impl Listen>,
+        database: &'d Database,
     ) {
         debug_assert_eq!(moves.len(), 0);
         debug_assert_eq!(drops.len(), 0);
@@ -327,8 +326,8 @@ impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
         }
 
         database
-            .listen
-            .on_destroy(&keys[head..head + count.get()], &state.types);
+            .events()
+            .emit_destroy(&keys[head..head + count.get()], &state.types);
         drop(keys);
         // The `recycle` step can be done outside of the lock. This means that the keys within `state.rows` may be very briefly
         // non-reusable for other threads, which is fine.
@@ -346,7 +345,7 @@ impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
         indices: &mut Vec<usize>,
         states: &mut Vec<Result<State<'d>, u32>>,
         filter: &F,
-        database: &'d crate::Inner,
+        database: &'d Database,
     ) {
         let index = match states.binary_search_by_key(&table, |result| match result {
             Ok(state) => state.table.index(),
@@ -407,12 +406,12 @@ impl<'d, F: Filter, L: Listen> Destroy<'d, F, L> {
     }
 }
 
-impl<'d, F, L> DestroyAll<'d, F, L> {
-    pub fn filter<G: Filter + Default>(self) -> DestroyAll<'d, (F, G), L> {
+impl<'d, F> DestroyAll<'d, F> {
+    pub fn filter<G: Filter + Default>(self) -> DestroyAll<'d, (F, G)> {
         self.filter_with(G::default())
     }
 
-    pub fn filter_with<G: Filter>(mut self, filter: G) -> DestroyAll<'d, (F, G), L> {
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> DestroyAll<'d, (F, G)> {
         self.states
             .retain(|state| filter.filter(state.table, self.database.into()));
         DestroyAll {
@@ -424,7 +423,7 @@ impl<'d, F, L> DestroyAll<'d, F, L> {
     }
 }
 
-impl<'d, F: Filter, L: Listen> DestroyAll<'d, F, L> {
+impl<'d, F: Filter> DestroyAll<'d, F> {
     pub fn resolve(&mut self) -> usize {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
@@ -454,7 +453,7 @@ impl<'d, F: Filter, L: Listen> DestroyAll<'d, F, L> {
     fn resolve_table(
         keys: RwLockUpgradableReadGuard<Vec<Key>>,
         state: &StateAll,
-        database: &Database<impl Listen>,
+        database: &Database,
     ) -> usize {
         let count = state.table.count.swap(0, Ordering::AcqRel);
         let Some(count) = NonZeroUsize::new(count) else {
@@ -472,8 +471,8 @@ impl<'d, F: Filter, L: Listen> DestroyAll<'d, F, L> {
         }
         database.keys().release(&keys[..count.get()]);
         database
-            .listen
-            .on_destroy(&keys[..count.get()], &state.types);
+            .events()
+            .emit_destroy(&keys[..count.get()], &state.types);
         return count.get();
     }
 }

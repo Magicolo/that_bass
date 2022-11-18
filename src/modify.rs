@@ -4,9 +4,7 @@ use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, sorted_difference, ONE},
     filter::Filter,
     key::{Key, Slot},
-    listen::Listen,
-    resources::Resources,
-    table::{Column, Table, Tables},
+    table::{Column, Table},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
     Database, Error,
 };
@@ -20,8 +18,8 @@ use std::{
 };
 
 /// Adds template `A` and removes template `R` to accumulated keys that satisfy the filter `F`.
-pub struct Modify<'d, A: Template, R: Template, F, L> {
-    database: &'d Database<L>,
+pub struct Modify<'d, A: Template, R: Template, F> {
+    database: &'d Database,
     pairs: HashMap<Key, MaybeUninit<A>>, // A `HashMap` is used because the move algorithm assumes that rows will be unique.
     indices: Vec<usize>,                 // May be reordered (ex: by `fold_swap`).
     states: Vec<Result<State<'d, A>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
@@ -33,8 +31,8 @@ pub struct Modify<'d, A: Template, R: Template, F, L> {
 }
 
 /// Adds template `A` and removes template `R` to all keys in tables that satisfy the filter `F`.
-pub struct ModifyAll<'d, A: Template, R: Template, F, L> {
-    database: &'d Database<L>,
+pub struct ModifyAll<'d, A: Template, R: Template, F> {
+    database: &'d Database,
     index: usize,
     states: Vec<StateAll<A>>,
     filter: F,
@@ -71,10 +69,10 @@ struct ShareTable<A: Template, R: Template> {
     _marker: PhantomData<fn(R)>,
 }
 
-impl<L> Database<L> {
-    pub fn modify<A: Template, R: Template>(&self) -> Result<Modify<A, R, (), L>, Error> {
+impl Database {
+    pub fn modify<A: Template, R: Template>(&self) -> Result<Modify<A, R, ()>, Error> {
         // Validate metas here (no duplicates allowed), but there is no need to store them.
-        ShareMeta::<(A, R)>::from(self.resources()).map(|_| Modify {
+        ShareMeta::<(A, R)>::from(self).map(|_| Modify {
             database: self,
             pairs: HashMap::new(),
             pending: Vec::new(),
@@ -87,9 +85,9 @@ impl<L> Database<L> {
         })
     }
 
-    pub fn modify_all<A: Template, R: Template>(&self) -> Result<ModifyAll<A, R, (), L>, Error> {
+    pub fn modify_all<A: Template, R: Template>(&self) -> Result<ModifyAll<A, R, ()>, Error> {
         // Validate metas here (no duplicates allowed), but there is no need to store them.
-        ShareMeta::<(A, R)>::from(self.resources()).map(|_| ModifyAll {
+        ShareMeta::<(A, R)>::from(self).map(|_| ModifyAll {
             database: self,
             index: 0,
             states: Vec::new(),
@@ -98,24 +96,24 @@ impl<L> Database<L> {
         })
     }
 
-    pub fn add<T: Template>(&self) -> Result<Modify<T, (), (), L>, Error> {
+    pub fn add<T: Template>(&self) -> Result<Modify<T, (), ()>, Error> {
         self.modify()
     }
 
-    pub fn add_all<T: Template>(&self) -> Result<ModifyAll<T, (), (), L>, Error> {
+    pub fn add_all<T: Template>(&self) -> Result<ModifyAll<T, (), ()>, Error> {
         self.modify_all()
     }
 
-    pub fn remove<T: Template>(&self) -> Result<Modify<(), T, (), L>, Error> {
+    pub fn remove<T: Template>(&self) -> Result<Modify<(), T, ()>, Error> {
         self.modify()
     }
 
-    pub fn remove_all<T: Template>(&self) -> Result<ModifyAll<(), T, (), L>, Error> {
+    pub fn remove_all<T: Template>(&self) -> Result<ModifyAll<(), T, ()>, Error> {
         self.modify_all()
     }
 }
 
-impl<'d, A: Template, R: Template, F, L> Modify<'d, A, R, F, L> {
+impl<'d, A: Template, R: Template, F> Modify<'d, A, R, F> {
     #[inline]
     pub fn one(&mut self, key: Key)
     where
@@ -146,11 +144,11 @@ impl<'d, A: Template, R: Template, F, L> Modify<'d, A, R, F, L> {
         );
     }
 
-    pub fn filter<G: Filter + Default>(self) -> Modify<'d, A, R, (F, G), L> {
+    pub fn filter<G: Filter + Default>(self) -> Modify<'d, A, R, (F, G)> {
         self.filter_with(G::default())
     }
 
-    pub fn filter_with<G: Filter>(mut self, filter: G) -> Modify<'d, A, R, (F, G), L> {
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> Modify<'d, A, R, (F, G)> {
         for state in self.states.iter_mut() {
             let index = match state {
                 Ok(state) if filter.filter(&state.source, self.database.into()) => None,
@@ -200,7 +198,7 @@ impl<'d, A: Template, R: Template, F, L> Modify<'d, A, R, F, L> {
     }
 }
 
-impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> {
+impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
     pub fn resolve(&mut self) -> usize {
         for (&key, template) in self.pairs.iter() {
             if let Ok((slot, table)) = self.database.keys().get(key) {
@@ -212,7 +210,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
                     &mut self.indices,
                     &mut self.states,
                     &self.filter,
-                    &self.database.inner,
+                    self.database,
                 );
             }
         }
@@ -234,7 +232,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
                     &mut self.indices,
                     &mut self.states,
                     &self.filter,
-                    &self.database.inner,
+                    self.database,
                 );
             }
         }
@@ -363,10 +361,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
         templates: &mut Vec<A>,
         pending: &mut Vec<(Key, &'d Slot, A, u32)>,
         apply: &[usize],
-    ) -> usize
-    where
-        L: 'd, // Why does the compiler requires this?
-    {
+    ) -> usize {
         Self::retain(table, rows, templates, pending);
         let Some(count) = NonZeroUsize::new(rows.len()) else {
             return 0;
@@ -390,7 +385,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
         indices: &mut Vec<usize>,
         states: &mut Vec<Result<State<'d, A>, u32>>,
         filter: &F,
-        database: &'d crate::Inner,
+        database: &'d Database,
     ) {
         let index = match states.binary_search_by_key(&table, |result| match result {
             Ok(state) => state.source.index(),
@@ -398,19 +393,18 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
         }) {
             Ok(index) => index,
             Err(index) => {
-                let result =
-                    match ShareTable::<A, R>::from(table, &database.tables, &database.resources) {
-                        Ok((source, target, inner)) if filter.filter(&source, database.into()) => {
-                            Ok(State {
-                                source,
-                                target,
-                                inner,
-                                rows: Vec::new(),
-                                templates: Vec::new(),
-                            })
-                        }
-                        _ => Err(table),
-                    };
+                let result = match ShareTable::<A, R>::from(table, database) {
+                    Ok((source, target, inner)) if filter.filter(&source, database.into()) => {
+                        Ok(State {
+                            source,
+                            target,
+                            inner,
+                            rows: Vec::new(),
+                            templates: Vec::new(),
+                        })
+                    }
+                    _ => Err(table),
+                };
                 for i in indices.iter_mut().filter(|i| **i >= index) {
                     *i += 1;
                 }
@@ -458,12 +452,12 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> Modify<'d, A, R, F, L> 
     }
 }
 
-impl<'d, A: Template, R: Template, F, L> ModifyAll<'d, A, R, F, L> {
-    pub fn filter<G: Filter + Default>(self) -> ModifyAll<'d, A, R, (F, G), L> {
+impl<'d, A: Template, R: Template, F> ModifyAll<'d, A, R, F> {
+    pub fn filter<G: Filter + Default>(self) -> ModifyAll<'d, A, R, (F, G)> {
         self.filter_with(G::default())
     }
 
-    pub fn filter_with<G: Filter>(mut self, filter: G) -> ModifyAll<'d, A, R, (F, G), L> {
+    pub fn filter_with<G: Filter>(mut self, filter: G) -> ModifyAll<'d, A, R, (F, G)> {
         self.states
             .retain(|state| filter.filter(&state.source, self.database.into()));
         ModifyAll {
@@ -476,7 +470,7 @@ impl<'d, A: Template, R: Template, F, L> ModifyAll<'d, A, R, F, L> {
     }
 }
 
-impl<'d, A: Template, R: Template, F: Filter, L: Listen> ModifyAll<'d, A, R, F, L> {
+impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
     #[inline]
     pub fn resolve(&mut self) -> usize
     where
@@ -488,11 +482,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> ModifyAll<'d, A, R, F, 
     pub fn resolve_with<G: FnMut() -> A>(&mut self, set: bool, with: G) -> usize {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
-            match ShareTable::<A, R>::from(
-                table.index(),
-                self.database.tables(),
-                self.database.resources(),
-            ) {
+            match ShareTable::<A, R>::from(table.index(), self.database) {
                 Ok((source, target, inner)) if self.filter.filter(table, self.database.into()) => {
                     self.states.push(StateAll {
                         source,
@@ -543,7 +533,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> ModifyAll<'d, A, R, F, 
         mut source: RwLockWriteGuard<Vec<Key>>,
         target: RwLockUpgradableReadGuard<Vec<Key>>,
         state: &StateAll<A>,
-        database: &Database<impl Listen>,
+        database: &Database,
         mut with: impl FnMut() -> A,
     ) -> usize {
         let count = state.source.count.swap(0, Ordering::AcqRel);
@@ -558,7 +548,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> ModifyAll<'d, A, R, F, 
             &state.target,
             &[(0, start, count)],
             &[],
-            &database.inner,
+            database,
         );
 
         // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
@@ -581,7 +571,7 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> ModifyAll<'d, A, R, F, 
         drop(source);
         // Although `source` has been dropped, coherence with be maintained since the `target` lock prevent the keys
         // moving again before `on_remove` is done.
-        database.listen.on_modify(
+        database.events().emit_modify(
             &target[start..start + count.get()],
             &state.inner.added,
             &state.inner.removed,
@@ -612,13 +602,12 @@ impl<'d, A: Template, R: Template, F: Filter, L: Listen> ModifyAll<'d, A, R, F, 
 impl<A: Template, R: Template> ShareTable<A, R> {
     pub fn from(
         table: u32,
-        tables: &Tables,
-        resources: &Resources,
+        database: &Database,
     ) -> Result<(Arc<Table>, Arc<Table>, Arc<Inner<A>>), Error> {
-        let adds = ShareMeta::<A>::from(resources)?;
-        let removes = ShareMeta::<R>::from(resources)?;
-        let share = resources.try_global_with(table, || {
-            let source = tables.get_shared(table as usize)?;
+        let adds = ShareMeta::<A>::from(database)?;
+        let removes = ShareMeta::<R>::from(database)?;
+        let share = database.resources().try_global_with(table, || {
+            let source = database.tables().get_shared(table as usize)?;
             let target = {
                 let mut metas = adds.to_vec();
                 for meta in source.metas() {
@@ -631,7 +620,7 @@ impl<A: Template, R: Template> ShareTable<A, R> {
                         (Ok(_), Err(_)) | (Err(_), Ok(_)) => {}
                     }
                 }
-                tables.find_or_add(&metas)
+                database.tables().find_or_add(&metas)
             };
             let state = A::initialize(InitializeContext::new(&target))?;
 
@@ -671,7 +660,7 @@ impl<A: Template, R: Template> ShareTable<A, R> {
 }
 
 fn move_to<'d, 'a, V, A: Template>(
-    database: &Database<impl Listen>,
+    database: &Database,
     set: &HashMap<Key, V>,
     templates: &mut Vec<A>,
     moves: &mut Vec<(usize, usize, NonZeroUsize)>,
@@ -732,7 +721,7 @@ fn move_to<'d, 'a, V, A: Template>(
         target_table,
         copies,
         moves,
-        &database.inner,
+        database,
     );
 
     // Initialize missing data `T` in target.
@@ -754,7 +743,7 @@ fn move_to<'d, 'a, V, A: Template>(
     drop(source_keys);
     // Although `source_keys` has been dropped, coherence will be maintained since the `target` lock prevents the keys from
     // moving again before `emit` is done.
-    database.listen.on_modify(
+    database.events().emit_modify(
         &target_keys[start..start + count.get()],
         &inner.added,
         &inner.removed,
@@ -771,7 +760,7 @@ fn resolve_copy_move(
     target_table: &Table,
     copies: &[(usize, usize, NonZeroUsize)],
     moves: &[(usize, usize, NonZeroUsize)],
-    database: &crate::Inner,
+    database: &Database,
 ) {
     for &(source, target, count) in moves {
         source_keys.copy_within(source..source + count.get(), target);

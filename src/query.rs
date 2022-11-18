@@ -18,7 +18,7 @@ use std::{
 };
 
 pub struct Query<'d, R: Row, F = (), I = Item> {
-    database: &'d crate::Inner,
+    database: &'d Database,
     index: usize,
     indices: Vec<usize>,       // May be reordered (ex: by `fold_swap`).
     states: Vec<State<'d, R>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
@@ -27,7 +27,7 @@ pub struct Query<'d, R: Row, F = (), I = Item> {
 }
 
 pub struct Split<'d, 'a, R: Row, I = Item> {
-    database: &'d crate::Inner,
+    database: &'d Database,
     state: &'a State<'d, R>,
     _marker: PhantomData<fn(I)>,
 }
@@ -49,10 +49,10 @@ struct State<'d, R: Row> {
     locks: Box<[(usize, Access)]>,
 }
 
-impl<L> Database<L> {
+impl Database {
     pub fn query<R: Row>(&self) -> Result<Query<'_, R>, Error> {
         ShareAccess::<R>::from(self.resources()).map(|_| Query {
-            database: &self.inner,
+            database: self,
             indices: Vec::new(),
             states: Vec::new(),
             index: 0,

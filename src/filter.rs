@@ -1,21 +1,8 @@
-use crate::{
-    core::tuple::tuples,
-    create,
-    resources::Resources,
-    table::{Table, Tables},
-    template::Template,
-    Database,
-};
+use crate::{core::tuple::tuples, create, table::Table, template::Template, Database};
 use std::{any::TypeId, marker::PhantomData};
 
-#[derive(Clone)]
-pub struct Context<'a> {
-    tables: &'a Tables,
-    resources: &'a Resources,
-}
-
 pub trait Filter {
-    fn filter(&self, table: &Table, context: Context) -> bool;
+    fn filter(&self, table: &Table, database: &Database) -> bool;
 
     fn not(self) -> Not<Self>
     where
@@ -47,24 +34,6 @@ pub struct Is<T>(PhantomData<T>);
 pub struct HasWith(Box<[TypeId]>);
 pub struct IsWith(Box<[TypeId]>);
 pub struct With<F>(F);
-
-impl<'a, L> From<&'a Database<L>> for Context<'a> {
-    fn from(database: &'a Database<L>) -> Self {
-        Self {
-            tables: database.tables(),
-            resources: database.resources(),
-        }
-    }
-}
-
-impl<'a> From<&'a crate::Inner> for Context<'a> {
-    fn from(database: &'a crate::Inner) -> Self {
-        Self {
-            tables: &database.tables,
-            resources: &database.resources,
-        }
-    }
-}
 
 impl<T: Template> Default for Has<T> {
     fn default() -> Self {
@@ -108,7 +77,7 @@ pub fn is_with<I: IntoIterator<Item = TypeId>>(types: I) -> IsWith {
     IsWith(types.into_boxed_slice())
 }
 
-pub const fn with<F: Fn(&Table, Context)>(filter: F) -> With<F> {
+pub const fn with<F: Fn(&Table, &Database)>(filter: F) -> With<F> {
     With(filter)
 }
 
@@ -125,61 +94,61 @@ impl<F> Not<F> {
 }
 
 impl<F: Filter> Filter for &F {
-    fn filter(&self, table: &Table, context: Context) -> bool {
-        F::filter(self, table, context)
+    fn filter(&self, table: &Table, database: &Database) -> bool {
+        F::filter(self, table, database)
     }
 }
 
 impl<F: Filter> Filter for &mut F {
-    fn filter(&self, table: &Table, context: Context) -> bool {
-        F::filter(self, table, context)
+    fn filter(&self, table: &Table, database: &Database) -> bool {
+        F::filter(self, table, database)
     }
 }
 
 impl Filter for bool {
-    fn filter(&self, _: &Table, _: Context) -> bool {
+    fn filter(&self, _: &Table, _: &Database) -> bool {
         *self
     }
 }
 
 impl<T: Template> Filter for Has<T> {
-    fn filter(&self, table: &Table, context: Context) -> bool {
-        create::has::<T>(table, context.tables, context.resources)
+    fn filter(&self, table: &Table, database: &Database) -> bool {
+        create::has::<T>(table, database)
     }
 }
 
 impl Filter for HasWith {
-    fn filter(&self, table: &Table, _: Context) -> bool {
+    fn filter(&self, table: &Table, _: &Database) -> bool {
         table.has_all(self.0.iter().copied())
     }
 }
 
 impl<T: Template> Filter for Is<T> {
-    fn filter(&self, table: &Table, context: Context) -> bool {
-        create::is::<T>(table, context.tables, context.resources)
+    fn filter(&self, table: &Table, database: &Database) -> bool {
+        create::is::<T>(table, database)
     }
 }
 
 impl Filter for IsWith {
-    fn filter(&self, table: &Table, _: Context) -> bool {
+    fn filter(&self, table: &Table, _: &Database) -> bool {
         table.is_all(self.0.iter().copied())
     }
 }
 
 impl<F: Filter> Filter for Not<F> {
-    fn filter(&self, table: &Table, context: Context) -> bool {
-        !self.0.filter(table, context)
+    fn filter(&self, table: &Table, database: &Database) -> bool {
+        !self.0.filter(table, database)
     }
 }
 
-impl<F: Fn(&Table, Context) -> bool> Filter for With<F> {
-    fn filter(&self, table: &Table, context: Context) -> bool {
-        self.0(table, context)
+impl<F: Fn(&Table, &Database) -> bool> Filter for With<F> {
+    fn filter(&self, table: &Table, database: &Database) -> bool {
+        self.0(table, database)
     }
 }
 
 impl<T> Filter for PhantomData<T> {
-    fn filter(&self, _: &Table, _: Context) -> bool {
+    fn filter(&self, _: &Table, _: &Database) -> bool {
         true
     }
 }
@@ -187,14 +156,14 @@ impl<T> Filter for PhantomData<T> {
 macro_rules! tuple {
     ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
         impl<$($t: Filter,)*> Filter for ($($t,)*) {
-            fn filter(&self, _table: &Table, _context: Context) -> bool {
-                true $(&& self.$i.filter(_table, _context.clone()))*
+            fn filter(&self, _table: &Table, _database: &Database) -> bool {
+                true $(&& self.$i.filter(_table, _database))*
             }
         }
 
         impl<$($t: Filter,)*> Filter for Any<($($t,)*)> {
-            fn filter(&self,_table: &Table, _context: Context) -> bool {
-                false $(|| self.0.$i.filter(_table, _context.clone()))*
+            fn filter(&self,_table: &Table, _database: &Database) -> bool {
+                false $(|| self.0.$i.filter(_table, _database))*
             }
         }
     };
