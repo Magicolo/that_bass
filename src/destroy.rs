@@ -6,7 +6,7 @@ use crate::{
     Database,
 };
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
-use std::{any::TypeId, collections::HashSet, num::NonZeroUsize, sync::atomic::Ordering};
+use std::{collections::HashSet, num::NonZeroUsize, sync::atomic::Ordering};
 
 pub struct Destroy<'d, F> {
     database: &'d Database,
@@ -23,7 +23,7 @@ pub struct Destroy<'d, F> {
 pub struct DestroyAll<'d, F = ()> {
     database: &'d Database,
     index: usize,
-    states: Vec<StateAll<'d>>,
+    tables: Vec<&'d Table>,
     filter: F,
 }
 
@@ -32,12 +32,6 @@ type Rows<'d> = Vec<(Key, &'d Slot, u32)>;
 struct State<'d> {
     table: &'d Table,
     rows: Rows<'d>,
-    types: Box<[TypeId]>,
-}
-
-struct StateAll<'d> {
-    table: &'d Table,
-    types: Box<[TypeId]>,
 }
 
 impl Database {
@@ -58,7 +52,7 @@ impl Database {
         DestroyAll {
             database: self,
             index: 0,
-            states: Vec::new(),
+            tables: Vec::new(),
             filter: (),
         }
     }
@@ -327,7 +321,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
 
         database
             .events()
-            .emit_destroy(&keys[head..head + count.get()], &state.types);
+            .emit_destroy(&keys[head..head + count.get()], state.table);
         drop(keys);
         // The `recycle` step can be done outside of the lock. This means that the keys within `state.rows` may be very briefly
         // non-reusable for other threads, which is fine.
@@ -358,7 +352,6 @@ impl<'d, F: Filter> Destroy<'d, F> {
                     Ok(State {
                         table,
                         rows: Vec::new(),
-                        types: table.types().collect(),
                     })
                 } else {
                     Err(table.index())
@@ -412,12 +405,12 @@ impl<'d, F> DestroyAll<'d, F> {
     }
 
     pub fn filter_with<G: Filter>(mut self, filter: G) -> DestroyAll<'d, (F, G)> {
-        self.states
-            .retain(|state| filter.filter(state.table, self.database.into()));
+        self.tables
+            .retain(|table| filter.filter(table, self.database.into()));
         DestroyAll {
             database: self.database,
             index: self.index,
-            states: self.states,
+            tables: self.tables,
             filter: (self.filter, filter),
         }
     }
@@ -428,38 +421,35 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
             if self.filter.filter(table, self.database.into()) {
-                self.states.push(StateAll {
-                    table,
-                    types: table.types().collect(),
-                });
+                self.tables.push(table);
             }
         }
 
         fold_swap(
-            &mut self.states,
+            &mut self.tables,
             0,
             (),
-            |sum, _, state| {
-                let keys = state.table.keys.try_upgradable_read().ok_or(sum)?;
-                Ok(sum + Self::resolve_table(keys, state, self.database))
+            |sum, _, table| {
+                let keys = table.keys.try_upgradable_read().ok_or(sum)?;
+                Ok(sum + Self::resolve_table(keys, table, self.database))
             },
-            |sum, _, state| {
-                let keys = state.table.keys.upgradable_read();
-                sum + Self::resolve_table(keys, state, self.database)
+            |sum, _, table| {
+                let keys = table.keys.upgradable_read();
+                sum + Self::resolve_table(keys, table, self.database)
             },
         )
     }
 
     fn resolve_table(
         keys: RwLockUpgradableReadGuard<Vec<Key>>,
-        state: &StateAll,
+        table: &Table,
         database: &Database,
     ) -> usize {
-        let count = state.table.count.swap(0, Ordering::AcqRel);
+        let count = table.count.swap(0, Ordering::AcqRel);
         let Some(count) = NonZeroUsize::new(count) else {
             return 0;
         };
-        for column in state.table.columns() {
+        for column in table.columns() {
             if column.meta().drop.0() {
                 let write = column.data().write();
                 unsafe { column.drop(0, count) };
@@ -470,9 +460,7 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
             }
         }
         database.keys().release(&keys[..count.get()]);
-        database
-            .events()
-            .emit_destroy(&keys[..count.get()], &state.types);
+        database.events().emit_destroy(&keys[..count.get()], table);
         return count.get();
     }
 }

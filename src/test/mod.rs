@@ -813,9 +813,9 @@ fn broadcast_on_add() -> Result<(), Error> {
     let database = Database::new();
     let mut create = database.create::<()>()?;
     let mut destroy = database.destroy_all();
-    let mut on_add1 = database.events().on_add().with_key().with_type::<A>();
-    let mut on_add2 = database.events().on_add().with_key().with_type::<A>();
-    let mut on_add3 = database.events().on_add().with_key().with_type::<A>();
+    let mut on_add1 = database.on_add().with_key().with_type::<A>();
+    let mut on_add2 = database.on_add().with_key().with_type::<A>();
+    let mut on_add3 = database.on_add().with_key().with_type::<A>();
     let mut keys2 = Vec::new();
     let mut keys3 = Vec::new();
 
@@ -824,7 +824,7 @@ fn broadcast_on_add() -> Result<(), Error> {
         let keys = create.defaults(i).to_vec();
         keys2.extend(keys.iter().copied());
         keys3.extend(keys.iter().copied());
-        let on_add4 = database.events().on_add().with_key().with_type::<A>();
+        let on_add4 = database.on_add().with_key().with_type::<A>();
         assert_eq!(create.resolve(), i);
         assert!(on_add1.next().is_none());
         let mut add = database.add::<A>()?;
@@ -833,7 +833,6 @@ fn broadcast_on_add() -> Result<(), Error> {
         assert!((&mut on_add1).map(|e| e.key).eq(keys.iter().copied()));
         assert!(on_add4.map(|e| e.key).eq(keys.iter().copied()));
         assert!(database
-            .events()
             .on_add()
             .with_key()
             .with_type::<A>()

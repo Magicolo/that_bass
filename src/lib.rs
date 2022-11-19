@@ -1,6 +1,6 @@
 pub mod core;
 pub mod create;
-pub mod defer;
+mod defer;
 pub mod destroy;
 pub mod event;
 pub mod filter;
@@ -11,6 +11,8 @@ pub mod resources;
 pub mod row;
 pub mod table;
 pub mod template;
+mod trace;
+
 #[cfg(test)]
 mod test;
 
@@ -29,6 +31,19 @@ use std::{
 use table::Tables;
 
 /*
+    TODO: Remove `RwLock` in `Tables` (and maybe `Keys`?):
+        - Readers of `Tables` take a "slow" guard to the tables pointer.
+        - The guard increment a count of readers stored in a `Mutex<usize>`.
+        - On drop, the guard decrements the counter.
+        - The guard also keeps the last pointer that was read locally.
+        - In the usual case, the guard reads the `AtomicPtr<Box<[Arc<Table>]>>` (can I remove an indirection?), compares it to its last
+        pointer read (simply replace if the last pointer is null) and it will be the same so a reference is safely given out.
+        - In the rare case, the last pointer differs from the current read, which means that the last pointer was stashed for later
+        freeing. Lookup the last pointer in the global stash of pointers and decrement the count associated with it. If the count
+        reaches 0, free the pointer and remove it from the stash. Most of this would also need to be done when the guard drops.
+        - The global stash would be a: `Mutex<HashMap<*mut (), (count: usize, drop: fn(*mut ()))>>`.
+        - Ensures that there is no `ABA` problem.
+        - `T` must be `Sync + Send`.
     TODO: Replace table locks with keys locks.
         - Allows to merge `Table` and `table::Inner` together.
         - No longer require a lock to inspect the `count` or `capacity`.

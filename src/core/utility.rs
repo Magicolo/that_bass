@@ -160,14 +160,23 @@ pub fn sorted_contains<T: Ord + 'static>(
 }
 
 #[inline]
-pub fn sorted_difference<T: Ord + 'static>(
+pub fn sorted_difference<T: Ord>(
+    left: impl IntoIterator<Item = T>,
+    right: impl IntoIterator<Item = T>,
+) -> impl Iterator<Item = T> {
+    sorted_difference_by(T::cmp, left, right)
+}
+
+#[inline]
+pub fn sorted_difference_by<T>(
+    mut compare: impl FnMut(&T, &T) -> Ordering,
     left: impl IntoIterator<Item = T>,
     right: impl IntoIterator<Item = T>,
 ) -> impl Iterator<Item = T> {
     let mut right_pair = (None, right.into_iter());
     left.into_iter().filter_map(move |left| {
         while let Some(right) = Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()) {
-            match left.cmp(&right) {
+            match compare(&left, &right) {
                 Ordering::Equal => return None,
                 Ordering::Less => {
                     right_pair.0 = Some(right);
@@ -181,7 +190,16 @@ pub fn sorted_difference<T: Ord + 'static>(
 }
 
 #[inline]
-pub fn sorted_symmetric_difference<T: Ord + 'static>(
+pub fn sorted_symmetric_difference<T: Ord>(
+    left: impl IntoIterator<Item = T>,
+    right: impl IntoIterator<Item = T>,
+) -> impl Iterator<Item = T> {
+    sorted_symmetric_difference_by(T::cmp, left, right)
+}
+
+#[inline]
+pub fn sorted_symmetric_difference_by<T>(
+    mut compare: impl FnMut(&T, &T) -> Ordering,
     left: impl IntoIterator<Item = T>,
     right: impl IntoIterator<Item = T>,
 ) -> impl Iterator<Item = T> {
@@ -190,7 +208,7 @@ pub fn sorted_symmetric_difference<T: Ord + 'static>(
     from_fn(move || loop {
         match Option::take(&mut left_pair.0).or_else(|| left_pair.1.next()) {
             Some(left) => match Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()) {
-                Some(right) => match left.cmp(&right) {
+                Some(right) => match compare(&left, &right) {
                     Ordering::Equal => continue,
                     Ordering::Less => {
                         right_pair.0 = Some(right);

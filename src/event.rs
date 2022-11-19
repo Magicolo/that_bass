@@ -1,11 +1,14 @@
-use crate::{key::Key, Datum};
+use crate::{
+    key::Key,
+    table::{Table, Tables},
+    Database, Datum,
+};
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::{
     any::TypeId,
     collections::VecDeque,
     marker::PhantomData,
     mem::{replace, ManuallyDrop},
-    num::NonZeroUsize,
     ops::ControlFlow::{self, *},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering::*},
 };
@@ -14,6 +17,43 @@ pub trait Event: Sized {
     fn declare(context: DeclareContext);
     fn process(raw: &Raw, context: ProcessContext<Self>) -> ControlFlow<()>;
 }
+
+// pub trait Eventz: Sized {
+//     fn declare(context: DeclareContext);
+//     fn process<C: Collect<Self>>(
+//         collect: &mut C,
+//         raws: &[Raw],
+//         keys: &[Key],
+//         tables: &Tables,
+//     ) -> ControlFlow<()>;
+// }
+
+// pub trait Collect<E> {
+//     fn one(&mut self, event: E) -> ControlFlow<()>;
+//     fn all<I: IntoIterator<Item = E>>(&mut self, events: I) -> ControlFlow<()>;
+// }
+
+// impl<E: Event> Collect<E> for Receive<'_, E> {
+//     #[inline]
+//     fn one(&mut self, event: E) -> ControlFlow<()> {
+//         self.buffer.push_back(event);
+//         if self.keep.apply(&mut self.buffer) {
+//             Continue(())
+//         } else {
+//             Break(())
+//         }
+//     }
+
+//     #[inline]
+//     fn all<I: IntoIterator<Item = E>>(&mut self, events: I) -> ControlFlow<()> {
+//         self.buffer.extend(events);
+//         if self.keep.apply(&mut self.buffer) {
+//             Continue(())
+//         } else {
+//             Break(())
+//         }
+//     }
+// }
 
 pub struct Events {
     ready: RwLock<Ready>,
@@ -25,7 +65,7 @@ pub struct Events {
 }
 
 pub struct Receive<'a, E: Event> {
-    events: &'a Events,
+    database: &'a Database,
     keep: Keep,
     buffer: VecDeque<E>,
     head: usize,
@@ -48,26 +88,26 @@ pub struct ProcessContext<'a, T> {
     items: &'a mut VecDeque<T>,
     keep: Keep,
     keys: &'a [Key],
-    types: &'a [TypeId],
+    tables: &'a Tables,
 }
 
 #[derive(Clone, Copy)]
 pub enum Raw {
     Create {
         keys: (u32, u32),
-        types: (u32, u32),
+        table: u32,
     },
     Destroy {
         keys: (u32, u32),
-        types: (u32, u32),
+        table: u32,
     },
     Modify {
         keys: (u32, u32),
-        types: (u32, u32, u32),
+        tables: (u32, u32),
     },
 }
 
-pub enum Channel {
+enum Channel {
     Create,
     Destroy,
     Modify,
@@ -88,7 +128,12 @@ struct Ready {
 struct Chunk {
     events: Vec<Raw>,
     keys: Vec<Key>,
-    types: Vec<TypeId>,
+}
+
+impl Database {
+    pub fn on<E: Event>(&self) -> Receive<E> {
+        Receive::new(self)
+    }
 }
 
 impl Events {
@@ -102,17 +147,73 @@ impl Events {
         }
     }
 
-    pub fn on<E: Event>(&self) -> Receive<E> {
-        Receive::new(self)
-    }
-
     pub fn open(&self) -> bool {
         self.open_with(Channel::Create)
             | self.open_with(Channel::Destroy)
             | self.open_with(Channel::Modify)
     }
 
-    pub fn open_with(&self, channel: Channel) -> bool {
+    pub fn close(&self) -> bool {
+        self.close_with(Channel::Create)
+            | self.close_with(Channel::Destroy)
+            | self.close_with(Channel::Modify)
+    }
+
+    #[inline]
+    pub(crate) fn emit_create(&self, keys: &[Key], table: &Table) {
+        let values = decompose(self.create.load(Relaxed));
+        if values.0 || values.1 == 0 {
+            return;
+        }
+
+        let mut pending = self.pending.lock();
+        let index = pending.keys.len();
+        pending.events.push(Raw::Create {
+            keys: (index as _, keys.len() as _),
+            table: table.index(),
+        });
+        if values.2 > 0 {
+            pending.keys.extend_from_slice(keys);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn emit_destroy(&self, keys: &[Key], table: &Table) {
+        let values = decompose(self.destroy.load(Relaxed));
+        if values.0 || values.1 == 0 {
+            return;
+        }
+
+        let mut pending = self.pending.lock();
+        let index = pending.keys.len();
+        pending.events.push(Raw::Destroy {
+            keys: (index as _, keys.len() as _),
+            table: table.index(),
+        });
+        if values.2 > 0 {
+            pending.keys.extend_from_slice(keys);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn emit_modify(&self, keys: &[Key], tables: (&Table, &Table)) {
+        let values = decompose(self.modify.load(Relaxed));
+        if values.0 || values.1 == 0 {
+            return;
+        }
+
+        let mut pending = self.pending.lock();
+        let index = pending.keys.len();
+        pending.events.push(Raw::Modify {
+            keys: (index as _, keys.len() as _),
+            tables: (tables.0.index(), tables.1.index()),
+        });
+        if values.2 > 0 {
+            pending.keys.extend_from_slice(keys);
+        }
+    }
+
+    fn open_with(&self, channel: Channel) -> bool {
         let value = recompose(false, u32::MAX, u32::MAX, u32::MAX);
         decompose(match channel {
             Channel::Create => self.create.fetch_and(value, Relaxed),
@@ -122,13 +223,7 @@ impl Events {
         .0 == true
     }
 
-    pub fn close(&self) -> bool {
-        self.close_with(Channel::Create)
-            | self.close_with(Channel::Destroy)
-            | self.close_with(Channel::Modify)
-    }
-
-    pub fn close_with(&self, channel: Channel) -> bool {
+    fn close_with(&self, channel: Channel) -> bool {
         let value = recompose(true, 0, 0, 0);
         decompose(match channel {
             Channel::Create => self.create.fetch_or(value, Relaxed),
@@ -136,70 +231,6 @@ impl Events {
             Channel::Modify => self.modify.fetch_or(value, Relaxed),
         })
         .0 == false
-    }
-
-    #[inline]
-    pub(crate) fn emit_create(&self, keys: &[Key], types: &[TypeId]) {
-        let values = decompose(self.create.load(Relaxed));
-        if values.0 || values.1 == 0 {
-            return;
-        }
-
-        let mut pending = self.pending.lock();
-        let indices = (pending.keys.len(), pending.types.len());
-        pending.events.push(Raw::Create {
-            keys: (indices.0 as _, keys.len() as _),
-            types: (indices.1 as _, types.len() as _),
-        });
-        if values.2 > 0 {
-            pending.keys.extend_from_slice(keys);
-        }
-        if values.3 > 0 {
-            pending.types.extend_from_slice(types);
-        }
-    }
-
-    #[inline]
-    pub(crate) fn emit_destroy(&self, keys: &[Key], types: &[TypeId]) {
-        let values = decompose(self.destroy.load(Relaxed));
-        if values.0 || values.1 == 0 {
-            return;
-        }
-
-        let mut pending = self.pending.lock();
-        let indices = (pending.keys.len(), pending.types.len());
-        pending.events.push(Raw::Destroy {
-            keys: (indices.0 as _, keys.len() as _),
-            types: (indices.1 as _, types.len() as _),
-        });
-        if values.2 > 0 {
-            pending.keys.extend_from_slice(keys);
-        }
-        if values.3 > 0 {
-            pending.types.extend_from_slice(types);
-        }
-    }
-
-    #[inline]
-    pub(crate) fn emit_modify(&self, keys: &[Key], add: &[TypeId], remove: &[TypeId]) {
-        let values = decompose(self.modify.load(Relaxed));
-        if values.0 || values.1 == 0 {
-            return;
-        }
-
-        let mut pending = self.pending.lock();
-        let indices = (pending.keys.len(), pending.types.len());
-        pending.events.push(Raw::Modify {
-            keys: (indices.0 as _, keys.len() as _),
-            types: (indices.1 as _, add.len() as _, remove.len() as _),
-        });
-        if values.2 > 0 {
-            pending.keys.extend_from_slice(keys);
-        }
-        if values.3 > 0 {
-            pending.types.extend_from_slice(add);
-            pending.types.extend_from_slice(remove);
-        }
     }
 }
 
@@ -256,8 +287,8 @@ impl<'a, T> ProcessContext<'a, T> {
     }
 
     #[inline]
-    pub fn types(&self, index: u32, count: u32) -> Option<&'a [TypeId]> {
-        self.types.get(index as usize..(index + count) as usize)
+    pub fn table(&self, index: u32) -> Option<&'a Table> {
+        self.tables.get(index as _).ok()
     }
 
     pub fn own(&mut self) -> ProcessContext<T> {
@@ -265,7 +296,7 @@ impl<'a, T> ProcessContext<'a, T> {
             items: self.items,
             keep: self.keep,
             keys: self.keys,
-            types: self.types,
+            tables: self.tables,
         }
     }
 }
@@ -285,25 +316,25 @@ impl<'a, E: Event> Receive<'a, E> {
 
     pub fn with<F: Event>(self) -> Receive<'a, F> {
         let receive = ManuallyDrop::new(self);
-        Self::remove_declare(receive.events);
-        Receive::<F>::add_declare(receive.events);
+        Self::remove_declare(receive.database.events());
+        Receive::<F>::add_declare(receive.database.events());
         Receive {
             keep: receive.keep,
-            events: receive.events,
+            database: receive.database,
             head: receive.head,
             buffer: VecDeque::new(),
             version: receive.version,
         }
     }
 
-    fn new(events: &'a Events) -> Self {
-        Self::add_declare(events);
-        let ready = events.ready.read();
+    fn new(database: &'a Database) -> Self {
+        Self::add_declare(database.events());
+        let ready = database.events().ready.read();
         ready.buffers.fetch_add(1, Relaxed);
         ready.seen.fetch_add(1, Relaxed);
         Receive {
             keep: Keep::All,
-            events,
+            database,
             head: ready.chunks.len(),
             buffer: VecDeque::new(),
             version: ready.version,
@@ -349,7 +380,7 @@ impl<'a, E: Event> Receive<'a, E> {
                 items: &mut self.buffer,
                 keep: self.keep,
                 keys: &chunk.keys,
-                types: &chunk.types,
+                tables: self.database.tables(),
             };
             for event in chunk.events.iter() {
                 E::process(event, context.own())?;
@@ -367,7 +398,7 @@ impl<E: Event> Iterator for Receive<'_, E> {
             return Some(event);
         }
 
-        let ready = self.events.ready.read();
+        let ready = self.database.events().ready.read();
         debug_assert!(self.version + 1 >= ready.version);
         if self.version < ready.version {
             self.head -= ready.head;
@@ -381,13 +412,13 @@ impl<E: Event> Iterator for Receive<'_, E> {
 
         drop(ready);
 
-        let mut ready = self.events.ready.write();
+        let mut ready = self.database.events().ready.write();
         let chunk = ready.last.take().unwrap_or_default();
         let chunk = {
             // The time spent with the `pending` lock is minimized as much as possible since it may block other threads
             // that hold database locks. The tradeoff here is that the `ready` write lock may be taken in vain when `pending`
             // has no new events.
-            let mut pending = self.events.pending.lock();
+            let mut pending = self.database.events().pending.lock();
             if pending.events.len() == 0 {
                 ready.last = Some(chunk);
                 return None;
@@ -401,12 +432,13 @@ impl<E: Event> Iterator for Receive<'_, E> {
         let seen = ready.seen.get_mut();
         if *seen >= buffers {
             *seen = 1;
-            if let Some(mut chunk) = ready.chunks.drain(..drain).max_by_key(|chunk| {
-                chunk.events.capacity() + chunk.keys.capacity() + chunk.types.capacity()
-            }) {
+            if let Some(mut chunk) = ready
+                .chunks
+                .drain(..drain)
+                .max_by_key(|chunk| chunk.events.capacity() + chunk.keys.capacity())
+            {
                 chunk.events.clear();
                 chunk.keys.clear();
-                chunk.types.clear();
                 ready.last = Some(chunk);
             }
             ready.version += 1;
@@ -424,8 +456,8 @@ impl<E: Event> Iterator for Receive<'_, E> {
 
 impl<E: Event> Drop for Receive<'_, E> {
     fn drop(&mut self) {
-        Self::remove_declare(self.events);
-        let ready = self.events.ready.read();
+        Self::remove_declare(self.database.events());
+        let ready = self.database.events().ready.read();
         ready.buffers.fetch_sub(1, Relaxed);
         if self.version == ready.version {
             ready.seen.fetch_sub(1, Relaxed);
@@ -477,6 +509,8 @@ const fn recompose(close: bool, receivers: u32, keys: u32, types: u32) -> u64 {
 }
 
 pub mod events {
+    use crate::core::utility::{sorted_difference, sorted_symmetric_difference_by};
+
     use super::*;
 
     #[derive(Clone, Copy, Debug)]
@@ -491,9 +525,19 @@ pub mod events {
         pub remove: usize,
     }
 
+    impl Type {
+        #[inline]
+        pub fn identifier(&self) -> TypeId {
+            match self {
+                Type::Add(identifier) => *identifier,
+                Type::Remove(identifier) => *identifier,
+            }
+        }
+    }
+
     macro_rules! with {
         ($n:ident, $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident) => {
-            impl Events {
+            impl Database {
                 pub fn $n(&self) -> Receive<$on> {
                     self.on()
                 }
@@ -553,7 +597,7 @@ pub mod events {
 
     macro_rules! event {
         (
-            $n:ident, $t:ty, $ts:ty, $d:ident,
+            $n:ident, $t:ty, $ts:ty, $d:ident, $table:ident,
             $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident,
             $raw:ident,
             $count:ident,
@@ -608,8 +652,8 @@ pub mod events {
 
                 #[inline]
                 fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
-                    let Some(types) = $count(types) else { return Continue(()); };
+                    let &Raw::$raw { keys, $table } = raw else { return Continue(()); };
+                    let Some(types) = $count(&context, $table) else { return Continue(()); };
                     context.one(Self {
                         keys: keys.1 as _,
                         types: types,
@@ -624,9 +668,9 @@ pub mod events {
 
                 #[inline]
                 fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
+                    let &Raw::$raw { keys, $table } = raw else { return Continue(()); };
                     let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(()); };
-                    let Some(types) = $count(types) else { return Continue(()); };
+                    let Some(types) = $count(&context, $table) else { return Continue(()); };
                     context.all(keys.iter().map(|&key| Self { key, types }))
                 }
             }
@@ -638,8 +682,8 @@ pub mod events {
 
                 #[inline]
                 fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
-                    let Some(types) = $types(&context, types) else { return Continue(()); };
+                    let &Raw::$raw { keys, $table } = raw else { return Continue(()); };
+                    let Some(types) = $types(&context, $table) else { return Continue(()); };
                     context.all(types.map(|r#type| Self {
                         keys: keys.1 as _,
                         r#type,
@@ -654,9 +698,9 @@ pub mod events {
 
                 #[inline]
                 fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
+                    let &Raw::$raw { keys, $table } = raw else { return Continue(()); };
                     let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(()); };
-                    let Some(types) = $types(&context, types) else { return Continue(()); };
+                    let Some(types) = $types(&context, $table) else { return Continue(()); };
                     for r#type in types {
                         context.all(keys.iter().map(move |&key| Self { key, r#type }))?;
                     }
@@ -671,8 +715,8 @@ pub mod events {
 
                 #[inline]
                 fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
-                    let Some(true) = $has::<D>(&context, types) else { return Continue(()); };
+                    let &Raw::$raw { keys, $table } = raw else { return Continue(()); };
+                    let Some(true) = $has::<D, _>(&context, $table) else { return Continue(()); };
                     context.one(Self {
                         keys: keys.1 as _,
                         _marker: PhantomData,
@@ -687,9 +731,9 @@ pub mod events {
 
                 #[inline]
                 fn process(raw: &Raw, mut context: ProcessContext<Self>) -> ControlFlow<()> {
-                    let &Raw::$raw { keys, types } = raw else { return Continue(()); };
+                    let &Raw::$raw { keys, $table } = raw else { return Continue(()); };
                     let Some(keys) = context.keys(keys.0, keys.1) else { return Continue(()); };
-                    let Some(true) = $has::<D>(&context, types) else { return Continue(()); };
+                    let Some(true) = $has::<D, _>(&context, $table) else { return Continue(()); };
                     context.all(keys.iter().map(|&key| Self {
                         key,
                         _marker: PhantomData,
@@ -700,29 +744,26 @@ pub mod events {
     }
 
     #[inline]
-    fn create_destroy_count(types: (u32, u32)) -> Option<usize> {
-        Some(types.1 as _)
+    fn create_destroy_count<T>(context: &ProcessContext<T>, table: u32) -> Option<usize> {
+        Some(context.table(table)?.columns().len())
     }
     #[inline]
-    fn create_destroy_types<'a>(
-        context: &ProcessContext<'a, impl Event>,
-        types: (u32, u32),
+    fn create_destroy_types<'a, T>(
+        context: &ProcessContext<'a, T>,
+        table: u32,
     ) -> Option<impl Iterator<Item = TypeId> + 'a> {
-        Some(context.types(types.0, types.1)?.iter().copied())
+        Some(context.table(table)?.types())
     }
     #[inline]
-    fn create_destroy_has<D: Datum>(
-        context: &ProcessContext<impl Event>,
-        types: (u32, u32),
-    ) -> Option<bool> {
-        let types = context.types(types.0, types.1)?;
-        Some(types.binary_search(&TypeId::of::<D>()).is_ok())
+    fn create_destroy_has<D: Datum, T>(context: &ProcessContext<T>, table: u32) -> Option<bool> {
+        Some(context.table(table)?.has::<D>())
     }
     event!(
         on_create,
         TypeId,
         usize,
         create,
+        table,
         OnCreate,
         OnCreateKey,
         OnCreateType,
@@ -739,6 +780,7 @@ pub mod events {
         TypeId,
         usize,
         destroy,
+        table,
         OnDestroy,
         OnDestroyKey,
         OnDestroyType,
@@ -752,43 +794,39 @@ pub mod events {
     );
 
     #[inline]
-    fn modify_count(types: (u32, u32, u32)) -> Option<Types> {
-        Some(Types {
-            add: types.1 as _,
-            remove: types.2 as _,
-        })
+    fn modify_count<T>(context: &ProcessContext<T>, tables: (u32, u32)) -> Option<Types> {
+        let (add, remove) =
+            modify_types(context, tables)?.fold((0, 0), |counts, r#type| match r#type {
+                Type::Add(_) => (counts.0 + 1, counts.1),
+                Type::Remove(_) => (counts.0, counts.1 + 1),
+            });
+        Some(Types { add, remove })
     }
     #[inline]
-    fn modify_types<'a>(
-        context: &ProcessContext<'a, impl Event>,
-        types: (u32, u32, u32),
+    fn modify_types<'a, T>(
+        context: &ProcessContext<'a, T>,
+        tables: (u32, u32),
     ) -> Option<impl Iterator<Item = Type> + 'a> {
-        let add = context.types(types.0, types.1)?;
-        let remove = context.types(types.0 + types.1, types.2)?;
-        Some(
-            add.iter()
-                .copied()
-                .map(Type::Add)
-                .chain(remove.iter().copied().map(Type::Remove)),
-        )
+        let source = context.table(tables.0)?;
+        let target = context.table(tables.1)?;
+        Some(sorted_symmetric_difference_by(
+            |left, right| Ord::cmp(&left.identifier(), &right.identifier()),
+            source.types().map(Type::Remove),
+            target.types().map(Type::Add),
+        ))
     }
     #[inline]
-    fn modify_has<D: Datum>(
-        context: &ProcessContext<impl Event>,
-        types: (u32, u32, u32),
-    ) -> Option<bool> {
-        let add = context.types(types.0, types.1)?;
-        let remove = context.types(types.0 + types.1, types.2)?;
-        Some(
-            add.binary_search(&TypeId::of::<D>()).is_ok()
-                || remove.binary_search(&TypeId::of::<D>()).is_ok(),
-        )
+    fn modify_has<D: Datum, T>(context: &ProcessContext<T>, tables: (u32, u32)) -> Option<bool> {
+        let source = context.table(tables.0)?;
+        let target = context.table(tables.1)?;
+        Some(source.has::<D>() != target.has::<D>())
     }
     event!(
         on_modify,
         Type,
         Types,
         modify,
+        tables,
         OnModify,
         OnModifyKey,
         OnModifyType,
@@ -802,29 +840,30 @@ pub mod events {
     );
 
     #[inline]
-    fn add_count(types: (u32, u32, u32)) -> Option<usize> {
-        Some(NonZeroUsize::new(types.1 as _)?.get())
+    fn add_count<T>(context: &ProcessContext<T>, tables: (u32, u32)) -> Option<usize> {
+        Some(add_types(context, tables)?.count())
     }
     #[inline]
-    fn add_types<'a>(
-        context: &ProcessContext<'a, impl Event>,
-        types: (u32, u32, u32),
+    fn add_types<'a, T>(
+        context: &ProcessContext<'a, T>,
+        tables: (u32, u32),
     ) -> Option<impl Iterator<Item = TypeId> + 'a> {
-        Some(context.types(types.0, types.1)?.iter().copied())
+        let source = context.table(tables.0)?;
+        let target = context.table(tables.1)?;
+        Some(sorted_difference(target.types(), source.types()))
     }
     #[inline]
-    fn add_has<D: Datum>(
-        context: &ProcessContext<impl Event>,
-        types: (u32, u32, u32),
-    ) -> Option<bool> {
-        let types = context.types(types.0, types.1)?;
-        Some(types.binary_search(&TypeId::of::<D>()).is_ok())
+    fn add_has<D: Datum, T>(context: &ProcessContext<T>, tables: (u32, u32)) -> Option<bool> {
+        let source = context.table(tables.0)?;
+        let target = context.table(tables.1)?;
+        Some(!source.has::<D>() && target.has::<D>())
     }
     event!(
         on_add,
         TypeId,
         usize,
         modify,
+        tables,
         OnAdd,
         OnAddKey,
         OnAddType,
@@ -838,29 +877,30 @@ pub mod events {
     );
 
     #[inline]
-    fn remove_count(types: (u32, u32, u32)) -> Option<usize> {
-        Some(NonZeroUsize::new(types.2 as _)?.get())
+    fn remove_count<T>(context: &ProcessContext<T>, tables: (u32, u32)) -> Option<usize> {
+        Some(remove_types(context, tables)?.count())
     }
     #[inline]
-    fn remove_types<'a>(
-        context: &ProcessContext<'a, impl Event>,
-        types: (u32, u32, u32),
+    fn remove_types<'a, T>(
+        context: &ProcessContext<'a, T>,
+        tables: (u32, u32),
     ) -> Option<impl Iterator<Item = TypeId> + 'a> {
-        Some(context.types(types.0 + types.1, types.2)?.iter().copied())
+        let source = context.table(tables.0)?;
+        let target = context.table(tables.1)?;
+        Some(sorted_difference(source.types(), target.types()))
     }
     #[inline]
-    fn remove_has<D: Datum>(
-        context: &ProcessContext<impl Event>,
-        types: (u32, u32, u32),
-    ) -> Option<bool> {
-        let types = context.types(types.0 + types.1, types.2)?;
-        Some(types.binary_search(&TypeId::of::<D>()).is_ok())
+    fn remove_has<D: Datum, T>(context: &ProcessContext<T>, tables: (u32, u32)) -> Option<bool> {
+        let source = context.table(tables.0)?;
+        let target = context.table(tables.1)?;
+        Some(source.has::<D>() && !target.has::<D>())
     }
     event!(
         on_remove,
         TypeId,
         usize,
         modify,
+        tables,
         OnRemove,
         OnRemoveKey,
         OnRemoveType,

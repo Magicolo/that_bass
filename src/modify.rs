@@ -1,7 +1,7 @@
 use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 
 use crate::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, sorted_difference, ONE},
+    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
     filter::Filter,
     key::{Key, Slot},
     table::{Column, Table},
@@ -9,7 +9,6 @@ use crate::{
     Database, Error,
 };
 use std::{
-    any::TypeId,
     collections::HashMap,
     marker::PhantomData,
     mem::MaybeUninit,
@@ -58,8 +57,6 @@ struct StateAll<T: Template> {
 struct Inner<T: Template> {
     state: T::State,
     apply: Box<[usize]>,
-    added: Box<[TypeId]>,
-    removed: Box<[TypeId]>,
 }
 
 struct ShareTable<A: Template, R: Template> {
@@ -573,8 +570,7 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
         // moving again before `on_remove` is done.
         database.events().emit_modify(
             &target[start..start + count.get()],
-            &state.inner.added,
-            &state.inner.removed,
+            (&state.source, &state.target),
         );
         count.get()
     }
@@ -636,16 +632,12 @@ impl<A: Template, R: Template> ShareTable<A, R> {
                 return Err(Error::TablesMustDiffer(source.index() as _));
             }
 
-            let added = sorted_difference(target.types(), source.types()).collect();
-            let removed = sorted_difference(source.types(), target.types()).collect();
             Ok(Self {
                 source,
                 target,
                 inner: Arc::new(Inner {
                     state,
                     apply: apply.into_boxed_slice(),
-                    added,
-                    removed,
                 }),
                 _marker: PhantomData,
             })
@@ -745,8 +737,7 @@ fn move_to<'d, 'a, V, A: Template>(
     // moving again before `emit` is done.
     database.events().emit_modify(
         &target_keys[start..start + count.get()],
-        &inner.added,
-        &inner.removed,
+        (source_table, target_table),
     );
     drop(target_keys);
     copies.clear();
