@@ -21,10 +21,9 @@ pub trait Event: Sized {
 // pub trait Eventz: Sized {
 //     fn declare(context: DeclareContext);
 //     fn process<C: Collect<Self>>(
-//         collect: &mut C,
-//         raws: &[Raw],
-//         keys: &[Key],
-//         tables: &Tables,
+//         sources: &[Raw],
+//         target: &mut C,
+//         context: ProcessContext { keys: &[Key], tables: &Tables, fn keys(...), fn table(...) }
 //     ) -> ControlFlow<()>;
 // }
 
