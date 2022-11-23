@@ -1,5 +1,5 @@
 use crate::{
-    key::Key,
+    key::{self, Key},
     table::Table,
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
     Database, Error,
@@ -12,9 +12,10 @@ use std::{
 
 pub struct Create<'d, T: Template> {
     database: &'d Database,
+    keys: key::Guard<'d>,
     state: Arc<T::State>,
     table: Arc<Table>,
-    keys: Vec<Key>,
+    reserved: Vec<Key>,
     templates: Vec<T>,
 }
 
@@ -24,9 +25,10 @@ impl Database {
     pub fn create<T: Template>(&self) -> Result<Create<T>, Error> {
         Share::<T>::from(self).map(|(inner, table)| Create {
             database: self,
+            keys: self.keys().guard(),
             state: inner,
             table,
-            keys: Vec::new(),
+            reserved: Vec::new(),
             templates: Vec::new(),
         })
     }
@@ -37,9 +39,9 @@ impl<'d, T: Template> Create<'d, T> {
     pub fn all<I: IntoIterator<Item = T>>(&mut self, templates: I) -> &[Key] {
         let start = self.templates.len();
         self.templates.extend(templates);
-        self.keys.resize(self.templates.len(), Key::NULL);
-        self.database.keys().reserve(&mut self.keys[start..]);
-        &self.keys[start..]
+        self.reserved.resize(self.templates.len(), Key::NULL);
+        self.keys.reserve(&mut self.reserved[start..]);
+        &self.reserved[start..]
     }
 
     #[inline]
@@ -66,8 +68,8 @@ impl<'d, T: Template> Create<'d, T> {
     #[inline]
     pub fn all_n<const N: usize>(&mut self, templates: [T; N]) -> [Key; N] {
         let mut keys = [Key::NULL; N];
-        self.database.keys().reserve(&mut keys);
-        self.keys.extend_from_slice(&keys);
+        self.keys.reserve(&mut keys);
+        self.reserved.extend_from_slice(&keys);
         self.templates.extend(templates);
         keys
     }
@@ -100,20 +102,20 @@ impl<'d, T: Template> Create<'d, T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.reserved.len()
     }
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (Key, &T)> {
-        self.keys.iter().copied().zip(self.templates.iter())
+        self.reserved.iter().copied().zip(self.templates.iter())
     }
 
     pub fn drain(&mut self) -> impl ExactSizeIterator<Item = (Key, T)> + '_ {
-        self.database.keys().recycle(self.keys.iter().copied());
-        self.keys.drain(..).zip(self.templates.drain(..))
+        self.keys.recycle_all(self.reserved.iter().copied());
+        self.reserved.drain(..).zip(self.templates.drain(..))
     }
 
     pub fn clear(&mut self) {
-        self.database.keys().recycle(self.keys.drain(..));
+        self.keys.recycle_all(self.reserved.drain(..));
         self.templates.clear();
     }
 }
@@ -124,8 +126,8 @@ impl<T: Template> Create<'_, T> {
     /// In order to prevent deadlocks, **do not call this method while using a `Query`** unless you can
     /// guarantee that there are no overlaps in table usage between this `Create` and the `Query`.
     pub fn resolve(&mut self) -> usize {
-        debug_assert_eq!(self.keys.len(), self.templates.len());
-        let Some(count) = NonZeroUsize::new(self.keys.len()) else {
+        debug_assert_eq!(self.reserved.len(), self.templates.len());
+        let Some(count) = NonZeroUsize::new(self.reserved.len()) else {
             return 0;
         };
 
@@ -148,7 +150,7 @@ impl<T: Template> Create<'_, T> {
             // SAFETY: The range `start..start + count` is reserved to this thread by `table::Inner::reserve` and will not be modified
             // until `table::Inner::commit` is called and as long as a table lock is held.
             let keys = unsafe { &mut *RwLockUpgradableReadGuard::rwlock(&keys).data_ptr() };
-            keys[start..start + count.get()].copy_from_slice(&self.keys);
+            keys[start..start + count.get()].copy_from_slice(&self.reserved);
         }
 
         /*
@@ -159,9 +161,8 @@ impl<T: Template> Create<'_, T> {
             - Calling `fetch_add` first means that another thread may query the created rows and observe that their key in invalid through
             `Database::keys().get()`. This is not acceptable and there doesn't seem to be a good fix.
         */
-        self.database
-            .keys()
-            .initialize(&keys, self.table.index(), start..start + count.get());
+        self.keys
+            .initialize_all(&keys, self.table.index(), start..start + count.get());
         self.table
             .count
             .fetch_add(count.get() as _, Ordering::Release);
@@ -169,8 +170,8 @@ impl<T: Template> Create<'_, T> {
             .events()
             .emit_create(&keys[start..start + count.get()], &self.table);
         drop(keys);
-        self.keys.clear();
-        debug_assert_eq!(self.keys.len(), 0);
+        self.reserved.clear();
+        debug_assert_eq!(self.reserved.len(), 0);
         debug_assert_eq!(self.templates.len(), 0);
         count.get()
     }

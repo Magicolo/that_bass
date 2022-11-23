@@ -3,7 +3,7 @@ use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
     filter::Filter,
-    key::{Key, Slot},
+    key::{self, Key},
     table::{Column, Table},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
     Database, Error,
@@ -19,10 +19,11 @@ use std::{
 /// Adds template `A` and removes template `R` to accumulated keys that satisfy the filter `F`.
 pub struct Modify<'d, A: Template, R: Template, F> {
     database: &'d Database,
+    keys: key::Guard<'d>,
     pairs: HashMap<Key, MaybeUninit<A>>, // A `HashMap` is used because the move algorithm assumes that rows will be unique.
     indices: Vec<usize>,                 // May be reordered (ex: by `fold_swap`).
-    states: Vec<Result<State<'d, A>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
-    pending: Vec<(Key, &'d Slot, A, u32)>,
+    states: Vec<Result<State<A>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
+    pending: Vec<(Key, A, u32)>,
     moves: Vec<(usize, usize, NonZeroUsize)>,
     copies: Vec<(usize, usize, NonZeroUsize)>,
     filter: F,
@@ -32,19 +33,18 @@ pub struct Modify<'d, A: Template, R: Template, F> {
 /// Adds template `A` and removes template `R` to all keys in tables that satisfy the filter `F`.
 pub struct ModifyAll<'d, A: Template, R: Template, F> {
     database: &'d Database,
+    keys: key::Guard<'d>,
     index: usize,
     states: Vec<StateAll<A>>,
     filter: F,
     _marker: PhantomData<fn(R)>,
 }
 
-type Rows<'d> = Vec<(Key, &'d Slot, u32)>;
-
-struct State<'d, T: Template> {
+struct State<T: Template> {
     source: Arc<Table>,
     target: Arc<Table>,
     inner: Arc<Inner<T>>,
-    rows: Rows<'d>,
+    rows: Vec<(Key, u32)>,
     templates: Vec<T>,
 }
 
@@ -71,6 +71,7 @@ impl Database {
         // Validate metas here (no duplicates allowed), but there is no need to store them.
         ShareMeta::<(A, R)>::from(self).map(|_| Modify {
             database: self,
+            keys: self.keys().guard(),
             pairs: HashMap::new(),
             pending: Vec::new(),
             indices: Vec::new(),
@@ -86,6 +87,7 @@ impl Database {
         // Validate metas here (no duplicates allowed), but there is no need to store them.
         ShareMeta::<(A, R)>::from(self).map(|_| ModifyAll {
             database: self,
+            keys: self.keys().guard(),
             index: 0,
             states: Vec::new(),
             filter: (),
@@ -148,7 +150,7 @@ impl<'d, A: Template, R: Template, F> Modify<'d, A, R, F> {
     pub fn filter_with<G: Filter>(mut self, filter: G) -> Modify<'d, A, R, (F, G)> {
         for state in self.states.iter_mut() {
             let index = match state {
-                Ok(state) if filter.filter(&state.source, self.database.into()) => None,
+                Ok(state) if filter.filter(&state.source, self.database) => None,
                 Ok(state) => Some(state.source.index()),
                 Err(_) => None,
             };
@@ -158,6 +160,7 @@ impl<'d, A: Template, R: Template, F> Modify<'d, A, R, F> {
         }
         Modify {
             database: self.database,
+            keys: self.keys,
             pairs: self.pairs,
             pending: self.pending,
             states: self.states,
@@ -197,12 +200,15 @@ impl<'d, A: Template, R: Template, F> Modify<'d, A, R, F> {
 
 impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
     pub fn resolve(&mut self) -> usize {
-        for (&key, template) in self.pairs.iter() {
-            if let Ok((slot, table)) = self.database.keys().get(key) {
+        for (key, template, result) in self
+            .keys
+            .get_all_with(self.pairs.iter().map(|pair| (*pair.0, pair.1)))
+        {
+            let template = unsafe { template.assume_init_read() };
+            if let Ok((_, table)) = result {
                 Self::sort(
                     key,
-                    slot,
-                    unsafe { template.assume_init_read() },
+                    template,
                     table,
                     &mut self.indices,
                     &mut self.states,
@@ -220,10 +226,9 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                 break;
             }
 
-            for (key, slot, template, table) in self.pending.drain(..) {
+            for (key, template, table) in self.pending.drain(..) {
                 Self::sort(
                     key,
-                    slot,
                     template,
                     table,
                     &mut self.indices,
@@ -233,6 +238,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                 );
             }
         }
+
         self.pairs.clear();
         debug_assert_eq!(self.pairs.len(), 0);
         debug_assert_eq!(self.moves.len(), 0);
@@ -258,6 +264,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                 if state.source.index() == state.target.index() {
                     let keys = state.source.keys.try_read().ok_or(sum)?;
                     let count = Self::resolve_set(
+                        &self.keys,
                         &state.source,
                         keys,
                         &state.inner.state,
@@ -271,6 +278,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                 let source = state.source.keys.try_upgradable_read().ok_or(sum)?;
                 let target = state.target.keys.try_upgradable_read().ok_or(sum)?;
                 let (low, high) = Self::retain(
+                    &self.keys,
                     &state.source,
                     &mut state.rows,
                     &mut state.templates,
@@ -282,6 +290,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                 };
                 move_to(
                     &self.database,
+                    &self.keys,
                     &self.pairs,
                     &mut state.templates,
                     moves,
@@ -301,6 +310,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                 if state.source.index() == state.target.index() {
                     let keys = state.source.keys.read();
                     let count = Self::resolve_set(
+                        &self.keys,
                         &state.source,
                         keys,
                         &state.inner.state,
@@ -316,7 +326,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                     // If locks are always taken in order (lower index first), there can not be a deadlock between move operations.
                     if state.source.index() < state.target.index() {
                         let source = state.source.keys.upgradable_read();
-                        let (low, high) = Self::retain(&state.source, &mut state.rows, &mut state.templates, pending);
+                        let (low, high) = Self::retain(&self.keys,&state.source, &mut state.rows, &mut state.templates, pending);
                         let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                             // Happens if all keys from this table have been moved or destroyed between here and the sorting.
                             return sum;
@@ -326,7 +336,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                     } else  {
                         let target = state.target.keys.upgradable_read();
                         let source = state.source.keys.upgradable_read();
-                        let (low, high) = Self::retain(&state.source, &mut state.rows, &mut state.templates, pending);
+                        let (low, high) = Self::retain(&self.keys,&state.source, &mut state.rows, &mut state.templates, pending);
                         let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                             // Happens if all keys from this table have been moved or destroyed between here and the sorting.
                             return sum;
@@ -335,6 +345,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                     };
                 move_to(
                     &self.database,
+                    &self.keys,
                     &self.pairs,
                     &mut state.templates,
                     moves,
@@ -351,21 +362,22 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
     }
 
     fn resolve_set(
+        keys: &key::Guard,
         table: &Table,
-        keys: RwLockReadGuard<Vec<Key>>,
+        table_keys: RwLockReadGuard<Vec<Key>>,
         state: &A::State,
-        rows: &mut Rows<'d>,
+        rows: &mut Vec<(Key, u32)>,
         templates: &mut Vec<A>,
-        pending: &mut Vec<(Key, &'d Slot, A, u32)>,
+        pending: &mut Vec<(Key, A, u32)>,
         apply: &[usize],
     ) -> usize {
-        Self::retain(table, rows, templates, pending);
+        Self::retain(keys, table, rows, templates, pending);
         let Some(count) = NonZeroUsize::new(rows.len()) else {
             return 0;
         };
         // The keys do not need to be moved, simply write the row data.
         lock(apply, table, |table| {
-            let context = ApplyContext::new(table, &keys);
+            let context = ApplyContext::new(table, &table_keys);
             for ((.., row), template) in rows.drain(..).zip(templates.drain(..)) {
                 debug_assert!(row < u32::MAX);
                 unsafe { template.apply(state, context.with(row as _)) };
@@ -376,11 +388,10 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
 
     fn sort(
         key: Key,
-        slot: &'d Slot,
         template: A,
         table: u32,
         indices: &mut Vec<usize>,
-        states: &mut Vec<Result<State<'d, A>, u32>>,
+        states: &mut Vec<Result<State<A>, u32>>,
         filter: &F,
         database: &'d Database,
     ) {
@@ -391,15 +402,13 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
             Ok(index) => index,
             Err(index) => {
                 let result = match ShareTable::<A, R>::from(table, database) {
-                    Ok((source, target, inner)) if filter.filter(&source, database.into()) => {
-                        Ok(State {
-                            source,
-                            target,
-                            inner,
-                            rows: Vec::new(),
-                            templates: Vec::new(),
-                        })
-                    }
+                    Ok((source, target, inner)) if filter.filter(&source, database) => Ok(State {
+                        source,
+                        target,
+                        inner,
+                        rows: Vec::new(),
+                        templates: Vec::new(),
+                    }),
                     _ => Err(table),
                 };
                 for i in indices.iter_mut().filter(|i| **i >= index) {
@@ -413,35 +422,38 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
             if state.rows.len() == 0 {
                 indices.push(index);
             }
-            state.rows.push((key, slot, u32::MAX));
+            state.rows.push((key, u32::MAX));
             state.templates.push(template);
         }
     }
 
     /// Call this while holding a lock on `table`.
     fn retain(
+        keys: &key::Guard,
         table: &Table,
-        rows: &mut Rows<'d>,
+        rows: &mut Vec<(Key, u32)>,
         templates: &mut Vec<A>,
-        pending: &mut Vec<(Key, &'d Slot, A, u32)>,
+        pending: &mut Vec<(Key, A, u32)>,
     ) -> (u32, u32) {
         let mut low = u32::MAX;
         let mut high = 0;
         for i in (0..rows.len()).rev() {
-            let (key, slot, row) = unsafe { get_unchecked_mut(rows, i) };
-            if let Ok(table_index) = slot.table(*key) {
-                if table_index == table.index() {
+            let (key, row) = unsafe { get_unchecked_mut(rows, i) };
+            match unsafe { keys.get_semi_checked(*key) } {
+                Ok((slot, table_index)) if table_index == table.index() => {
                     *row = slot.row();
                     low = low.min(*row);
                     high = high.max(*row);
-                } else {
-                    let (key, slot, _) = rows.swap_remove(i);
-                    let template = templates.swap_remove(i);
-                    pending.push((key, slot, template, table_index));
                 }
-            } else {
-                rows.swap_remove(i);
-                templates.swap_remove(i);
+                Ok((_, table_index)) => {
+                    let (key, _) = rows.swap_remove(i);
+                    let template = templates.swap_remove(i);
+                    pending.push((key, template, table_index));
+                }
+                Err(_) => {
+                    rows.swap_remove(i);
+                    templates.swap_remove(i);
+                }
             }
         }
         debug_assert_eq!(low <= high, rows.len() > 0);
@@ -456,9 +468,10 @@ impl<'d, A: Template, R: Template, F> ModifyAll<'d, A, R, F> {
 
     pub fn filter_with<G: Filter>(mut self, filter: G) -> ModifyAll<'d, A, R, (F, G)> {
         self.states
-            .retain(|state| filter.filter(&state.source, self.database.into()));
+            .retain(|state| filter.filter(&state.source, self.database));
         ModifyAll {
             database: self.database,
+            keys: self.keys,
             index: self.index,
             states: self.states,
             filter: (self.filter, filter),
@@ -480,7 +493,7 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
         while let Ok(table) = self.database.tables().get(self.index) {
             self.index += 1;
             match ShareTable::<A, R>::from(table.index(), self.database) {
-                Ok((source, target, inner)) if self.filter.filter(table, self.database.into()) => {
+                Ok((source, target, inner)) if self.filter.filter(table, self.database) => {
                     self.states.push(StateAll {
                         source,
                         target,
@@ -499,7 +512,15 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
                 if state.source.index() != state.target.index() {
                     let source = state.source.keys.try_write().ok_or(sum)?;
                     let target = state.target.keys.try_upgradable_read().ok_or(sum)?;
-                    Ok(sum + Self::resolve_tables(source, target, state, self.database, with))
+                    Ok(sum
+                        + Self::resolve_tables(
+                            source,
+                            target,
+                            state,
+                            self.database,
+                            &self.keys,
+                            with,
+                        ))
                 } else if set {
                     let keys = state.source.keys.try_read().ok_or(sum)?;
                     Ok(sum + Self::resolve_table(keys, state, with))
@@ -511,11 +532,25 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
                 if state.source.index() < state.target.index() {
                     let source = state.source.keys.write();
                     let target = state.target.keys.upgradable_read();
-                    sum + Self::resolve_tables(source, target, state, self.database, with)
+                    sum + Self::resolve_tables(
+                        source,
+                        target,
+                        state,
+                        self.database,
+                        &self.keys,
+                        with,
+                    )
                 } else if state.source.index() > state.target.index() {
                     let target = state.target.keys.upgradable_read();
                     let source = state.source.keys.write();
-                    sum + Self::resolve_tables(source, target, state, self.database, with)
+                    sum + Self::resolve_tables(
+                        source,
+                        target,
+                        state,
+                        self.database,
+                        &self.keys,
+                        with,
+                    )
                 } else if set {
                     let keys = state.source.keys.read();
                     sum + Self::resolve_table(keys, state, with)
@@ -531,6 +566,7 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
         target: RwLockUpgradableReadGuard<Vec<Key>>,
         state: &StateAll<A>,
         database: &Database,
+        keys: &key::Guard,
         mut with: impl FnMut() -> A,
     ) -> usize {
         let count = state.source.count.swap(0, Ordering::AcqRel);
@@ -545,7 +581,7 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
             &state.target,
             &[(0, start, count)],
             &[],
-            database,
+            keys,
         );
 
         // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
@@ -562,9 +598,7 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
         // has an index greater than the `table.count()`. As long as the slots remain in the source table, all accesses
         // to these keys will block at the table access and will correct their table index after they acquire the source
         // table lock.
-        database
-            .keys()
-            .initialize(&target, state.target.index(), start..start + count.get());
+        keys.initialize_all(&target, state.target.index(), start..start + count.get());
         drop(source);
         // Although `source` has been dropped, coherence with be maintained since the `target` lock prevent the keys
         // moving again before `on_remove` is done.
@@ -653,6 +687,7 @@ impl<A: Template, R: Template> ShareTable<A, R> {
 
 fn move_to<'d, 'a, V, A: Template>(
     database: &Database,
+    keys: &key::Guard,
     set: &HashMap<Key, V>,
     templates: &mut Vec<A>,
     moves: &mut Vec<(usize, usize, NonZeroUsize)>,
@@ -660,7 +695,7 @@ fn move_to<'d, 'a, V, A: Template>(
     (source_table, source_keys): (&Table, RwLockUpgradableReadGuard<'a, Vec<Key>>),
     (target_table, target_keys): (&Table, RwLockUpgradableReadGuard<'a, Vec<Key>>),
     (low, high, count): (u32, u32, NonZeroUsize),
-    rows: &mut Rows<'d>,
+    rows: &mut Vec<(Key, u32)>,
     inner: &Inner<A>,
 ) {
     let (start, target_keys) = target_table.reserve(target_keys, count);
@@ -713,7 +748,7 @@ fn move_to<'d, 'a, V, A: Template>(
         target_table,
         copies,
         moves,
-        database,
+        keys,
     );
 
     // Initialize missing data `T` in target.
@@ -728,10 +763,11 @@ fn move_to<'d, 'a, V, A: Template>(
     // has an index greater than the `table.count()`. As long as the slots remain in the source table, all accesses
     // to these keys will block at the table access and will correct their table index after they acquire the source
     // table lock.
-    for (i, (key, slot, _)) in rows.drain(..).enumerate() {
-        slot.initialize(key.generation(), target_table.index(), (start + i) as u32);
-    }
-
+    keys.initialize_all(
+        &target_keys,
+        target_table.index(),
+        start..start + count.get(),
+    );
     drop(source_keys);
     // Although `source_keys` has been dropped, coherence will be maintained since the `target` lock prevents the keys from
     // moving again before `emit` is done.
@@ -740,6 +776,7 @@ fn move_to<'d, 'a, V, A: Template>(
         (source_table, target_table),
     );
     drop(target_keys);
+    rows.clear();
     copies.clear();
     moves.clear();
 }
@@ -751,13 +788,11 @@ fn resolve_copy_move(
     target_table: &Table,
     copies: &[(usize, usize, NonZeroUsize)],
     moves: &[(usize, usize, NonZeroUsize)],
-    database: &Database,
+    keys: &key::Guard,
 ) {
     for &(source, target, count) in moves {
         source_keys.copy_within(source..source + count.get(), target);
-        database
-            .keys
-            .update(&source_keys, target..target + count.get());
+        keys.update_all(&source_keys, target..target + count.get());
     }
 
     let mut index = 0;
