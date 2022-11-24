@@ -231,18 +231,20 @@ fn destroy_all(database: &Database, keys: &[Key]) {
 #[test]
 fn create_adds_a_table() -> Result<(), Error> {
     let database = Database::new();
-    assert_eq!(database.tables().len(), 0);
+    let mut tables = database.tables().guard();
+    assert_eq!(tables.len(), 0);
     database.create::<()>()?;
-    assert_eq!(database.tables().len(), 1);
+    assert_eq!(tables.len(), 1);
     Ok(())
 }
 
 #[test]
 fn create_adds_a_table_with_datum() -> Result<(), Error> {
     let database = Database::new();
-    assert_eq!(database.tables().len(), 0);
+    let mut tables = database.tables().guard();
+    assert_eq!(tables.len(), 0);
     database.create::<A>()?;
-    let table = database.tables().get(0).unwrap();
+    let table = tables.get(0).unwrap();
     assert!(table.has::<A>());
     Ok(())
 }
@@ -250,9 +252,10 @@ fn create_adds_a_table_with_datum() -> Result<(), Error> {
 #[test]
 fn create_adds_a_table_with_data() -> Result<(), Error> {
     let database = Database::new();
-    assert_eq!(database.tables().len(), 0);
+    let mut tables = database.tables().guard();
+    assert_eq!(tables.len(), 0);
     database.create::<(A, B)>()?;
-    let table = database.tables().get(0).unwrap();
+    let table = tables.get(0).unwrap();
     assert!(table.has::<A>());
     assert!(table.has::<B>());
     Ok(())

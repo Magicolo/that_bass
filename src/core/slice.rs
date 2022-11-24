@@ -64,10 +64,10 @@ impl<'a, T> Guard<'a, T> {
         }
     }
 
-    pub fn update(&mut self) {
+    pub fn update(&mut self) -> bool {
         let data = self.0.data.load(Ordering::Relaxed);
         if self.1 == data {
-            return;
+            return false;
         }
         // The pointer has changed since last read.
         let key = Key(self.1);
@@ -82,6 +82,7 @@ impl<'a, T> Guard<'a, T> {
             }
         }
         self.1 = data;
+        true
     }
 }
 
@@ -109,48 +110,52 @@ impl<T: Clone> Guard<'_, T> {
 
     pub fn extend<I: IntoIterator<Item = T>>(&mut self, items: I) -> &[T] {
         let items: Box<[T]> = items.into_iter().collect();
-        self.try_extend_with(|_| Some(items))
+        self.extend_with(|_| items)
     }
 
     pub fn extend_with<F: FnOnce(&[T]) -> Box<[T]>>(&mut self, with: F) -> &[T] {
-        self.try_extend_with(|items| Some(with(items)))
-    }
-
-    pub fn try_extend_with<F: FnOnce(&[T]) -> Option<Box<[T]>>>(&mut self, with: F) -> &[T] {
         let count = self.0.count.lock();
         self.update();
-        let slice = unsafe { self.get_unchecked() };
-        if let Some(items) = with(slice) {
-            if items.len() > 0 {
-                let (new, offset) = unsafe { allocate_with(slice, &items) };
-                let old = self.0.data.swap(new, Ordering::Relaxed);
-                debug_assert_eq!(offset, self.0.offset);
-                debug_assert!(*count > 0);
-                if *count == 1 {
-                    unsafe { free::<T>(old) };
-                } else {
-                    let value = STASH.lock().insert(Key(old), (*count - 1, free::<T>));
-                    debug_assert!(value.is_none());
-                }
-                self.1 = new;
-            }
+        self.append(&with(unsafe { self.get_unchecked() }), *count)
+    }
+
+    pub fn extend_filter<F: FnOnce(&[T]) -> Option<Box<[T]>>>(&mut self, with: F) -> Option<&[T]> {
+        let count = self.0.count.lock();
+        self.update();
+        Some(self.append(&with(unsafe { self.get_unchecked() })?, *count))
+    }
+
+    pub fn push_with<F: FnOnce(&[T]) -> T>(&mut self, with: F) -> &[T] {
+        let count = self.0.count.lock();
+        self.update();
+        self.append(&[with(unsafe { self.get_unchecked() })], *count)
+    }
+
+    pub fn push_if_same(&mut self, item: T) -> Option<&[T]> {
+        let count = self.0.count.lock();
+        if self.update() {
+            None
+        } else {
+            Some(self.append(&[item], *count))
         }
-        unsafe { self.get_unchecked() }
     }
 
-    pub fn push_with<F: FnOnce(&[T]) -> Option<T>>(&mut self, with: F) -> &[T] {
+    pub fn push_filter<F: FnOnce(&[T]) -> Option<T>>(&mut self, with: F) -> Option<&[T]> {
         let count = self.0.count.lock();
         self.update();
-        let slice = unsafe { self.get_unchecked() };
-        if let Some(item) = with(slice) {
-            let (new, offset) = unsafe { allocate_with(slice, &[item]) };
+        Some(self.append(&[with(unsafe { self.get_unchecked() })?], *count))
+    }
+
+    fn append(&mut self, items: &[T], count: usize) -> &[T] {
+        if items.len() > 0 {
+            let (new, offset) = unsafe { allocate_with(self.get_unchecked(), items) };
             let old = self.0.data.swap(new, Ordering::Relaxed);
             debug_assert_eq!(offset, self.0.offset);
-            debug_assert!(*count > 0);
-            if *count == 1 {
+            debug_assert!(count > 0);
+            if count == 1 {
                 unsafe { free::<T>(old) };
             } else {
-                let value = STASH.lock().insert(Key(old), (*count - 1, free::<T>));
+                let value = STASH.lock().insert(Key(old), (count - 1, free::<T>));
                 debug_assert!(value.is_none());
             }
             self.1 = new;

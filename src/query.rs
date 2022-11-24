@@ -6,7 +6,7 @@ use crate::{
     filter::Filter,
     key::{self, Key},
     row::{Access, ChunkContext, InitializeContext, ItemContext, Row, ShareAccess},
-    table::Table,
+    table::{self, Table},
     Database, Error,
 };
 use std::{
@@ -14,21 +14,23 @@ use std::{
     marker::PhantomData,
     num::NonZeroUsize,
     ops::ControlFlow::{self, *},
+    sync::Arc,
 };
 
 pub struct Query<'d, R: Row, F = (), I = Item> {
     database: &'d Database,
     keys: key::Guard<'d>,
+    tables: table::Guard<'d>,
     index: usize,
-    indices: Vec<usize>,       // May be reordered (ex: by `fold_swap`).
-    states: Vec<State<'d, R>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
+    indices: Vec<u32>,     // May be reordered (ex: by `fold_swap`).
+    states: Vec<State<R>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
     filter: F,
     _marker: PhantomData<fn(I)>,
 }
 
 pub struct Split<'d, 'a, R: Row, I = Item> {
     keys: &'a key::Guard<'d>,
-    state: &'a State<'d, R>,
+    state: &'a State<R>,
     _marker: PhantomData<fn(I)>,
 }
 
@@ -40,12 +42,12 @@ pub struct By<V = ()> {
     pending: Vec<(Key, V, u32)>,
     sorted: Vec<Vec<(Key, V)>>,
     errors: Vec<(V, Error)>,
-    indices: Vec<usize>,
+    indices: Vec<u32>,
 }
 
-struct State<'d, R: Row> {
+struct State<R: Row> {
     state: R::State,
-    table: &'d Table,
+    table: Arc<Table>,
     locks: Box<[(usize, Access)]>,
 }
 
@@ -54,6 +56,7 @@ impl Database {
         ShareAccess::<R>::from(self.resources()).map(|_| Query {
             database: self,
             keys: self.keys().guard(),
+            tables: self.tables().guard(),
             indices: Vec::new(),
             states: Vec::new(),
             index: 0,
@@ -64,9 +67,9 @@ impl Database {
 }
 
 impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
-    pub fn tables(&mut self) -> impl FullIterator<Item = &'d Table> + '_ {
+    pub fn tables(&mut self) -> impl FullIterator<Item = &Table> {
         self.update();
-        self.states.iter().map(|state| state.table)
+        self.states.iter().map(|state| &*state.table)
     }
 
     pub fn split(&mut self) -> impl FullIterator<Item = Split<'d, '_, R, I>> {
@@ -82,6 +85,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         Query {
             database: self.database,
             keys: self.keys,
+            tables: self.tables,
             indices: self.indices.clone(),
             states: self
                 .states
@@ -109,12 +113,13 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
 
     pub fn filter_with<G: Filter>(mut self, filter: G) -> Query<'d, R, (F, G), I> {
         self.states
-            .retain(|state| filter.filter(state.table, self.database));
+            .retain(|state| filter.filter(&state.table, self.database));
         self.indices.clear();
-        self.indices.extend(0..self.states.len());
+        self.indices.extend(0..self.states.len() as u32);
         Query {
             database: self.database,
             keys: self.keys,
+            tables: self.tables,
             indices: self.indices,
             states: self.states,
             index: self.index,
@@ -124,16 +129,41 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
     }
 
     pub(crate) fn update(&mut self) {
-        while let Ok(table) = self.database.tables.get(self.index) {
+        while let Ok(table) = self.tables.get_shared(self.index) {
             self.index += 1;
-            let _ = self.try_add(table);
+
+            if self.filter.filter(&table, self.database) {
+                // Initialize first to save some work if it fails.
+                let Ok(state) = R::initialize(InitializeContext::new(&table)) else { continue; };
+                let mut locks = Vec::new();
+                let Ok(accesses) = ShareAccess::<R>::from(&self.database.resources) else { continue; };
+                for &access in accesses.iter() {
+                    if let Ok((index, column)) = table.column_with(access.identifier()) {
+                        // No need to lock columns of size 0.
+                        if column.meta().size > 0 {
+                            locks.push((index, access));
+                        }
+                    }
+                }
+                // The sorting of indices ensures that there cannot be a deadlock between `Rows` when locking multiple columns as long as this
+                // happens while holding at most 1 table lock.
+                locks.sort_unstable_by_key(|&(index, _)| index);
+
+                let index = self.states.len() as u32;
+                self.indices.push(index);
+                self.states.push(State {
+                    state,
+                    table,
+                    locks: locks.into_boxed_slice(),
+                });
+            }
         }
     }
 
     #[inline]
     fn try_guards<S>(
         state: S,
-        indices: &mut [usize],
+        indices: &mut [u32],
         states: &[State<R>],
         fold: impl FnMut(S, usize, &R::State, &Table, &[Key], NonZeroUsize) -> ControlFlow<S, S>,
     ) -> ControlFlow<S, S> {
@@ -141,7 +171,8 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             indices,
             state,
             (states, fold),
-            |state, (states, fold), &mut index| {
+            |state, (states, fold), index| {
+                let index = *index as usize;
                 let State {
                     state: row,
                     table,
@@ -158,7 +189,8 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     fold(state, index, row, table, &keys, count)
                 })
             },
-            |state, (states, fold), &mut index| {
+            |state, (states, fold), index| {
+                let index = *index as usize;
                 let State {
                     state: row,
                     table,
@@ -178,7 +210,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
     #[inline]
     fn guards<S>(
         state: S,
-        indices: &mut [usize],
+        indices: &mut [u32],
         states: &[State<R>],
         fold: impl FnMut(S, usize, &R::State, &Table, &[Key], NonZeroUsize) -> S,
     ) -> S {
@@ -187,11 +219,12 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
             state,
             (states, fold),
             |state, (states, fold), index| {
+                let index = *index as usize;
                 let State {
                     state: row,
                     table,
                     locks,
-                } = unsafe { get_unchecked(states, *index) };
+                } = unsafe { get_unchecked(states, index) };
                 let Some(keys) = table.keys.try_read() else {
                     return Err(state);
                 };
@@ -199,54 +232,25 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     return Ok(state);
                 };
                 try_lock(state, locks, table, |state, table| {
-                    fold(state, *index, row, table, &keys, count)
+                    fold(state, index, row, table, &keys, count)
                 })
             },
             |state, (states, fold), index| {
+                let index = *index as usize;
                 let State {
                     state: row,
                     table,
                     locks,
-                } = unsafe { get_unchecked(states, *index) };
+                } = unsafe { get_unchecked(states, index) };
                 let keys = table.keys.read();
                 let Some(count) = NonZeroUsize::new(table.count()) else {
                     return state;
                 };
                 lock(locks, table, |table| {
-                    fold(state, *index, row, table, &keys, count)
+                    fold(state, index, row, table, &keys, count)
                 })
             },
         )
-    }
-
-    fn try_add(&mut self, table: &'d Table) -> Result<(), Error> {
-        if self.filter.filter(table, self.database) {
-            // Initialize first to save some work if it fails.
-            let state = R::initialize(InitializeContext::new(table))?;
-            let mut locks = Vec::new();
-            for &access in ShareAccess::<R>::from(&self.database.resources)?.iter() {
-                if let Ok((index, column)) = table.column_with(access.identifier()) {
-                    // No need to lock columns of size 0.
-                    if column.meta().size > 0 {
-                        locks.push((index, access));
-                    }
-                }
-            }
-            // The sorting of indices ensures that there cannot be a deadlock between `Rows` when locking multiple columns as long as this
-            // happens while holding at most 1 table lock.
-            locks.sort_unstable_by_key(|&(index, _)| index);
-
-            let index = self.states.len();
-            self.indices.push(index);
-            self.states.push(State {
-                state,
-                table,
-                locks: locks.into_boxed_slice(),
-            });
-            Ok(())
-        } else {
-            Err(Error::TableDoesNotMatchFilter(table.index() as _))
-        }
     }
 }
 
@@ -254,6 +258,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     pub fn chunk(self) -> Query<'d, R, F, Chunk> {
         Query {
             database: self.database,
+            tables: self.tables,
             keys: self.keys,
             indices: self.indices,
             states: self.states,
@@ -321,7 +326,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                     // Fold was interrupted. Clean up.
                     by.pending.clear();
                     for index in by.indices.drain(..) {
-                        unsafe { get_unchecked_mut(&mut by.sorted, index) }.clear();
+                        unsafe { get_unchecked_mut(&mut by.sorted, index as usize) }.clear();
                     }
                     break state;
                 }
@@ -490,12 +495,18 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         mut state: S,
         fold: &mut G,
     ) -> S {
-        for (key, value) in by.pairs.drain(..) {
-            match self.keys.get(key) {
+        for (key, value, result) in self.keys.get_all_with(by.pairs.drain(..)) {
+            match result {
                 Ok((_, table)) => {
-                    match self.sort(&mut by.sorted, &mut by.indices, key, value, table) {
-                        Some((value, error)) => state = fold(state, value, Err(error)),
-                        None => {}
+                    if let Some((value, error)) = Self::sort(
+                        &self.states,
+                        &mut by.sorted,
+                        &mut by.indices,
+                        key,
+                        value,
+                        table,
+                    ) {
+                        state = fold(state, value, Err(error))
                     }
                 }
                 Err(error) => state = fold(state, value, Err(dbg!(error))),
@@ -503,7 +514,14 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         for (key, value, table) in by.pending.drain(..) {
-            match self.sort(&mut by.sorted, &mut by.indices, key, value, table) {
+            match Self::sort(
+                &self.states,
+                &mut by.sorted,
+                &mut by.indices,
+                key,
+                value,
+                table,
+            ) {
                 Some((value, error)) => state = fold(state, value, Err(error)),
                 None => {}
             }
@@ -555,9 +573,15 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         for (key, value) in by.pairs.drain(..) {
             match self.keys.get(key) {
                 Ok((_, table)) => {
-                    match self.sort(&mut by.sorted, &mut by.indices, key, value, table) {
-                        Some((value, error)) => state = fold(state, value, Err(error))?,
-                        None => {}
+                    if let Some((value, error)) = Self::sort(
+                        &self.states,
+                        &mut by.sorted,
+                        &mut by.indices,
+                        key,
+                        value,
+                        table,
+                    ) {
+                        state = fold(state, value, Err(error))?
                     }
                 }
                 Err(error) => state = fold(state, value, Err(error))?,
@@ -565,7 +589,14 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         for (key, value, table) in by.pending.drain(..) {
-            match self.sort(&mut by.sorted, &mut by.indices, key, value, table) {
+            match Self::sort(
+                &self.states,
+                &mut by.sorted,
+                &mut by.indices,
+                key,
+                value,
+                table,
+            ) {
                 Some((value, error)) => state = fold(state, value, Err(error))?,
                 None => {}
             }
@@ -610,18 +641,18 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     /// Sorts keys by state index such that table locks can be used for (hopefully) more than one key at a time.
     #[inline]
     fn sort<V>(
-        &mut self,
+        states: &[State<R>],
         slots: &mut Vec<Vec<(Key, V)>>,
-        indices: &mut Vec<usize>,
+        indices: &mut Vec<u32>,
         key: Key,
         value: V,
         table: u32,
     ) -> Option<(V, Error)> {
-        match find_state(&mut self.states, table) {
+        match find_state(states, table) {
             Some((index, _)) => {
                 let slots = unsafe { get_unchecked_mut(slots, index) };
                 if slots.len() == 0 {
-                    indices.push(index);
+                    indices.push(index as _);
                 }
                 slots.push((key, value));
                 None
@@ -635,6 +666,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
     pub fn item(self) -> Query<'d, R, F, Item> {
         Query {
             database: self.database,
+            tables: self.tables,
             keys: self.keys,
             indices: self.indices,
             states: self.states,
@@ -701,8 +733,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Chunk> {
 
 impl<'d, R: Row, I> Split<'d, '_, R, I> {
     #[inline]
-    pub const fn table(&self) -> &'d Table {
-        self.state.table
+    pub fn table(&self) -> &Table {
+        &self.state.table
     }
 }
 
@@ -931,10 +963,7 @@ impl<V> Default for By<V> {
 }
 
 #[inline]
-fn find_state<'d, 'a, R: Row>(
-    states: &'a [State<'d, R>],
-    table: u32,
-) -> Option<(usize, &'a State<'d, R>)> {
+fn find_state<'a, R: Row>(states: &'a [State<R>], table: u32) -> Option<(usize, &'a State<R>)> {
     match states.binary_search_by_key(&table, |state| state.table.index()) {
         Ok(index) => Some((index, unsafe { get_unchecked(states, index) })),
         Err(_) => None,

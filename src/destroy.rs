@@ -2,18 +2,22 @@ use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, ONE},
     filter::Filter,
     key::{self, Key},
-    table::Table,
+    table::{self, Table},
     Database,
 };
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
-use std::{collections::HashSet, num::NonZeroUsize, sync::atomic::Ordering};
+use std::{
+    collections::HashSet,
+    num::NonZeroUsize,
+    sync::{atomic::Ordering, Arc},
+};
 
 pub struct Destroy<'d, F> {
     database: &'d Database,
     keys: key::Guard<'d>,
     set: HashSet<Key>, // A `HashSet` is used because the move algorithm assumes that rows will be unique.
     indices: Vec<usize>, // May be reordered (ex: by `fold_swap`).
-    states: Vec<Result<State<'d>, u32>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
+    states: Vec<Result<State, u32>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
     pending: Vec<(Key, u32)>,
     moves: Vec<(usize, usize, NonZeroUsize)>,
     drops: Vec<(usize, NonZeroUsize)>,
@@ -23,14 +27,15 @@ pub struct Destroy<'d, F> {
 /// Destroys all keys in tables that satisfy the filter `F`.
 pub struct DestroyAll<'d, F = ()> {
     database: &'d Database,
+    tables: table::Guard<'d>,
     keys: key::Guard<'d>,
     index: usize,
-    tables: Vec<&'d Table>,
+    states: Vec<Arc<Table>>,
     filter: F,
 }
 
-struct State<'d> {
-    table: &'d Table,
+struct State {
+    table: Arc<Table>,
     rows: Vec<(Key, u32)>,
 }
 
@@ -52,9 +57,10 @@ impl Database {
     pub fn destroy_all(&self) -> DestroyAll<'_, ()> {
         DestroyAll {
             database: self,
+            tables: self.tables().guard(),
             keys: self.keys().guard(),
             index: 0,
-            tables: Vec::new(),
+            states: Vec::new(),
             filter: (),
         }
     }
@@ -177,12 +183,13 @@ impl<'d, F: Filter> Destroy<'d, F> {
                 let result = unsafe { get_unchecked_mut(states, *index) };
                 let state = unsafe { result.as_mut().unwrap_unchecked() };
                 let keys = state.table.keys.try_upgradable_read().ok_or(sum)?;
-                let (low, high) = Self::retain(&self.keys, state.table, &mut state.rows, pending);
+                let (low, high) = Self::retain(&self.keys, &state.table, &mut state.rows, pending);
                 let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                     return Ok(sum);
                 };
                 Self::resolve_rows(
-                    state,
+                    &state.table,
+                    &mut state.rows,
                     &self.set,
                     moves,
                     drops,
@@ -197,12 +204,13 @@ impl<'d, F: Filter> Destroy<'d, F> {
                 let result = unsafe { get_unchecked_mut(states, *index) };
                 let state = unsafe { result.as_mut().unwrap_unchecked() };
                 let keys = state.table.keys.upgradable_read();
-                let (low, high) = Self::retain(&self.keys, state.table, &mut state.rows, pending);
+                let (low, high) = Self::retain(&self.keys, &state.table, &mut state.rows, pending);
                 let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                     return sum;
                 };
                 Self::resolve_rows(
-                    state,
+                    &state.table,
+                    &mut state.rows,
                     &self.set,
                     moves,
                     drops,
@@ -217,13 +225,14 @@ impl<'d, F: Filter> Destroy<'d, F> {
     }
 
     fn resolve_rows(
-        state: &mut State<'d>,
+        table: &Table,
+        rows: &mut Vec<(Key, u32)>,
         set: &HashSet<Key>,
         moves: &mut Vec<(usize, usize, NonZeroUsize)>,
         drops: &mut Vec<(usize, NonZeroUsize)>,
-        table_keys: RwLockUpgradableReadGuard<'d, Vec<Key>>,
+        table_keys: RwLockUpgradableReadGuard<Vec<Key>>,
         (low, high, count): (u32, u32, NonZeroUsize),
-        database: &'d Database,
+        database: &Database,
         keys: &key::Guard,
     ) {
         debug_assert_eq!(moves.len(), 0);
@@ -231,7 +240,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         debug_assert!(low <= high);
 
         let range = low..high + 1;
-        let head = state.table.count.load(Ordering::Acquire) - count.get();
+        let head = table.count.load(Ordering::Acquire) - count.get();
         let (low, high) = (range.start as usize, range.end as usize);
         if range.len() == count.get() {
             // The destroy range is contiguous.
@@ -246,7 +255,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         } else {
             let mut index = 0;
             let mut cursor = head;
-            while let Some(&(.., row)) = state.rows.get(index) {
+            while let Some(&(.., row)) = rows.get(index) {
                 let row = row as usize;
                 let mut previous = row;
                 let start = index;
@@ -262,7 +271,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
                     cursor += 1;
                 } else {
                     // Try to batch contiguous drops.
-                    while let Some(&(.., current)) = state.rows.get(index) {
+                    while let Some(&(.., current)) = rows.get(index) {
                         let current = current as usize;
                         if previous + 1 == current {
                             previous = current;
@@ -285,7 +294,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             }
             keys.update_all(&table_keys, target..target + count.get());
         }
-        for column in state.table.columns() {
+        for column in table.columns() {
             if column.meta().size > 0 {
                 for &(source, target, count) in moves.iter() {
                     // Since a write lock is held on `keys`, no need to take a column lock.
@@ -295,10 +304,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         }
         // Must be decremented under the write lock to ensure that no query can observe the `table.count` with the invalid rows
         // at the end.
-        state
-            .table
-            .count
-            .fetch_sub(count.get() as _, Ordering::Release);
+        table.count.fetch_sub(count.get() as _, Ordering::Release);
 
         // Keep an upgradable lock to prevent `create/add` operations to resolve during these last steps.
         let table_keys = RwLockWriteGuard::downgrade_to_upgradable(table_keys);
@@ -308,7 +314,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         // - Note that it is possible to observe an inconsistency between `query.has` and `query.find` for a short time since
         // `query.has` does not do the additionnal validation.
         keys.release_all(&table_keys[head..head + count.get()]);
-        for column in state.table.columns() {
+        for column in table.columns() {
             if column.meta().drop.0() {
                 for &(index, count) in drops.iter() {
                     // Since the `table.count` has been decremented under the `keys` write lock was held, these indices are only observable
@@ -321,11 +327,11 @@ impl<'d, F: Filter> Destroy<'d, F> {
 
         database
             .events()
-            .emit_destroy(&table_keys[head..head + count.get()], state.table);
+            .emit_destroy(&table_keys[head..head + count.get()], table);
         drop(table_keys);
-        // The `recycle` step can be done outside of the lock. This means that the keys within `state.rows` may be very briefly
+        // The `recycle` step can be done outside of the lock. This means that the keys within `rows` may be very briefly
         // non-reusable for other threads, which is fine.
-        keys.recycle_all(state.rows.drain(..).map(|(key, ..)| key));
+        keys.recycle_all(rows.drain(..).map(|(key, ..)| key));
         moves.clear();
         drops.clear();
     }
@@ -334,7 +340,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         key: Key,
         table: u32,
         indices: &mut Vec<usize>,
-        states: &mut Vec<Result<State<'d>, u32>>,
+        states: &mut Vec<Result<State, u32>>,
         filter: &F,
         database: &'d Database,
     ) {
@@ -344,14 +350,15 @@ impl<'d, F: Filter> Destroy<'d, F> {
         }) {
             Ok(index) => index,
             Err(index) => {
-                let table = unsafe { database.tables.get_unchecked(table as _) };
-                let result = if filter.filter(table, database) {
-                    Ok(State {
+                let mut tables = database.tables().guard();
+                // let table = unsafe { tables.get_shared(table as _) };
+                let result = match tables.get_shared(table as _) {
+                    Ok(table) if filter.filter(&table, database) => Ok(State {
                         table,
                         rows: Vec::new(),
-                    })
-                } else {
-                    Err(table.index())
+                    }),
+                    Ok(table) => Err(table.index()),
+                    Err(_) => unreachable!("Provided table index must be in range."),
                 };
                 for i in indices.iter_mut().filter(|i| **i >= index) {
                     *i += 1;
@@ -405,13 +412,14 @@ impl<'d, F> DestroyAll<'d, F> {
     }
 
     pub fn filter_with<G: Filter>(mut self, filter: G) -> DestroyAll<'d, (F, G)> {
-        self.tables
+        self.states
             .retain(|table| filter.filter(table, self.database));
         DestroyAll {
             database: self.database,
+            tables: self.tables,
             keys: self.keys,
             index: self.index,
-            tables: self.tables,
+            states: self.states,
             filter: (self.filter, filter),
         }
     }
@@ -419,15 +427,15 @@ impl<'d, F> DestroyAll<'d, F> {
 
 impl<'d, F: Filter> DestroyAll<'d, F> {
     pub fn resolve(&mut self) -> usize {
-        while let Ok(table) = self.database.tables().get(self.index) {
+        while let Ok(table) = self.tables.get_shared(self.index) {
             self.index += 1;
-            if self.filter.filter(table, self.database) {
-                self.tables.push(table);
+            if self.filter.filter(&table, self.database) {
+                self.states.push(table);
             }
         }
 
         fold_swap(
-            &mut self.tables,
+            &mut self.states,
             0,
             &mut self.keys,
             |sum, keys, table| {

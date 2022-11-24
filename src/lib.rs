@@ -221,8 +221,8 @@ pub enum Error {
     MissingTable(usize),
     ReadWriteConflict(TypeId),
     WriteWriteConflict(TypeId),
-    TablesMustDiffer(usize),
-    TableDoesNotMatchFilter(usize),
+    TablesMustDiffer(u32),
+    TableDoesNotMatchFilter(u32),
 }
 
 impl fmt::Display for Error {

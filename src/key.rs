@@ -30,6 +30,9 @@ pub struct Keys {
     slots: Slice<Arc<Slot>>,
 }
 
+#[derive(Clone)]
+pub struct Guard<'a>(&'a Keys, slice::Guard<'a, Arc<Slot>>);
+
 impl Key {
     pub const NULL: Self = Self {
         index: u32::MAX,
@@ -65,9 +68,6 @@ impl Key {
         self.generation < u32::MAX
     }
 }
-
-#[derive(Clone)]
-pub struct Guard<'a>(&'a Keys, slice::Guard<'a, Arc<Slot>>);
 
 impl<'a> Guard<'a> {
     pub fn update(&mut self) {

@@ -1,6 +1,7 @@
 use crate::{
     core::{
         iterate::FullIterator,
+        slice::{self, Slice},
         utility::{get_unchecked, sorted_contains},
     },
     key::Key,
@@ -9,7 +10,6 @@ use crate::{
 use parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
     any::TypeId,
-    cell::UnsafeCell,
     num::NonZeroUsize,
     ptr::NonNull,
     slice::from_raw_parts_mut,
@@ -33,12 +33,11 @@ pub struct Column {
 }
 
 pub struct Tables {
-    /// The lock is separated from the tables because once a table is dereferenced from the `tables` vector, it no longer
-    /// needs to have its lifetime tied to a `RwLockReadGuard`. This is safe because the addresses of tables are stable
-    /// (guaranteed by the `Arc` indirection) and no mutable references are ever given out.
-    lock: RwLock<()>,
-    tables: UnsafeCell<Vec<Arc<Table>>>,
+    tables: Slice<Arc<Table>>,
 }
+
+#[derive(Clone)]
+pub struct Guard<'a>(slice::Guard<'a, Arc<Table>>);
 
 impl Column {
     pub(crate) fn new(meta: &'static Meta, capacity: usize) -> Self {
@@ -177,108 +176,184 @@ impl Column {
     }
 }
 
-impl Tables {
-    pub const fn new() -> Self {
-        Self {
-            lock: RwLock::new(()),
-            tables: UnsafeCell::new(Vec::new()),
+impl Guard<'_> {
+    pub fn update(&mut self) {
+        self.0.update();
+    }
+
+    #[inline]
+    pub fn len(&mut self) -> usize {
+        self.0.get().len()
+    }
+
+    #[inline]
+    pub fn iter(&mut self) -> impl FullIterator<Item = &Table> {
+        self.0.get().iter().map(|table| &**table)
+    }
+
+    #[inline]
+    pub fn get(&mut self, index: usize) -> Result<&Table, Error> {
+        match self.0.get().get(index) {
+            Some(table) => Ok(&**table),
+            None => Err(Error::MissingTable(index)),
         }
     }
 
     #[inline]
-    pub fn len(&self) -> usize {
-        let read = self.lock.read();
-        let count = unsafe { &*self.tables.get() }.len();
-        drop(read);
-        count
-    }
-
-    #[inline]
-    pub fn iter(&self) -> impl FullIterator<Item = &Table> {
-        let read = self.lock.read();
-        unsafe { &**self.tables.get() }.iter().map(move |table| {
-            // Keep the read guard alive.
-            // SAFETY: Consumer of the iterator may keep references to tables since their address is guaranteed to remain stable.
-            let _read = &read;
-            &**table
-        })
-    }
-
-    #[inline]
-    pub fn get(&self, index: usize) -> Result<&Table, Error> {
-        let read = self.lock.read();
-        let table = &**unsafe { &**self.tables.get() }
-            .get(index)
-            .ok_or(Error::MissingTable(index))?;
-        drop(read);
-        Ok(table)
-    }
-
-    #[inline]
     pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
-        let read = self.lock.read();
-        let tables = &**self.tables.get();
-        debug_assert!(index < tables.len());
-        let table = &**get_unchecked(tables, index);
-        drop(read);
-        table
+        get_unchecked(self.0.get_unchecked(), index)
     }
 
     #[inline]
-    pub fn get_shared(&self, index: usize) -> Result<Arc<Table>, Error> {
-        let read = self.lock.read();
-        let table = unsafe { &**self.tables.get() }
-            .get(index)
-            .ok_or(Error::MissingTable(index))?
-            .clone();
-        drop(read);
-        Ok(table)
+    pub fn get_shared(&mut self, index: usize) -> Result<Arc<Table>, Error> {
+        match self.0.get().get(index) {
+            Some(table) => Ok(table.clone()),
+            None => Err(Error::MissingTable(index)),
+        }
     }
 
     #[inline]
     pub unsafe fn get_shared_unchecked(&self, index: usize) -> Arc<Table> {
-        let read = self.lock.read();
-        let tables = &**self.tables.get();
-        debug_assert!(index < tables.len());
-        let table = get_unchecked(tables, index).clone();
-        drop(read);
-        table
+        get_unchecked(self.0.get_unchecked(), index).clone()
     }
 
     /// `metas` must be sorted by `meta.identifier()` and must be deduplicated.
     #[inline]
-    pub(crate) fn find_or_add(&self, metas: &[&'static Meta]) -> Arc<Table> {
+    pub(crate) fn find_or_add(&mut self, metas: &[&'static Meta]) -> Arc<Table> {
         // Verifies that `metas` is sorted and deduplicated.
         debug_assert!(metas
             .windows(2)
             .all(|metas| metas[0].identifier() < metas[1].identifier()));
 
-        let upgrade = self.lock.upgradable_read();
-        // SAFETY: `self.tables` can be read since an upgrade lock is held. The lock will need to be upgraded
-        // before any mutation to `self.tables`.
-        let tables = unsafe { &mut *self.tables.get() };
-        for table in tables.iter() {
-            if table.is_all(metas.iter().map(|meta| meta.identifier())) {
-                return table.clone();
+        let mut index = 0;
+        loop {
+            let tables = self.0.get();
+            for table in &tables[index..] {
+                if table.is_all(metas.iter().map(|meta| meta.identifier())) {
+                    return table.clone();
+                }
+            }
+            index = tables.len();
+
+            let columns = metas.iter().map(|&meta| Column::new(meta, 0)).collect();
+            let table = Arc::new(Table {
+                index: index as _,
+                count: 0.into(),
+                keys: RwLock::new(Vec::new()),
+                columns,
+            });
+            if let Some(_) = self.0.push_if_same(table.clone()) {
+                break table;
             }
         }
-
-        let columns = metas.iter().map(|&meta| Column::new(meta, 0)).collect();
-        let index = tables.len();
-        let table = Arc::new(Table {
-            index: index as _,
-            count: 0.into(),
-            keys: RwLock::new(Vec::new()),
-            columns,
-        });
-        let write = RwLockUpgradableReadGuard::upgrade(upgrade);
-        // SAFETY: The lock has been upgraded so `self.tables` can be mutated.
-        tables.push(table.clone());
-        let read = RwLockWriteGuard::downgrade(write);
-        let table = unsafe { get_unchecked(tables, index) }.clone();
-        drop(read);
-        table
     }
+}
+
+impl Tables {
+    pub fn new() -> Self {
+        Self {
+            tables: Slice::new(&[]),
+        }
+    }
+
+    pub fn guard(&self) -> Guard {
+        Guard(self.tables.guard())
+    }
+
+    // #[inline]
+    // pub fn len(&self) -> usize {
+    //     let read = self.lock.read();
+    //     let count = unsafe { &*self.tables.get() }.len();
+    //     drop(read);
+    //     count
+    // }
+
+    // #[inline]
+    // pub fn iter(&self) -> impl FullIterator<Item = &Table> {
+    //     let read = self.lock.read();
+    //     unsafe { &**self.tables.get() }.iter().map(move |table| {
+    //         // Keep the read guard alive.
+    //         // SAFETY: Consumer of the iterator may keep references to tables since their address is guaranteed to remain stable.
+    //         let _read = &read;
+    //         &**table
+    //     })
+    // }
+
+    // #[inline]
+    // pub fn get(&self, index: usize) -> Result<&Table, Error> {
+    //     let read = self.lock.read();
+    //     let table = &**unsafe { &**self.tables.get() }
+    //         .get(index)
+    //         .ok_or(Error::MissingTable(index))?;
+    //     drop(read);
+    //     Ok(table)
+    // }
+
+    // #[inline]
+    // pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
+    //     let read = self.lock.read();
+    //     let tables = &**self.tables.get();
+    //     debug_assert!(index < tables.len());
+    //     let table = &**get_unchecked(tables, index);
+    //     drop(read);
+    //     table
+    // }
+
+    // #[inline]
+    // pub fn get_shared(&self, index: usize) -> Result<Arc<Table>, Error> {
+    //     let read = self.lock.read();
+    //     let table = unsafe { &**self.tables.get() }
+    //         .get(index)
+    //         .ok_or(Error::MissingTable(index))?
+    //         .clone();
+    //     drop(read);
+    //     Ok(table)
+    // }
+
+    // #[inline]
+    // pub unsafe fn get_shared_unchecked(&self, index: usize) -> Arc<Table> {
+    //     let read = self.lock.read();
+    //     let tables = &**self.tables.get();
+    //     debug_assert!(index < tables.len());
+    //     let table = get_unchecked(tables, index).clone();
+    //     drop(read);
+    //     table
+    // }
+
+    // /// `metas` must be sorted by `meta.identifier()` and must be deduplicated.
+    // #[inline]
+    // pub(crate) fn find_or_add(&self, metas: &[&'static Meta]) -> Arc<Table> {
+    //     // Verifies that `metas` is sorted and deduplicated.
+    //     debug_assert!(metas
+    //         .windows(2)
+    //         .all(|metas| metas[0].identifier() < metas[1].identifier()));
+
+    //     let upgrade = self.lock.upgradable_read();
+    //     // SAFETY: `self.tables` can be read since an upgrade lock is held. The lock will need to be upgraded
+    //     // before any mutation to `self.tables`.
+    //     let tables = unsafe { &mut *self.tables.get() };
+    //     for table in tables.iter() {
+    //         if table.is_all(metas.iter().map(|meta| meta.identifier())) {
+    //             return table.clone();
+    //         }
+    //     }
+
+    //     let columns = metas.iter().map(|&meta| Column::new(meta, 0)).collect();
+    //     let index = tables.len();
+    //     let table = Arc::new(Table {
+    //         index: index as _,
+    //         count: 0.into(),
+    //         keys: RwLock::new(Vec::new()),
+    //         columns,
+    //     });
+    //     let write = RwLockUpgradableReadGuard::upgrade(upgrade);
+    //     // SAFETY: The lock has been upgraded so `self.tables` can be mutated.
+    //     tables.push(table.clone());
+    //     let read = RwLockWriteGuard::downgrade(write);
+    //     let table = unsafe { get_unchecked(tables, index) }.clone();
+    //     drop(read);
+    //     table
+    // }
 }
 
 unsafe impl Send for Tables {}

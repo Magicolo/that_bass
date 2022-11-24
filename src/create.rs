@@ -187,7 +187,7 @@ impl<T: Template> Share<T> {
     pub fn from(database: &Database) -> Result<(Arc<T::State>, Arc<Table>), Error> {
         let metas = ShareMeta::<T>::from(database)?;
         let share = database.resources().try_global(|| {
-            let table = database.tables().find_or_add(&metas);
+            let table = database.tables().guard().find_or_add(&metas);
             let context = InitializeContext::new(&table);
             let state = T::initialize(context)?;
             let inner = Arc::new(state);

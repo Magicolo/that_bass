@@ -4,7 +4,7 @@ use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
     filter::Filter,
     key::{self, Key},
-    table::{Column, Table},
+    table::{self, Column, Table},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
     Database, Error,
 };
@@ -33,6 +33,7 @@ pub struct Modify<'d, A: Template, R: Template, F> {
 /// Adds template `A` and removes template `R` to all keys in tables that satisfy the filter `F`.
 pub struct ModifyAll<'d, A: Template, R: Template, F> {
     database: &'d Database,
+    tables: table::Guard<'d>,
     keys: key::Guard<'d>,
     index: usize,
     states: Vec<StateAll<A>>,
@@ -87,6 +88,7 @@ impl Database {
         // Validate metas here (no duplicates allowed), but there is no need to store them.
         ShareMeta::<(A, R)>::from(self).map(|_| ModifyAll {
             database: self,
+            tables: self.tables().guard(),
             keys: self.keys().guard(),
             index: 0,
             states: Vec::new(),
@@ -471,6 +473,7 @@ impl<'d, A: Template, R: Template, F> ModifyAll<'d, A, R, F> {
             .retain(|state| filter.filter(&state.source, self.database));
         ModifyAll {
             database: self.database,
+            tables: self.tables,
             keys: self.keys,
             index: self.index,
             states: self.states,
@@ -490,7 +493,7 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
     }
 
     pub fn resolve_with<G: FnMut() -> A>(&mut self, set: bool, with: G) -> usize {
-        while let Ok(table) = self.database.tables().get(self.index) {
+        while let Ok(table) = self.tables.get(self.index) {
             self.index += 1;
             match ShareTable::<A, R>::from(table.index(), self.database) {
                 Ok((source, target, inner)) if self.filter.filter(table, self.database) => {
@@ -637,7 +640,8 @@ impl<A: Template, R: Template> ShareTable<A, R> {
         let adds = ShareMeta::<A>::from(database)?;
         let removes = ShareMeta::<R>::from(database)?;
         let share = database.resources().try_global_with(table, || {
-            let source = database.tables().get_shared(table as usize)?;
+            let mut tables = database.tables().guard();
+            let source = tables.get_shared(table as usize)?;
             let target = {
                 let mut metas = adds.to_vec();
                 for meta in source.metas() {
@@ -650,7 +654,7 @@ impl<A: Template, R: Template> ShareTable<A, R> {
                         (Ok(_), Err(_)) | (Err(_), Ok(_)) => {}
                     }
                 }
-                database.tables().find_or_add(&metas)
+                tables.find_or_add(&metas)
             };
             let state = A::initialize(InitializeContext::new(&target))?;
 
