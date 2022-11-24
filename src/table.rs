@@ -5,7 +5,7 @@ use crate::{
         utility::{get_unchecked, sorted_contains},
     },
     key::Key,
-    Datum, Error, Meta,
+    Database, Datum, Error, Meta,
 };
 use parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
@@ -32,12 +32,19 @@ pub struct Column {
     data: RwLock<NonNull<()>>,
 }
 
-pub struct Tables {
+pub(crate) struct State {
     tables: Slice<Arc<Table>>,
 }
 
 #[derive(Clone)]
-pub struct Guard<'a>(slice::Guard<'a, Arc<Table>>);
+pub struct Tables<'a>(slice::Guard<'a, Arc<Table>>);
+
+impl Database {
+    #[inline]
+    pub fn tables(&self) -> Tables {
+        Tables(self.tables.tables.guard())
+    }
+}
 
 impl Column {
     pub(crate) fn new(meta: &'static Meta, capacity: usize) -> Self {
@@ -176,7 +183,7 @@ impl Column {
     }
 }
 
-impl Guard<'_> {
+impl Tables<'_> {
     pub fn update(&mut self) {
         self.0.update();
     }
@@ -249,115 +256,13 @@ impl Guard<'_> {
     }
 }
 
-impl Tables {
+impl State {
     pub fn new() -> Self {
         Self {
             tables: Slice::new(&[]),
         }
     }
-
-    pub fn guard(&self) -> Guard {
-        Guard(self.tables.guard())
-    }
-
-    // #[inline]
-    // pub fn len(&self) -> usize {
-    //     let read = self.lock.read();
-    //     let count = unsafe { &*self.tables.get() }.len();
-    //     drop(read);
-    //     count
-    // }
-
-    // #[inline]
-    // pub fn iter(&self) -> impl FullIterator<Item = &Table> {
-    //     let read = self.lock.read();
-    //     unsafe { &**self.tables.get() }.iter().map(move |table| {
-    //         // Keep the read guard alive.
-    //         // SAFETY: Consumer of the iterator may keep references to tables since their address is guaranteed to remain stable.
-    //         let _read = &read;
-    //         &**table
-    //     })
-    // }
-
-    // #[inline]
-    // pub fn get(&self, index: usize) -> Result<&Table, Error> {
-    //     let read = self.lock.read();
-    //     let table = &**unsafe { &**self.tables.get() }
-    //         .get(index)
-    //         .ok_or(Error::MissingTable(index))?;
-    //     drop(read);
-    //     Ok(table)
-    // }
-
-    // #[inline]
-    // pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
-    //     let read = self.lock.read();
-    //     let tables = &**self.tables.get();
-    //     debug_assert!(index < tables.len());
-    //     let table = &**get_unchecked(tables, index);
-    //     drop(read);
-    //     table
-    // }
-
-    // #[inline]
-    // pub fn get_shared(&self, index: usize) -> Result<Arc<Table>, Error> {
-    //     let read = self.lock.read();
-    //     let table = unsafe { &**self.tables.get() }
-    //         .get(index)
-    //         .ok_or(Error::MissingTable(index))?
-    //         .clone();
-    //     drop(read);
-    //     Ok(table)
-    // }
-
-    // #[inline]
-    // pub unsafe fn get_shared_unchecked(&self, index: usize) -> Arc<Table> {
-    //     let read = self.lock.read();
-    //     let tables = &**self.tables.get();
-    //     debug_assert!(index < tables.len());
-    //     let table = get_unchecked(tables, index).clone();
-    //     drop(read);
-    //     table
-    // }
-
-    // /// `metas` must be sorted by `meta.identifier()` and must be deduplicated.
-    // #[inline]
-    // pub(crate) fn find_or_add(&self, metas: &[&'static Meta]) -> Arc<Table> {
-    //     // Verifies that `metas` is sorted and deduplicated.
-    //     debug_assert!(metas
-    //         .windows(2)
-    //         .all(|metas| metas[0].identifier() < metas[1].identifier()));
-
-    //     let upgrade = self.lock.upgradable_read();
-    //     // SAFETY: `self.tables` can be read since an upgrade lock is held. The lock will need to be upgraded
-    //     // before any mutation to `self.tables`.
-    //     let tables = unsafe { &mut *self.tables.get() };
-    //     for table in tables.iter() {
-    //         if table.is_all(metas.iter().map(|meta| meta.identifier())) {
-    //             return table.clone();
-    //         }
-    //     }
-
-    //     let columns = metas.iter().map(|&meta| Column::new(meta, 0)).collect();
-    //     let index = tables.len();
-    //     let table = Arc::new(Table {
-    //         index: index as _,
-    //         count: 0.into(),
-    //         keys: RwLock::new(Vec::new()),
-    //         columns,
-    //     });
-    //     let write = RwLockUpgradableReadGuard::upgrade(upgrade);
-    //     // SAFETY: The lock has been upgraded so `self.tables` can be mutated.
-    //     tables.push(table.clone());
-    //     let read = RwLockWriteGuard::downgrade(write);
-    //     let table = unsafe { get_unchecked(tables, index) }.clone();
-    //     drop(read);
-    //     table
-    // }
 }
-
-unsafe impl Send for Tables {}
-unsafe impl Sync for Tables {}
 
 impl Table {
     #[inline]

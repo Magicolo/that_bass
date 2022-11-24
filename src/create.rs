@@ -1,5 +1,5 @@
 use crate::{
-    key::{self, Key},
+    key::{Key, Keys},
     table::Table,
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
     Database, Error,
@@ -12,7 +12,7 @@ use std::{
 
 pub struct Create<'d, T: Template> {
     database: &'d Database,
-    keys: key::Guard<'d>,
+    keys: Keys<'d>,
     state: Arc<T::State>,
     table: Arc<Table>,
     reserved: Vec<Key>,
@@ -25,7 +25,7 @@ impl Database {
     pub fn create<T: Template>(&self) -> Result<Create<T>, Error> {
         Share::<T>::from(self).map(|(inner, table)| Create {
             database: self,
-            keys: self.keys().guard(),
+            keys: self.keys(),
             state: inner,
             table,
             reserved: Vec::new(),
@@ -187,7 +187,7 @@ impl<T: Template> Share<T> {
     pub fn from(database: &Database) -> Result<(Arc<T::State>, Arc<Table>), Error> {
         let metas = ShareMeta::<T>::from(database)?;
         let share = database.resources().try_global(|| {
-            let table = database.tables().guard().find_or_add(&metas);
+            let table = database.tables().find_or_add(&metas);
             let context = InitializeContext::new(&table);
             let state = T::initialize(context)?;
             let inner = Arc::new(state);

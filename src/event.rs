@@ -1,7 +1,7 @@
 use crate::{
     core::utility::get_unchecked,
     key::Key,
-    table::{self, Table},
+    table::{Table, Tables},
     Database, Datum,
 };
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
@@ -66,7 +66,7 @@ pub struct Events {
 
 pub struct Receive<'d, E: Event> {
     events: &'d Events,
-    tables: table::Guard<'d>,
+    tables: Tables<'d>,
     keep: Keep,
     buffer: VecDeque<E>,
     head: usize,
@@ -89,7 +89,7 @@ pub struct ProcessContext<'a, T> {
     items: &'a mut VecDeque<T>,
     keep: Keep,
     keys: &'a [Key],
-    tables: &'a table::Guard<'a>,
+    tables: &'a Tables<'a>,
 }
 
 #[derive(Clone, Copy)]
@@ -132,6 +132,11 @@ struct Chunk {
 }
 
 impl Database {
+    #[inline]
+    pub const fn events(&self) -> &Events {
+        &self.events
+    }
+
     pub fn on<E: Event>(&self) -> Receive<E> {
         Receive::new(self)
     }
@@ -160,7 +165,6 @@ impl Events {
             | self.close_with(Channel::Modify)
     }
 
-    #[inline]
     pub(crate) fn emit_create(&self, keys: &[Key], table: &Table) {
         let values = decompose(self.create.load(Relaxed));
         if values.0 || values.1 == 0 {
@@ -178,7 +182,6 @@ impl Events {
         }
     }
 
-    #[inline]
     pub(crate) fn emit_destroy(&self, keys: &[Key], table: &Table) {
         let values = decompose(self.destroy.load(Relaxed));
         if values.0 || values.1 == 0 {
@@ -196,7 +199,6 @@ impl Events {
         }
     }
 
-    #[inline]
     pub(crate) fn emit_modify(&self, keys: &[Key], tables: (&Table, &Table)) {
         let values = decompose(self.modify.load(Relaxed));
         if values.0 || values.1 == 0 {
@@ -337,7 +339,7 @@ impl<'a, E: Event> Receive<'a, E> {
         Receive {
             keep: Keep::All,
             events: database.events(),
-            tables: database.tables().guard(),
+            tables: database.tables(),
             head: ready.chunks.len(),
             buffer: VecDeque::new(),
             version: ready.version,

@@ -4,9 +4,9 @@ use crate::{
         utility::{fold_swap, get_unchecked, get_unchecked_mut, try_fold_swap},
     },
     filter::Filter,
-    key::{self, Key},
+    key::{Key, Keys},
     row::{Access, ChunkContext, InitializeContext, ItemContext, Row, ShareAccess},
-    table::{self, Table},
+    table::{Table, Tables},
     Database, Error,
 };
 use std::{
@@ -19,8 +19,8 @@ use std::{
 
 pub struct Query<'d, R: Row, F = (), I = Item> {
     database: &'d Database,
-    keys: key::Guard<'d>,
-    tables: table::Guard<'d>,
+    keys: Keys<'d>,
+    tables: Tables<'d>,
     index: usize,
     indices: Vec<u32>,     // May be reordered (ex: by `fold_swap`).
     states: Vec<State<R>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
@@ -29,7 +29,7 @@ pub struct Query<'d, R: Row, F = (), I = Item> {
 }
 
 pub struct Split<'d, 'a, R: Row, I = Item> {
-    keys: &'a key::Guard<'d>,
+    keys: &'a Keys<'d>,
     state: &'a State<R>,
     _marker: PhantomData<fn(I)>,
 }
@@ -55,8 +55,8 @@ impl Database {
     pub fn query<R: Row>(&self) -> Result<Query<'_, R>, Error> {
         ShareAccess::<R>::from(self.resources()).map(|_| Query {
             database: self,
-            keys: self.keys().guard(),
-            tables: self.tables().guard(),
+            keys: self.keys(),
+            tables: self.tables(),
             indices: Vec::new(),
             states: Vec::new(),
             index: 0,

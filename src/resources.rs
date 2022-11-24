@@ -10,7 +10,7 @@ use std::{
     thread::{self, ThreadId},
 };
 
-use crate::Error;
+use crate::{Database, Error};
 
 pub struct Resources {
     locals: Mutex<Locals>,
@@ -22,6 +22,13 @@ pub struct Global<T>(Arc<RwLock<T>>);
 
 struct Locals<K = (ThreadId, TypeId)>(HashMap<K, Result<Rc<dyn Any>, Error>>);
 struct Globals<K = TypeId>(HashMap<K, Result<Arc<dyn Any + Sync + Send>, Error>>);
+
+impl Database {
+    #[inline]
+    pub const fn resources(&self) -> &Resources {
+        &self.resources
+    }
+}
 
 impl<K: Eq + Hash> Globals<K> {
     pub fn new() -> Self {

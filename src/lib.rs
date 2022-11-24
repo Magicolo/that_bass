@@ -17,9 +17,7 @@ mod trace;
 mod test;
 
 use event::Events;
-pub use that_base_derive::{Datum, Filter, Template};
-
-use key::{Key, Keys};
+use key::Key;
 use resources::Resources;
 use std::{
     any::{type_name, TypeId},
@@ -28,7 +26,7 @@ use std::{
     num::NonZeroUsize,
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
 };
-use table::Tables;
+pub use that_base_derive::{Datum, Filter, Template};
 
 /*
     TODO: Remove `RwLock` in `Tables` (and maybe `Keys`?):
@@ -233,8 +231,8 @@ impl fmt::Display for Error {
 impl error::Error for Error {}
 
 pub struct Database {
-    keys: Keys,
-    tables: Tables,
+    keys: key::State,
+    tables: table::State,
     resources: Resources,
     events: Events,
 }
@@ -296,31 +294,11 @@ impl Meta {
 impl Database {
     pub fn new() -> Self {
         Database {
-            keys: Keys::new(),
-            tables: Tables::new(),
+            keys: key::State::new(),
+            tables: table::State::new(),
             resources: Resources::new(),
             events: Events::new(),
         }
-    }
-
-    #[inline]
-    pub const fn keys(&self) -> &Keys {
-        &self.keys
-    }
-
-    #[inline]
-    pub fn tables(&self) -> &Tables {
-        &self.tables
-    }
-
-    #[inline]
-    pub const fn resources(&self) -> &Resources {
-        &self.resources
-    }
-
-    #[inline]
-    pub const fn events(&self) -> &Events {
-        &self.events
     }
 }
 

@@ -3,8 +3,8 @@ use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
     filter::Filter,
-    key::{self, Key},
-    table::{self, Column, Table},
+    key::{Key, Keys},
+    table::{Column, Table, Tables},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
     Database, Error,
 };
@@ -19,7 +19,7 @@ use std::{
 /// Adds template `A` and removes template `R` to accumulated keys that satisfy the filter `F`.
 pub struct Modify<'d, A: Template, R: Template, F> {
     database: &'d Database,
-    keys: key::Guard<'d>,
+    keys: Keys<'d>,
     pairs: HashMap<Key, MaybeUninit<A>>, // A `HashMap` is used because the move algorithm assumes that rows will be unique.
     indices: Vec<usize>,                 // May be reordered (ex: by `fold_swap`).
     states: Vec<Result<State<A>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
@@ -33,8 +33,8 @@ pub struct Modify<'d, A: Template, R: Template, F> {
 /// Adds template `A` and removes template `R` to all keys in tables that satisfy the filter `F`.
 pub struct ModifyAll<'d, A: Template, R: Template, F> {
     database: &'d Database,
-    tables: table::Guard<'d>,
-    keys: key::Guard<'d>,
+    tables: Tables<'d>,
+    keys: Keys<'d>,
     index: usize,
     states: Vec<StateAll<A>>,
     filter: F,
@@ -72,7 +72,7 @@ impl Database {
         // Validate metas here (no duplicates allowed), but there is no need to store them.
         ShareMeta::<(A, R)>::from(self).map(|_| Modify {
             database: self,
-            keys: self.keys().guard(),
+            keys: self.keys(),
             pairs: HashMap::new(),
             pending: Vec::new(),
             indices: Vec::new(),
@@ -88,8 +88,8 @@ impl Database {
         // Validate metas here (no duplicates allowed), but there is no need to store them.
         ShareMeta::<(A, R)>::from(self).map(|_| ModifyAll {
             database: self,
-            tables: self.tables().guard(),
-            keys: self.keys().guard(),
+            tables: self.tables(),
+            keys: self.keys(),
             index: 0,
             states: Vec::new(),
             filter: (),
@@ -364,7 +364,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
     }
 
     fn resolve_set(
-        keys: &key::Guard,
+        keys: &Keys,
         table: &Table,
         table_keys: RwLockReadGuard<Vec<Key>>,
         state: &A::State,
@@ -431,7 +431,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
 
     /// Call this while holding a lock on `table`.
     fn retain(
-        keys: &key::Guard,
+        keys: &Keys,
         table: &Table,
         rows: &mut Vec<(Key, u32)>,
         templates: &mut Vec<A>,
@@ -569,7 +569,7 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
         target: RwLockUpgradableReadGuard<Vec<Key>>,
         state: &StateAll<A>,
         database: &Database,
-        keys: &key::Guard,
+        keys: &Keys,
         mut with: impl FnMut() -> A,
     ) -> usize {
         let count = state.source.count.swap(0, Ordering::AcqRel);
@@ -640,7 +640,7 @@ impl<A: Template, R: Template> ShareTable<A, R> {
         let adds = ShareMeta::<A>::from(database)?;
         let removes = ShareMeta::<R>::from(database)?;
         let share = database.resources().try_global_with(table, || {
-            let mut tables = database.tables().guard();
+            let mut tables = database.tables();
             let source = tables.get_shared(table as usize)?;
             let target = {
                 let mut metas = adds.to_vec();
@@ -691,7 +691,7 @@ impl<A: Template, R: Template> ShareTable<A, R> {
 
 fn move_to<'d, 'a, V, A: Template>(
     database: &Database,
-    keys: &key::Guard,
+    keys: &Keys,
     set: &HashMap<Key, V>,
     templates: &mut Vec<A>,
     moves: &mut Vec<(usize, usize, NonZeroUsize)>,
@@ -792,7 +792,7 @@ fn resolve_copy_move(
     target_table: &Table,
     copies: &[(usize, usize, NonZeroUsize)],
     moves: &[(usize, usize, NonZeroUsize)],
-    keys: &key::Guard,
+    keys: &Keys,
 ) {
     for &(source, target, count) in moves {
         source_keys.copy_within(source..source + count.get(), target);

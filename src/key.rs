@@ -3,7 +3,7 @@ use crate::{
         slice::{self, Slice},
         utility::get_unchecked,
     },
-    Error,
+    Database, Error,
 };
 use parking_lot::RwLock;
 use std::{
@@ -25,13 +25,20 @@ pub struct Slot {
     row: AtomicU32,
 }
 
-pub struct Keys {
+pub(crate) struct State {
     free: RwLock<(Vec<Key>, AtomicI64)>,
     slots: Slice<Arc<Slot>>,
 }
 
 #[derive(Clone)]
-pub struct Guard<'a>(&'a Keys, slice::Guard<'a, Arc<Slot>>);
+pub struct Keys<'a>(&'a State, slice::Guard<'a, Arc<Slot>>);
+
+impl Database {
+    #[inline]
+    pub fn keys(&self) -> Keys {
+        Keys(&self.keys, self.keys.slots.guard())
+    }
+}
 
 impl Key {
     pub const NULL: Self = Self {
@@ -69,7 +76,7 @@ impl Key {
     }
 }
 
-impl<'a> Guard<'a> {
+impl<'a> Keys<'a> {
     pub fn update(&mut self) {
         self.1.update();
     }
@@ -214,171 +221,13 @@ impl<'a> Guard<'a> {
     }
 }
 
-impl Keys {
-    const SHIFT: usize = 8;
-    pub const CHUNK: usize = 1 << Self::SHIFT;
-
+impl State {
     pub fn new() -> Self {
         Self {
             free: RwLock::new((Vec::new(), AtomicI64::new(0))),
             slots: Slice::new(&[]),
         }
     }
-
-    pub fn guard(&self) -> Guard {
-        Guard(self, self.slots.guard())
-    }
-
-    // #[inline]
-    // pub fn get(&self, key: Key) -> Result<(&Slot, u32), Error> {
-    //     let read = self.count.read();
-    //     let (chunk_index, slot_index) = Self::decompose(key.index());
-    //     // SAFETY: `chunks` can be read since the `count_read` lock is held.
-    //     let chunks = unsafe { &**self.chunks.get() };
-    //     let chunk = &**chunks
-    //         .get(chunk_index as usize)
-    //         .ok_or(Error::InvalidKey(key))?;
-    //     // SAFETY: As soon as the `chunk` is dereferenced, the `count_read` lock is no longer needed.
-    //     drop(read);
-    //     let slot = unsafe { get_unchecked(chunk, slot_index as usize) };
-    //     // SAFETY: A shared reference to a slot can be returned safely without being tied to the lifetime of the read guard
-    //     // because its address is stable and no mutable reference to it is ever given out.
-    //     // The stability of the address is guaranteed by the fact that the `chunks` vector never drops its items other than
-    //     // when `self` is dropped.
-    //     Ok((slot, slot.table(key)?))
-    // }
-
-    // /// SAFETY: The provided key must be valid.
-    // #[inline]
-    // pub unsafe fn get_unchecked(&self, key: Key) -> &Slot {
-    //     let read = self.count.read();
-    //     let (chunk_index, slot_index) = Self::decompose(key.index());
-    //     // SAFETY: See `get`.
-    //     let chunks = &**self.chunks.get();
-    //     let chunk = &**get_unchecked(chunks, chunk_index as usize);
-    //     drop(read);
-    //     get_unchecked(chunk, slot_index as usize)
-    // }
-
-    // #[inline]
-    // pub fn get_all(
-    //     &self,
-    //     keys: impl IntoIterator<Item = Key>,
-    // ) -> impl Iterator<Item = (Key, Result<(&Slot, u32), Error>)> {
-    //     let read = self.count.read();
-    //     keys.into_iter().map(move |key| {
-    //         // Keep the lock alive.
-    //         let _read = &read;
-    //         let (chunk_index, slot_index) = Keys::decompose(key.index());
-    //         // SAFETY: See `get`.
-    //         let chunks = unsafe { &**self.chunks.get() };
-    //         let Some(chunk) = chunks.get(chunk_index as usize) else {
-    //             return (key, Err(Error::InvalidKey(key)));
-    //         };
-    //         let slot = unsafe { get_unchecked(&**chunk, slot_index as usize) };
-    //         match slot.table(key) {
-    //             Ok(table) => (key, Ok((slot, table))),
-    //             Err(error) => (key, Err(error)),
-    //         }
-    //     })
-    // }
-
-    // /// SAFETY: The provided keys must be valid.
-    // #[inline]
-    // pub unsafe fn get_all_unchecked(
-    //     &self,
-    //     keys: impl IntoIterator<Item = Key>,
-    // ) -> impl Iterator<Item = (Key, &Slot)> {
-    //     let read = self.count.read();
-    //     keys.into_iter().map(move |key| {
-    //         // Keep the lock alive.
-    //         let _read = &read;
-    //         let (chunk_index, slot_index) = Keys::decompose(key.index());
-    //         // SAFETY: See `get`.
-    //         let chunks = unsafe { &**self.chunks.get() };
-    //         let chunk = &**unsafe { get_unchecked(chunks, chunk_index as usize) };
-    //         (key, unsafe { get_unchecked(chunk, slot_index as usize) })
-    //     })
-    // }
-
-    // pub fn reserve(&self, keys: &mut [Key]) {
-    //     let free_read = self.free.read();
-    //     let tail = free_read.1.fetch_sub(keys.len() as _, Relaxed);
-    //     let done = if tail > 0 {
-    //         let tail = tail as usize;
-    //         let count = tail.min(keys.len());
-    //         let head = tail - count;
-    //         keys[..count].copy_from_slice(&free_read.0[head..tail]);
-    //         count
-    //     } else {
-    //         0
-    //     };
-    //     drop(free_read);
-
-    //     if done < keys.len() {
-    //         let keys = &mut keys[done..];
-    //         let mut count_write = self.count.write();
-    //         let index = *count_write;
-    //         let count = index.saturating_add(keys.len() as _);
-    //         // Since all indices use `u32` for compactness, this index must remain under `u32::MAX`.
-    //         // Note that 'u32::MAX' is used as a sentinel so it must be an invalid entity index.
-    //         assert!(count < u32::MAX);
-
-    //         // SAFETY: `chunks` can be safely written to since the `count_write` lock is held.
-    //         let chunks = unsafe { &mut *self.chunks.get() };
-    //         while count as usize > chunks.len() * Self::CHUNK {
-    //             chunks.push(Box::new([(); Self::CHUNK].map(|_| Slot::default())));
-    //         }
-    //         *count_write = count;
-    //         drop(count_write);
-
-    //         for (i, key) in keys.iter_mut().enumerate() {
-    //             *key = Key::new(index + i as u32);
-    //         }
-    //     }
-    // }
-
-    // #[inline]
-    // pub(crate) fn initialize(&self, keys: &[Key], table: u32, range: Range<usize>) {
-    //     let mut row = range.start as u32;
-    //     for (key, slot) in unsafe { self.get_all_unchecked(keys[range].iter().copied()) } {
-    //         slot.initialize(key.generation(), table, row);
-    //         row += 1;
-    //     }
-    // }
-
-    // #[inline]
-    // pub(crate) fn update(&self, keys: &[Key], range: Range<usize>) {
-    //     let mut row = range.start as u32;
-    //     for (_, slot) in unsafe { self.get_all_unchecked(keys[range].iter().copied()) } {
-    //         slot.update(row);
-    //         row += 1;
-    //     }
-    // }
-
-    // #[inline]
-    // pub(crate) fn release(&self, keys: &[Key]) {
-    //     for (_, slot) in unsafe { self.get_all_unchecked(keys.iter().copied()) } {
-    //         slot.release();
-    //     }
-    //     self.recycle(keys.iter().copied());
-    // }
-
-    // /// Assumes that the keys have had their `Slot` released and that keys are release only once.
-    // pub(crate) fn recycle(&self, keys: impl IntoIterator<Item = Key>) {
-    //     let mut free_write = self.free.write();
-    //     let (free_keys, free_count) = &mut *free_write;
-    //     free_keys.truncate((*free_count.get_mut()).max(0) as _);
-
-    //     for mut key in keys {
-    //         // If the key reached generation `u32::MAX`, its index is discarded which results in a dead `Slot`.
-    //         if key.increment() {
-    //             free_keys.push(key);
-    //         }
-    //     }
-
-    //     *free_count.get_mut() = free_keys.len() as _;
-    // }
 }
 
 impl Slot {

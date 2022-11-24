@@ -1,8 +1,8 @@
 use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, ONE},
     filter::Filter,
-    key::{self, Key},
-    table::{self, Table},
+    key::{Key, Keys},
+    table::{Table, Tables},
     Database,
 };
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
@@ -14,7 +14,7 @@ use std::{
 
 pub struct Destroy<'d, F> {
     database: &'d Database,
-    keys: key::Guard<'d>,
+    keys: Keys<'d>,
     set: HashSet<Key>, // A `HashSet` is used because the move algorithm assumes that rows will be unique.
     indices: Vec<usize>, // May be reordered (ex: by `fold_swap`).
     states: Vec<Result<State, u32>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
@@ -27,8 +27,8 @@ pub struct Destroy<'d, F> {
 /// Destroys all keys in tables that satisfy the filter `F`.
 pub struct DestroyAll<'d, F = ()> {
     database: &'d Database,
-    tables: table::Guard<'d>,
-    keys: key::Guard<'d>,
+    tables: Tables<'d>,
+    keys: Keys<'d>,
     index: usize,
     states: Vec<Arc<Table>>,
     filter: F,
@@ -43,7 +43,7 @@ impl Database {
     pub fn destroy(&self) -> Destroy<'_, ()> {
         Destroy {
             database: self,
-            keys: self.keys().guard(),
+            keys: self.keys(),
             set: HashSet::new(),
             pending: Vec::new(),
             states: Vec::new(),
@@ -57,8 +57,8 @@ impl Database {
     pub fn destroy_all(&self) -> DestroyAll<'_, ()> {
         DestroyAll {
             database: self,
-            tables: self.tables().guard(),
-            keys: self.keys().guard(),
+            tables: self.tables(),
+            keys: self.keys(),
             index: 0,
             states: Vec::new(),
             filter: (),
@@ -233,7 +233,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         table_keys: RwLockUpgradableReadGuard<Vec<Key>>,
         (low, high, count): (u32, u32, NonZeroUsize),
         database: &Database,
-        keys: &key::Guard,
+        keys: &Keys,
     ) {
         debug_assert_eq!(moves.len(), 0);
         debug_assert_eq!(drops.len(), 0);
@@ -350,9 +350,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         }) {
             Ok(index) => index,
             Err(index) => {
-                let mut tables = database.tables().guard();
-                // let table = unsafe { tables.get_shared(table as _) };
-                let result = match tables.get_shared(table as _) {
+                let result = match database.tables().get_shared(table as _) {
                     Ok(table) if filter.filter(&table, database) => Ok(State {
                         table,
                         rows: Vec::new(),
@@ -377,7 +375,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
 
     /// Call this while holding a lock on `table`.
     fn retain<'a>(
-        keys: &key::Guard,
+        keys: &Keys,
         table: &'a Table,
         rows: &mut Vec<(Key, u32)>,
         pending: &mut Vec<(Key, u32)>,
@@ -453,7 +451,7 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
         table_keys: RwLockUpgradableReadGuard<Vec<Key>>,
         table: &Table,
         database: &Database,
-        keys: &mut key::Guard,
+        keys: &mut Keys,
     ) -> usize {
         let count = table.count.swap(0, Ordering::AcqRel);
         let Some(count) = NonZeroUsize::new(count) else {

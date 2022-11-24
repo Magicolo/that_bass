@@ -231,33 +231,28 @@ fn destroy_all(database: &Database, keys: &[Key]) {
 #[test]
 fn create_adds_a_table() -> Result<(), Error> {
     let database = Database::new();
-    let mut tables = database.tables().guard();
-    assert_eq!(tables.len(), 0);
+    assert_eq!(database.tables().len(), 0);
     database.create::<()>()?;
-    assert_eq!(tables.len(), 1);
+    assert_eq!(database.tables().len(), 1);
     Ok(())
 }
 
 #[test]
 fn create_adds_a_table_with_datum() -> Result<(), Error> {
     let database = Database::new();
-    let mut tables = database.tables().guard();
-    assert_eq!(tables.len(), 0);
+    assert_eq!(database.tables().len(), 0);
     database.create::<A>()?;
-    let table = tables.get(0).unwrap();
-    assert!(table.has::<A>());
+    assert!(database.tables().get(0)?.has::<A>());
     Ok(())
 }
 
 #[test]
 fn create_adds_a_table_with_data() -> Result<(), Error> {
     let database = Database::new();
-    let mut tables = database.tables().guard();
-    assert_eq!(tables.len(), 0);
+    assert_eq!(database.tables().len(), 0);
     database.create::<(A, B)>()?;
-    let table = tables.get(0).unwrap();
-    assert!(table.has::<A>());
-    assert!(table.has::<B>());
+    assert!(database.tables().get(0)?.has::<A>());
+    assert!(database.tables().get(0)?.has::<B>());
     Ok(())
 }
 
@@ -306,15 +301,14 @@ fn create_destroy_create_reuses_key_index() -> Result<(), Error> {
 fn destroy_one_fails_with_null_key() {
     let database = Database::new();
     let mut destroy = database.destroy();
-    let mut keys = database.keys().guard();
     assert_eq!(
-        keys.get(Key::NULL).err(),
+        database.keys().get(Key::NULL).err(),
         Some(Error::InvalidKey(Key::NULL))
     );
     destroy.one(Key::NULL);
     assert_eq!(destroy.resolve(), 0);
     assert_eq!(
-        keys.get(Key::NULL).err(),
+        database.keys().get(Key::NULL).err(),
         Some(Error::InvalidKey(Key::NULL))
     );
 }
@@ -324,21 +318,21 @@ fn destroy_one_true_with_create_one() -> Result<(), Error> {
     let database = Database::new();
     let key = create_one(&database, ())?;
     let mut destroy = database.destroy();
-    let mut keys = database.keys().guard();
-    assert!(keys.get(key).is_ok());
+    assert!(database.keys().get(key).is_ok());
     destroy.one(key);
-    assert!(keys.get(key).is_ok());
+    assert!(database.keys().get(key).is_ok());
     assert_eq!(destroy.resolve(), 1);
-    assert_eq!(keys.get(key).err(), Some(Error::InvalidKey(key)));
+    assert_eq!(database.keys().get(key).err(), Some(Error::InvalidKey(key)));
     Ok(())
 }
 
 #[test]
 fn destroy_all_n_with_create_all_n_resolves_n() -> Result<(), Error> {
     let database = Database::new();
-    let mut keys = database.keys().guard();
-    let mut count = |created: &[Key]| {
-        keys.get_all(created.iter().copied())
+    let count = |created: &[Key]| {
+        database
+            .keys()
+            .get_all(created.iter().copied())
             .filter(|(_, result)| result.is_ok())
             .count()
     };
