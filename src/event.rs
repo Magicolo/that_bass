@@ -65,12 +65,11 @@ pub struct Events {
 }
 
 pub struct Receive<'d, E: Event> {
-    events: &'d Events,
+    guard: Guard<'d, E>,
     tables: Tables<'d>,
     keep: Keep,
     buffer: VecDeque<E>,
     head: usize,
-    version: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -113,6 +112,8 @@ enum Channel {
     Destroy,
     Modify,
 }
+
+struct Guard<'a, E: Event>(&'a Events, usize, PhantomData<E>);
 
 #[derive(Default)]
 struct Ready {
@@ -318,16 +319,16 @@ impl<'a, E: Event> Receive<'a, E> {
     }
 
     pub fn with<F: Event>(self) -> Receive<'a, F> {
-        let receive = ManuallyDrop::new(self);
-        Self::remove_declare(receive.events);
-        Receive::<F>::add_declare(receive.events);
+        // Dropping the guard only to create a new one right after would be useless ceremony. `ManuallyDrop` helps skip some of it.
+        let guard = ManuallyDrop::new(self.guard);
+        Self::remove_declare(guard.0);
+        Receive::<F>::add_declare(guard.0);
         Receive {
-            keep: receive.keep,
-            events: receive.events,
-            tables: receive.tables.clone(),
-            head: receive.head,
+            guard: Guard(guard.0, guard.1, PhantomData),
+            keep: self.keep,
+            tables: self.tables,
+            head: self.head,
             buffer: VecDeque::new(),
-            version: receive.version,
         }
     }
 
@@ -337,12 +338,11 @@ impl<'a, E: Event> Receive<'a, E> {
         ready.buffers.fetch_add(1, Relaxed);
         ready.seen.fetch_add(1, Relaxed);
         Receive {
+            guard: Guard(database.events(), ready.version, PhantomData),
             keep: Keep::All,
-            events: database.events(),
             tables: database.tables(),
             head: ready.chunks.len(),
             buffer: VecDeque::new(),
-            version: ready.version,
         }
     }
 
@@ -404,11 +404,11 @@ impl<E: Event> Iterator for Receive<'_, E> {
             return Some(event);
         }
 
-        let ready = self.events.ready.read();
-        debug_assert!(self.version + 1 >= ready.version);
-        if self.version < ready.version {
+        let ready = self.guard.0.ready.read();
+        debug_assert!(self.guard.1 + 1 >= ready.version);
+        if self.guard.1 < ready.version {
             self.head -= ready.head;
-            self.version = ready.version;
+            self.guard.1 = ready.version;
             ready.seen.fetch_add(1, Relaxed);
         }
         self.process(&ready);
@@ -418,13 +418,13 @@ impl<E: Event> Iterator for Receive<'_, E> {
 
         drop(ready);
 
-        let mut ready = self.events.ready.write();
+        let mut ready = self.guard.0.ready.write();
         let chunk = ready.last.take().unwrap_or_default();
         let chunk = {
             // The time spent with the `pending` lock is minimized as much as possible since it may block other threads
             // that hold database locks. The tradeoff here is that the `ready` write lock may be taken in vain when `pending`
             // has no new events.
-            let mut pending = self.events.pending.lock();
+            let mut pending = self.guard.0.pending.lock();
             if pending.events.len() == 0 {
                 ready.last = Some(chunk);
                 return None;
@@ -451,7 +451,7 @@ impl<E: Event> Iterator for Receive<'_, E> {
             ready.head = ready.next;
             ready.next = ready.chunks.len();
             self.head -= ready.head;
-            self.version = ready.version;
+            self.guard.1 = ready.version;
         }
 
         let ready = RwLockWriteGuard::downgrade(ready);
@@ -460,12 +460,12 @@ impl<E: Event> Iterator for Receive<'_, E> {
     }
 }
 
-impl<E: Event> Drop for Receive<'_, E> {
+impl<E: Event> Drop for Guard<'_, E> {
     fn drop(&mut self) {
-        Self::remove_declare(self.events);
-        let ready = self.events.ready.read();
+        Receive::<E>::remove_declare(self.0);
+        let ready = self.0.ready.read();
         ready.buffers.fetch_sub(1, Relaxed);
-        if self.version == ready.version {
+        if self.1 == ready.version {
             ready.seen.fetch_sub(1, Relaxed);
         }
     }
