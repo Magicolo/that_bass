@@ -680,7 +680,6 @@ impl<A: Template, R: Template> ShareTable<A, R> {
                 _marker: PhantomData,
             })
         })?;
-        let share = share.read();
         Ok((
             share.source.clone(),
             share.target.clone(),

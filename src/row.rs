@@ -221,7 +221,6 @@ impl<R: Row> ShareAccess<R> {
             accesses.shrink_to_fit();
             Ok(Self(Arc::new(accesses), PhantomData))
         })?;
-        let share = share.read();
         Ok(share.0.clone())
     }
 }

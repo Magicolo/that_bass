@@ -1,10 +1,9 @@
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
     collections::HashMap,
     hash::Hash,
-    ops::Deref,
     rc::Rc,
     sync::Arc,
     thread::{self, ThreadId},
@@ -16,9 +15,6 @@ pub struct Resources {
     locals: Mutex<Locals>,
     globals: Mutex<Globals>,
 }
-
-pub struct Local<T>(Rc<RefCell<T>>);
-pub struct Global<T>(Arc<RwLock<T>>);
 
 struct Locals<K = (ThreadId, TypeId)>(HashMap<K, Result<Rc<dyn Any>, Error>>);
 struct Globals<K = TypeId>(HashMap<K, Result<Arc<dyn Any + Sync + Send>, Error>>);
@@ -39,37 +35,32 @@ impl<K: Eq + Hash> Globals<K> {
         &mut self,
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<Global<T>, Error> {
-        Ok(Global(
-            self.0
-                .entry(key)
-                .or_insert_with(|| Ok(Arc::new(RwLock::new(default()?))))
-                .clone()?
-                .downcast()
-                .map_err(|_| Error::InvalidType(TypeId::of::<T>()))?,
-        ))
+    ) -> Result<Arc<T>, Error> {
+        Ok(self
+            .0
+            .entry(key)
+            .or_insert_with(|| Ok(Arc::new(default()?)))
+            .clone()?
+            .downcast()
+            .map_err(|_| Error::InvalidType(TypeId::of::<T>()))?)
     }
 
-    pub fn get<T: Send + Sync + 'static>(
-        &mut self,
-        key: K,
-        default: impl FnOnce() -> T,
-    ) -> Global<T> {
+    pub fn get<T: Send + Sync + 'static>(&mut self, key: K, default: impl FnOnce() -> T) -> Arc<T> {
         match self.0.get_mut(&key) {
             Some(result) => {
                 if let Ok(resource) = result {
                     if let Ok(resource) = resource.clone().downcast() {
-                        return Global(resource);
+                        return resource;
                     }
                 }
-                let resource = Arc::new(RwLock::new(default()));
+                let resource = Arc::new(default());
                 *result = Ok(resource.clone());
-                Global(resource)
+                resource
             }
             None => {
-                let resource = Arc::new(RwLock::new(default()));
+                let resource = Arc::new(default());
                 self.0.insert(key, Ok(resource.clone()));
-                Global(resource)
+                resource
             }
         }
     }
@@ -84,33 +75,32 @@ impl<K: Eq + Hash> Locals<K> {
         &mut self,
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<Local<T>, Error> {
-        Ok(Local(
-            self.0
-                .entry(key)
-                .or_insert_with(|| Ok(Rc::new(RefCell::new(default()?))))
-                .clone()?
-                .downcast()
-                .map_err(|_| Error::InvalidType(TypeId::of::<T>()))?,
-        ))
+    ) -> Result<Rc<T>, Error> {
+        Ok(self
+            .0
+            .entry(key)
+            .or_insert_with(|| Ok(Rc::new(default()?)))
+            .clone()?
+            .downcast()
+            .map_err(|_| Error::InvalidType(TypeId::of::<T>()))?)
     }
 
-    pub fn get<T: 'static>(&mut self, key: K, default: impl FnOnce() -> T) -> Local<T> {
+    pub fn get<T: 'static>(&mut self, key: K, default: impl FnOnce() -> T) -> Rc<T> {
         match self.0.get_mut(&key) {
             Some(result) => {
                 if let Ok(resource) = result {
                     if let Ok(resource) = resource.clone().downcast() {
-                        return Local(resource);
+                        return resource;
                     }
                 }
-                let resource = Rc::new(RefCell::new(default()));
+                let resource = Rc::new(default());
                 *result = Ok(resource.clone());
-                Local(resource)
+                resource
             }
             None => {
-                let resource = Rc::new(RefCell::new(default()));
+                let resource = Rc::new(default());
                 self.0.insert(key, Ok(resource.clone()));
-                Local(resource)
+                resource
             }
         }
     }
@@ -124,14 +114,14 @@ impl Resources {
         }
     }
 
-    pub fn global<T: Send + Sync + 'static>(&self, default: impl FnOnce() -> T) -> Global<T> {
+    pub fn global<T: Send + Sync + 'static>(&self, default: impl FnOnce() -> T) -> Arc<T> {
         self.globals.lock().get(TypeId::of::<T>(), default)
     }
 
     pub fn try_global<T: Send + Sync + 'static>(
         &self,
         default: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<Global<T>, Error> {
+    ) -> Result<Arc<T>, Error> {
         self.globals.lock().try_get(TypeId::of::<T>(), default)
     }
 
@@ -139,9 +129,9 @@ impl Resources {
         &self,
         key: K,
         default: impl FnOnce() -> T,
-    ) -> Global<T> {
-        self.global(Globals::new)
-            .write()
+    ) -> Arc<T> {
+        self.global(|| Mutex::new(Globals::new()))
+            .lock()
             .get((key, TypeId::of::<T>()), default)
     }
 
@@ -149,13 +139,13 @@ impl Resources {
         &self,
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<Global<T>, Error> {
-        self.global(Globals::new)
-            .write()
+    ) -> Result<Arc<T>, Error> {
+        self.global(|| Mutex::new(Globals::new()))
+            .lock()
             .try_get((key, TypeId::of::<T>()), default)
     }
 
-    pub fn local<T: 'static>(&self, default: impl FnOnce() -> T) -> Local<T> {
+    pub fn local<T: 'static>(&self, default: impl FnOnce() -> T) -> Rc<T> {
         self.locals
             .lock()
             .get((thread::current().id(), TypeId::of::<T>()), default)
@@ -164,7 +154,7 @@ impl Resources {
     pub fn try_local<T: 'static>(
         &self,
         default: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<Local<T>, Error> {
+    ) -> Result<Rc<T>, Error> {
         self.locals
             .lock()
             .try_get((thread::current().id(), TypeId::of::<T>()), default)
@@ -174,8 +164,8 @@ impl Resources {
         &self,
         key: K,
         default: impl FnOnce() -> T,
-    ) -> Local<T> {
-        self.local(Locals::new)
+    ) -> Rc<T> {
+        self.local(|| RefCell::new(Locals::new()))
             .borrow_mut()
             .get((key, TypeId::of::<T>()), default)
     }
@@ -184,42 +174,10 @@ impl Resources {
         &self,
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<Local<T>, Error> {
-        self.local(Locals::new)
+    ) -> Result<Rc<T>, Error> {
+        self.local(|| RefCell::new(Locals::new()))
             .borrow_mut()
             .try_get((key, TypeId::of::<T>()), default)
-    }
-}
-
-impl<T> Deref for Local<T> {
-    type Target = RefCell<T>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T> Clone for Local<T> {
-    #[inline]
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<T> Deref for Global<T> {
-    type Target = RwLock<T>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T> Clone for Global<T> {
-    #[inline]
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
     }
 }
 

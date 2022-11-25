@@ -98,7 +98,6 @@ impl<T: Template> ShareMeta<T> {
             let metas = DeclareContext::metas::<T>()?;
             Ok(Self(Arc::new(metas.into_boxed_slice()), PhantomData))
         })?;
-        let share = share.read();
         Ok(share.0.clone())
     }
 }

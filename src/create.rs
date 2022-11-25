@@ -193,7 +193,6 @@ impl<T: Template> Share<T> {
             let inner = Arc::new(state);
             Ok(Share::<T>(inner, table))
         })?;
-        let share = share.read();
         Ok((share.0.clone(), share.1.clone()))
     }
 }
