@@ -31,7 +31,7 @@ pub(crate) struct State {
 }
 
 #[derive(Clone)]
-pub struct Keys<'a>(&'a State, slice::Guard<'a, Arc<Slot>>);
+pub struct Keys<'d>(&'d State, slice::Guard<'d, Arc<Slot>>);
 
 impl Database {
     #[inline]
@@ -76,7 +76,7 @@ impl Key {
     }
 }
 
-impl<'a> Keys<'a> {
+impl<'d> Keys<'d> {
     pub fn update(&mut self) {
         self.1.update();
     }

@@ -384,13 +384,14 @@ impl<'d, F: Filter> Destroy<'d, F> {
         let mut high = 0;
         for i in (0..rows.len()).rev() {
             let (key, row) = unsafe { get_unchecked_mut(rows, i) };
-            match unsafe { keys.get_semi_checked(*key) } {
-                Ok((slot, table_index)) if table_index == table.index() => {
+            let slot = unsafe { keys.get_unchecked(*key) };
+            match slot.table(*key) {
+                Ok(table_index) if table_index == table.index() => {
                     *row = slot.row();
                     low = low.min(*row);
                     high = high.max(*row);
                 }
-                Ok((_, table_index)) => {
+                Ok(table_index) => {
                     let (key, _) = rows.swap_remove(i);
                     pending.push((key, table_index));
                 }
