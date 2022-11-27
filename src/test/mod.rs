@@ -16,9 +16,8 @@ pub struct B;
 pub struct C(usize);
 
 pub mod filter {
-    use crate::filter::Any;
-
     use super::*;
+    use crate::filter::Any;
 
     #[derive(Filter, Default)]
     pub struct UnitStruct;

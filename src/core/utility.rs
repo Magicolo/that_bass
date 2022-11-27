@@ -40,6 +40,16 @@ pub unsafe fn swap_unchecked<T>(items: &mut [T], a: usize, b: usize) {
     }
 }
 
+#[inline]
+pub fn same<I: IntoIterator>(items: I) -> Option<bool>
+where
+    I::Item: PartialEq,
+{
+    let mut items = items.into_iter();
+    let first = items.next()?;
+    Some(items.all(|item| first == item))
+}
+
 #[inline(always)]
 pub unsafe fn unreachable() -> ! {
     if cfg!(debug_assertions) {

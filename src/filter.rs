@@ -1,4 +1,10 @@
-use crate::{core::tuple::tuples, create, table::Table, template::Template, Database};
+use crate::{
+    core::{tuple::tuples, utility},
+    create,
+    table::Table,
+    template::Template,
+    Database,
+};
 use std::{any::TypeId, marker::PhantomData};
 
 pub trait Filter {
@@ -25,10 +31,13 @@ pub trait Filter {
 }
 
 pub type None<F> = Not<Any<F>>;
+pub type Difer<F> = Not<Same<F>>;
 #[derive(Default)]
 pub struct Not<F>(F);
 #[derive(Default)]
 pub struct Any<F>(F);
+#[derive(Default)]
+pub struct Same<F>(F);
 pub struct Has<T>(PhantomData<T>);
 pub struct Is<T>(PhantomData<T>);
 pub struct HasWith(Box<[TypeId]>);
@@ -51,12 +60,25 @@ pub const fn has<T: Template>() -> Has<T> {
     Has(PhantomData)
 }
 
-pub const fn not<F: Filter>(filter: F) -> Not<F> {
+pub const fn not<F: Filter>(filter: F) -> Not<F>
+where
+    Not<F>: Filter,
+{
     Not(filter)
 }
 
-pub const fn any<F: Filter>(filter: F) -> Any<F> {
+pub const fn any<F: Filter>(filter: F) -> Any<F>
+where
+    Any<F>: Filter,
+{
     Any(filter)
+}
+
+pub const fn same<F: Filter>(filter: F) -> Same<F>
+where
+    Same<F>: Filter,
+{
+    Same(filter)
 }
 
 pub fn has_with<I: IntoIterator<Item = TypeId>>(types: I) -> HasWith {
@@ -82,6 +104,12 @@ pub const fn with<F: Fn(&Table, &Database)>(filter: F) -> With<F> {
 }
 
 impl<F> Any<F> {
+    pub const fn inner(&self) -> &F {
+        &self.0
+    }
+}
+
+impl<F> Same<F> {
     pub const fn inner(&self) -> &F {
         &self.0
     }
@@ -164,6 +192,12 @@ macro_rules! tuple {
         impl<$($t: Filter,)*> Filter for Any<($($t,)*)> {
             fn filter(&self,_table: &Table, _database: &Database) -> bool {
                 false $(|| self.0.$i.filter(_table, _database))*
+            }
+        }
+
+        impl<$($t: Filter,)*> Filter for Same<($($t,)*)> {
+            fn filter(&self,_table: &Table, _database: &Database) -> bool {
+                utility::same::<[bool; $c]>([$(self.0.$i.filter(_table, _database),)*]).unwrap_or(true)
             }
         }
     };

@@ -73,12 +73,15 @@ pub fn filter(input: TokenStream) -> TokenStream {
     let (impl_generics, type_generics, where_clauses) = generics.split_for_impl();
     let filter_path = path(ident.span(), ["that_bass", "filter", "Filter"]);
     let any_path = path(ident.span(), ["that_bass", "filter", "Any"]);
+    let same_path = path(ident.span(), ["that_bass", "filter", "Same"]);
+    let same_utility_path = path(ident.span(), ["that_bass", "core", "utility", "same"]);
     let database_path = path(ident.span(), ["that_bass", "Database"]);
     let table_path = path(ident.span(), ["that_bass", "table", "Table"]);
     match data {
         Data::Struct(DataStruct { fields, .. }) => {
             let (construct, _, names, ..) = deconstruct_fields(&fields);
             let construct = construct(&names);
+            let count = names.len();
             quote!(
                 #[automatically_derived]
                 impl #impl_generics #filter_path for #ident #type_generics #where_clauses {
@@ -95,20 +98,28 @@ pub fn filter(input: TokenStream) -> TokenStream {
                         false #(|| #filter_path::filter(#names, _table, _database))*
                     }
                 }
+
+                #[automatically_derived]
+                impl #impl_generics #filter_path for #same_path<#ident #type_generics> #where_clauses {
+                    fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
+                        let #ident #construct = self.inner();
+                        #same_utility_path::<[bool; #count]>([#(#filter_path::filter(#names, _table, _database),)*]).unwrap_or(true)
+                    }
+                }
             )
         }
         Data::Enum(DataEnum { variants, .. }) => {
-            let (all, any): (Vec<_>, Vec<_>) = variants
-                .into_iter()
-                .map(|Variant { ident:name, fields, .. }| {
-                    let (construct, _, names, ..) = deconstruct_fields(&fields);
-                    let construct = construct(&names);
-                    (
-                        quote!(#ident::#name #construct => true #(&& #filter_path::filter(#names, _table, _database))*),
-                        quote!(#ident::#name #construct => false #(|| #filter_path::filter(#names, _table, _database))*),
-                    )
-                })
-                .unzip();
+            let mut all = Vec::new();
+            let mut any = Vec::new();
+            let mut same = Vec::new();
+            for Variant { ident:name, fields, .. } in variants {
+                let (construct, _, names, ..) = deconstruct_fields(&fields);
+                let construct = construct(&names);
+                let count = names.len();
+                all.push(quote!(#ident::#name #construct => true #(&& #filter_path::filter(#names, _table, _database))*));
+                any.push(quote!(#ident::#name #construct => false #(|| #filter_path::filter(#names, _table, _database))*));
+                same.push(quote!(#ident::#name #construct => #same_utility_path::<[bool; #count]>([#(#filter_path::filter(#names, _table, _database),)*]).unwrap_or(true)));
+            }
             quote!(
                 #[automatically_derived]
                 impl #impl_generics #filter_path for #ident #type_generics #where_clauses {
@@ -121,6 +132,13 @@ pub fn filter(input: TokenStream) -> TokenStream {
                 impl #impl_generics #filter_path for #any_path<#ident #type_generics> #where_clauses {
                     fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
                         match self.inner() { #(#any,)* _ => false }
+                    }
+                }
+
+                #[automatically_derived]
+                impl #impl_generics #filter_path for #same_path<#ident #type_generics> #where_clauses {
+                    fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
+                        match self.inner() { #(#same,)* _ => false }
                     }
                 }
             )
