@@ -140,7 +140,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 for &access in accesses.iter() {
                     if let Ok((index, column)) = table.column_with(access.identifier()) {
                         // No need to lock columns of size 0.
-                        if column.meta().size > 0 {
+                        if column.meta().layout().size() > 0 {
                             locks.push((index, access));
                         }
                     }
@@ -981,7 +981,7 @@ fn try_lock<T, S, F: FnOnce(S, &Table) -> T>(
         Some((&(index, access), rest)) => {
             let column = unsafe { get_unchecked(table.columns(), index) };
             debug_assert_eq!(access.identifier(), column.meta().identifier());
-            debug_assert!(column.meta().size > 0);
+            debug_assert!(column.meta().layout().size() > 0);
             match access {
                 Access::Read(_) => match column.data().try_read() {
                     Some(_guard) => return try_lock(state, rest, table, with),
@@ -1003,7 +1003,7 @@ fn lock<T, F: FnOnce(&Table) -> T>(locks: &[(usize, Access)], table: &Table, wit
         Some((&(index, access), rest)) => {
             let column = unsafe { get_unchecked(table.columns(), index) };
             debug_assert_eq!(access.identifier(), column.meta().identifier());
-            debug_assert!(column.meta().size > 0);
+            debug_assert!(column.meta().layout().size() > 0);
 
             match access {
                 Access::Read(_) => {

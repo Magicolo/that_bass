@@ -295,7 +295,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             keys.update_all(&table_keys, target..target + count.get());
         }
         for column in table.columns() {
-            if column.meta().size > 0 {
+            if column.meta().layout().size() > 0 {
                 for &(source, target, count) in moves.iter() {
                     // Since a write lock is held on `keys`, no need to take a column lock.
                     unsafe { column.squash(source, target, count) };

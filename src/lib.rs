@@ -1,3 +1,6 @@
+#![feature(alloc_layout_extra)]
+#![feature(once_cell)]
+
 pub mod core;
 pub mod create;
 mod defer;
@@ -20,47 +23,31 @@ use event::Events;
 use key::Key;
 use resources::Resources;
 use std::{
+    alloc::{alloc, dealloc, Layout},
     any::{type_name, TypeId},
+    borrow::Cow,
     error, fmt,
     mem::{needs_drop, size_of, ManuallyDrop},
     num::NonZeroUsize,
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
+    sync::LazyLock,
 };
 pub use that_base_derive::{Datum, Filter, Template};
 
 /*
-    TODO: Allow for read-only resources that are not wrapped in a `RwLock` or `RefCell`.
-        - Most resources used internally only require initialization, not modification.
-    TODO: Replace table locks with keys locks.
-        - Allows to merge `Table` and `table::Inner` together.
-        - No longer require a lock to inspect the `count` or `capacity`.
-        - `Table::metas` will no longer be required.
-        - Combine `count` and `capacity` in an `AtomicU64`.
-        - Grow:
-            1. Read the combined `count + capacity` and check for the need of a grow (no locks taken).
-            3. If a grow is required, take a hard write lock on `keys` (if not, return).
-            4. Double check with `keys.len()` if a grow is required (another thread might've beat us to the race of growing) (if not, return).
-            5. Grow the keys and downgrade the lock to a read lock immediately (reads are fine while the grow is in progress).
-                - Keep the read `keys` lock for the duration of the grow.
-                - The read lock prevents other grow and move operations from taking place.
-            6. One by one, take hard write locks on each `Column`, grow them and drop the lock.
-                - `fold_swap` may be usable here; make sure is won't deadlock (it won't if `keys` is always the first lock taken).
-            7. Drop the `keys` lock, then update the `count + capacity`.
-                - Updating `capacity` could be done under the `keys` lock, but since capacity must always be double checked with `keys.len()`,
-                it should not be necessary to hold the lock for longer.
-        - Query:
-            - Queries won't change much other than reads to `keys` should be removed when they are not declared through `Row::declare`.
-            - `fold_swap` can still be used by using the first `keys/column` (use `keys` if required) to try to take a lock.
-        - Move:
-            - Move operations such as `Destroy/Add/Remove` will still be able to use `fold_swap` by trying to take a write lock on `keys`
-            first.
-            - Whenever the `keys` lock is acquired, all move operations could be completed on `keys` before taking other locks (if possible).
-                - Move operations could be stored in `moves: Vec<(source: usize, target: usize, count: usize)>` to be reused with the columns.
-                - After acquiring a `keys` lock, slots still have to be validated/filtered.
-            - Then, take and hold one more column lock and complete all move operations before locking the next one (always lock in order).
-                - If it weren't for interior mutability, locks could be downgraded during the process?
-            - When all `keys` and column locks are held, update the slots.
-            - Only release the locks when all is done.
+    TODO: Implement an interpreter.
+        - This would allow sending dynamic requests to the database in the form of `String`s and listen response also a `String`s.
+        - With this feature, the database becomes usable from any ecosystem and can serve similar purposes as other in-memory
+        databases such as Redis.
+        - Would be nice if the query language could be expressed in json understandably and efficiently; otherwise, a custom query
+        language may be considered.
+        - Queries may look something like:
+            { "Position": { "x": null, "y": 1 } }:
+            - Queries the first row that has a `Position` column with at least the field `x`.
+            - If the field `y` is present, it is filled, otherwise the provided value is used.
+            - If `Position` has more fields, they are projected out.
+            - The response will yield an object with the same structure.
+            - To query all rows, wrap this query in an array `[{ ... }]`.
     TODO: Implement a `Trace` that keeps a history for every key.
         - struct Trace; impl Listen for Trace {}
     TODO: Remove empty tables when calling `Tables::shrink`.
@@ -68,6 +55,14 @@ pub use that_base_derive::{Datum, Filter, Template};
     TODO: Queries don't prevent visiting a key twice if another thread resolves a move operation from a visited table to an unvisited
     one while the query is iterating.
         - It may be resonnable to require from users (or a scheduler) to resolve deferred operations at an appropriate time.
+    TODO: Implement a table `If` operation.
+        - The if checks some condition on tables with an upgradable lock and executes its body with a write lock on success.
+        - This ensures that no structural operation has occured on the table between the check and the body.
+        - The motivating scenario is `FindOrCreate` which tries to match a given row and creates the row if it is missing.
+            - Usage could look like (arguments to `If` should be inferred): `|mut a: If| {
+                // fn find_or_create<F, T: Template>(&mut self, find: impl FnMut(T::Read) -> Option<F>, create: impl FnMut() -> T) -> Result<Option<F>, Error>;
+                a.find_or_create(|p| p.x == 0, || Position(0, 0, 0));
+            }`
     TODO: Implement `Defer`:
         - Will order the resolution of deferred operations such that coherence is maintained.
     TODO: Implement `Keep<T: Template>/Trim<T: Template>`:
@@ -223,13 +218,14 @@ pub struct Database {
     keys: key::State,
     tables: table::State,
     resources: Resources,
+    filters: filter::State,
     events: Events,
 }
 
 pub struct Meta {
     identifier: fn() -> TypeId,
     name: fn() -> &'static str,
-    size: usize,
+    layout: fn() -> Layout,
     new: unsafe fn(usize) -> NonNull<()>,
     free: unsafe fn(NonNull<()>, usize, usize),
     copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), NonZeroUsize),
@@ -242,7 +238,7 @@ pub trait Datum: Sized + 'static {
         &Meta {
             identifier: TypeId::of::<Self>,
             name: type_name::<Self>,
-            size: size_of::<Self>(),
+            layout: Layout::new::<Self>,
             new: |capacity| unsafe {
                 let mut items = ManuallyDrop::new(Vec::<Self>::with_capacity(capacity));
                 debug_assert!(items.capacity() == capacity || items.capacity() == usize::MAX);
@@ -278,6 +274,11 @@ impl Meta {
     pub fn name(&self) -> &'static str {
         (self.name)()
     }
+
+    #[inline]
+    pub fn layout(&self) -> Layout {
+        (self.layout)()
+    }
 }
 
 impl Database {
@@ -286,8 +287,284 @@ impl Database {
             keys: key::State::new(),
             tables: table::State::new(),
             resources: Resources::new(),
+            filters: filter::State::new(),
             events: Events::new(),
         }
+    }
+}
+
+mod dynamic {
+    use super::*;
+    use parking_lot::RwLock;
+    use std::{collections::BTreeMap, string};
+
+    impl Database {
+        pub fn run(
+            &self,
+            operations: impl IntoIterator<Item = &Operation>,
+        ) -> Result<Value, Error> {
+            todo!()
+        }
+    }
+
+    pub enum Node {
+        Null,
+        Number(Number),
+        String(String),
+        Increment(Number),
+        Pair(Key, Box<Node>),
+        List(Vec<Node>),
+    }
+
+    pub enum Operation {
+        Create(Node),
+        Destroy(Key),
+        Modify(Key, Node),
+    }
+
+    pub enum String {
+        Borrow(&'static str),
+        Own(string::String),
+    }
+
+    pub enum Number {
+        Integer(i64),
+        Rational(f64),
+    }
+
+    pub enum Key {
+        Meta(&'static Meta),
+        Name(String),
+    }
+
+    impl Into<Node> for &'static str {
+        fn into(self) -> Node {
+            Node::String(String::from(self))
+        }
+    }
+
+    impl Into<Box<Node>> for &'static str {
+        fn into(self) -> Box<Node> {
+            Box::new(Node::from(self))
+        }
+    }
+
+    impl Into<String> for &'static str {
+        fn into(self) -> String {
+            String::Borrow(self)
+        }
+    }
+
+    impl Into<Key> for &'static str {
+        fn into(self) -> String {
+            Key::Name(String::from(self))
+        }
+    }
+
+    impl Into<Node> for i64 {
+        fn into(self) -> Node {
+            Node::Number(Number::Integer(self))
+        }
+    }
+
+    impl Into<Box<Node>> for i64 {
+        fn into(self) -> Node {
+            Box::new(Node::Number(Number::Integer(self)))
+        }
+    }
+
+    impl Into<Node> for f64 {
+        fn into(self) -> Node {
+            Node::Number(Number::Rational(self))
+        }
+    }
+
+    impl Into<Box<Node>> for f64 {
+        fn into(self) -> Node {
+            Box::new(Node::Number(Number::Rational(self)))
+        }
+    }
+
+    impl Into<Node> for Vec<Node> {
+        fn into(self) -> Node {
+            Node::List(self)
+        }
+    }
+
+    impl Into<Key> for &'static Meta {
+        fn into(self) -> Key {
+            Key::Meta(self)
+        }
+    }
+
+    fn pair(key: impl Into<Key>, value: impl Into<Node>) -> Node {
+        Node::Pair(key.into(), Box::new(value.into()))
+    }
+
+    fn create(node: impl Into<Node>) -> Operation {
+        Operation::Create(node.into())
+    }
+
+    fn destroy(key: key::Key) -> Operation {
+        Operation::Destroy(key)
+    }
+
+    fn modify(key: key::Key, node: impl Into<Node>) -> Operation {
+        Operation::Modify(key, node.into())
+    }
+
+    fn increment(node: impl Into<Number>) -> Node {
+        Node::Increment(node.into())
+    }
+
+    #[test]
+    fn database_run_create() {
+        use Node::*;
+
+        let database = Database::new();
+        database.run([
+            create(vec![
+                pair(
+                    "Position",
+                    vec![pair("x", 0.0), pair("y", 1.0), pair("z", 2.0)],
+                ),
+                pair(
+                    velocity(),
+                    vec![pair("x", 0.0), pair("y", 1.0), pair("z", 2.0)],
+                ),
+                pair("Mass", vec![Node::from(0.0)]),
+            ]),
+            destroy(Key::NULL),
+            modify(Key::NULL, vec![pair("Position", pair("x", increment(5.0)))]),
+        ]);
+    }
+
+    fn position() -> &'static Meta {
+        dynamic(
+            "component::Position",
+            [field("x", r#static::<f64>), field("y", r#static::<f64>)],
+        )
+    }
+
+    fn velocity() -> &'static Meta {
+        dynamic(
+            "component::Velocity",
+            [field("x", r#static::<f64>), field("y", r#static::<f64>)],
+        )
+    }
+
+    struct Field {
+        offset: usize,
+        name: String,
+        meta: LazyLock<&'static Meta, Box<dyn FnOnce() -> &'static Meta + Send + Sync + 'static>>,
+    }
+
+    struct Meta {
+        index: usize,
+        name: String,
+        layout: Layout,
+        fields: Box<[Field]>,
+    }
+
+    enum Identifier {
+        Type(TypeId),
+        Index(usize),
+    }
+
+    impl Meta {
+        pub unsafe fn new(&self, capacity: usize) -> NonNull<u8> {
+            if self.layout.size() == 0 {
+                self.layout.dangling().cast()
+            } else {
+                let (layout, _) = self.layout.repeat(capacity).unwrap_unchecked();
+                NonNull::new_unchecked(alloc(layout).cast())
+            }
+        }
+
+        pub unsafe fn copy(
+            &self,
+            source: (NonNull<u8>, usize),
+            target: (NonNull<u8>, usize),
+            count: NonZeroUsize,
+        ) {
+            if self.layout.size() > 0 {
+                let source = source
+                    .0
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(source.1 * self.layout.size());
+                let target = target
+                    .0
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(target.1 * self.layout.size());
+                copy(source, target, count.get() * self.layout.size());
+            }
+        }
+
+        pub unsafe fn free(&self, data: NonNull<u8>, capacity: usize) {
+            let (layout, _) = self.layout.repeat(capacity).unwrap_unchecked();
+            dealloc(data.as_ptr().cast(), layout)
+        }
+    }
+
+    fn field(
+        name: impl Into<String>,
+        meta: impl FnOnce() -> &'static Meta + Send + Sync + 'static,
+    ) -> Field {
+        Field {
+            offset: 0,
+            name: name.into(),
+            meta: LazyLock::new(Box::new(meta)),
+        }
+    }
+
+    static REGISTRY: RwLock<BTreeMap<String, &'static Meta>> = RwLock::new(BTreeMap::new());
+
+    fn r#static<T: 'static>() -> &'static Meta {
+        let name = type_name::<T>().to_string();
+        if let Some(meta) = REGISTRY.read().get(&name) {
+            return meta;
+        }
+
+        let mut registry = REGISTRY.write();
+        let index = registry.len();
+        registry.entry(name).or_insert_with_key(|key| {
+            Box::leak(Box::new(Meta {
+                index,
+                name: key.clone(),
+                layout: Layout::new::<T>(),
+                fields: Box::new([]),
+            }))
+        })
+    }
+
+    fn dynamic(name: impl Into<String>, fields: impl IntoIterator<Item = Field>) -> &'static Meta {
+        let name = name.into();
+        if let Some(meta) = REGISTRY.read().get(&name) {
+            return meta;
+        }
+
+        let mut registry = REGISTRY.write();
+        let index = registry.len();
+        registry.entry(name.into()).or_insert_with_key(|key| {
+            let mut layout = Layout::new::<()>();
+            let fields = fields
+                .into_iter()
+                .map(|mut field| {
+                    let pair = layout.extend(field.meta.layout).unwrap();
+                    layout = pair.0;
+                    field.offset = pair.1;
+                    field
+                })
+                .collect();
+            Box::leak(Box::new(Meta {
+                index,
+                name: key.clone(),
+                layout: layout.pad_to_align(),
+                fields,
+            }))
+        })
     }
 }
 

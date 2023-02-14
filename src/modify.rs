@@ -662,7 +662,7 @@ impl<A: Template, R: Template> ShareTable<A, R> {
             let mut apply = Vec::new();
             for meta in adds.iter() {
                 let (index, column) = target.column_with(meta.identifier())?;
-                if column.meta().size > 0 {
+                if column.meta().layout().size() > 0 {
                     apply.push(index);
                 }
             }
@@ -801,7 +801,7 @@ fn resolve_copy_move(
 
     let mut index = 0;
     for source_column in source_table.columns() {
-        let copy = source_column.meta().size > 0;
+        let copy = source_column.meta().layout().size() > 0;
         let mut drop = source_column.meta().drop.0();
         while let Some(target_column) = target_table.columns().get(index) {
             if source_column.meta().identifier() == target_column.meta().identifier() {
@@ -843,7 +843,7 @@ fn lock<T>(indices: &[usize], table: &Table, with: impl FnOnce(&Table) -> T) -> 
     match indices.split_first() {
         Some((&index, rest)) => {
             let column = unsafe { get_unchecked(table.columns(), index) };
-            debug_assert!(column.meta().size > 0);
+            debug_assert!(column.meta().layout().size() > 0);
             let _guard = column.data().write();
             lock(rest, table, with)
         }
