@@ -196,17 +196,3 @@ impl<T: Template> Share<T> {
         Ok((share.0.clone(), share.1.clone()))
     }
 }
-
-pub(crate) fn is<T: Template>(table: &Table, database: &Database) -> bool {
-    match Share::<T>::from(database) {
-        Ok(pair) => table.index() == pair.1.index(),
-        Err(_) => false,
-    }
-}
-
-pub(crate) fn has<T: Template>(table: &Table, database: &Database) -> bool {
-    match Share::<T>::from(database) {
-        Ok(pair) => table.has_all(pair.1.types()),
-        Err(_) => false,
-    }
-}

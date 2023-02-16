@@ -23,14 +23,12 @@ use event::Events;
 use key::Key;
 use resources::Resources;
 use std::{
-    alloc::{alloc, dealloc, Layout},
+    alloc::Layout,
     any::{type_name, TypeId},
-    borrow::Cow,
     error, fmt,
     mem::{needs_drop, size_of, ManuallyDrop},
     num::NonZeroUsize,
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
-    sync::LazyLock,
 };
 pub use that_base_derive::{Datum, Filter, Template};
 
@@ -218,7 +216,6 @@ pub struct Database {
     keys: key::State,
     tables: table::State,
     resources: Resources,
-    filters: filter::State,
     events: Events,
 }
 
@@ -281,292 +278,432 @@ impl Meta {
     }
 }
 
+pub mod boba {
+    use crate as that_bass;
+    // #[derive(super::Filter)]
+    // pub struct Boba;
+    #[derive(super::Filter)]
+    pub enum Fett {
+        A,
+        B,
+        C,
+    }
+}
+
 impl Database {
     pub fn new() -> Self {
         Database {
             keys: key::State::new(),
             tables: table::State::new(),
             resources: Resources::new(),
-            filters: filter::State::new(),
             events: Events::new(),
         }
     }
 }
 
-mod dynamic {
-    use super::*;
-    use parking_lot::RwLock;
-    use std::{collections::BTreeMap, string};
+// mod dynamic {
+//     use super::*;
+//     use parking_lot::RwLock;
+//     use std::{collections::BTreeMap, string};
 
-    impl Database {
-        pub fn run(
-            &self,
-            operations: impl IntoIterator<Item = &Operation>,
-        ) -> Result<Value, Error> {
-            todo!()
-        }
-    }
+//     impl Database {
+//         pub fn run(
+//             &self,
+//             operations: impl IntoIterator<Item = &Operation>,
+//         ) -> Result<Value, Error> {
+//             todo!()
+//         }
+//     }
 
-    pub enum Node {
-        Null,
-        Number(Number),
-        String(String),
-        Increment(Number),
-        Pair(Key, Box<Node>),
-        List(Vec<Node>),
-    }
+//     pub enum Node {
+//         Null,
+//         Number(Number),
+//         String(String),
+//         Increment(Number),
+//         Pair(Key, Box<Node>),
+//         List(Vec<Node>),
+//     }
 
-    pub enum Operation {
-        Create(Node),
-        Destroy(Key),
-        Modify(Key, Node),
-    }
+//     pub enum Operation {
+//         Create(Node),
+//         Destroy(Key),
+//         Modify(Key, Node),
+//     }
 
-    pub enum String {
-        Borrow(&'static str),
-        Own(string::String),
-    }
+//     pub enum String {
+//         Borrow(&'static str),
+//         Own(string::String),
+//     }
 
-    pub enum Number {
-        Integer(i64),
-        Rational(f64),
-    }
+//     pub enum Number {
+//         Integer(i64),
+//         Rational(f64),
+//     }
 
-    pub enum Key {
-        Meta(&'static Meta),
-        Name(String),
-    }
+//     pub enum Key {
+//         Meta(&'static Meta),
+//         Name(String),
+//     }
 
-    impl Into<Node> for &'static str {
-        fn into(self) -> Node {
-            Node::String(String::from(self))
-        }
-    }
+//     impl Into<Node> for &'static str {
+//         fn into(self) -> Node {
+//             Node::String(String::from(self))
+//         }
+//     }
 
-    impl Into<Box<Node>> for &'static str {
-        fn into(self) -> Box<Node> {
-            Box::new(Node::from(self))
-        }
-    }
+//     impl Into<Box<Node>> for &'static str {
+//         fn into(self) -> Box<Node> {
+//             Box::new(Node::from(self))
+//         }
+//     }
 
-    impl Into<String> for &'static str {
-        fn into(self) -> String {
-            String::Borrow(self)
-        }
-    }
+//     impl Into<String> for &'static str {
+//         fn into(self) -> String {
+//             String::Borrow(self)
+//         }
+//     }
 
-    impl Into<Key> for &'static str {
-        fn into(self) -> String {
-            Key::Name(String::from(self))
-        }
-    }
+//     impl Into<Key> for &'static str {
+//         fn into(self) -> String {
+//             Key::Name(String::from(self))
+//         }
+//     }
 
-    impl Into<Node> for i64 {
-        fn into(self) -> Node {
-            Node::Number(Number::Integer(self))
-        }
-    }
+//     impl Into<Node> for i64 {
+//         fn into(self) -> Node {
+//             Node::Number(Number::Integer(self))
+//         }
+//     }
 
-    impl Into<Box<Node>> for i64 {
-        fn into(self) -> Node {
-            Box::new(Node::Number(Number::Integer(self)))
-        }
-    }
+//     impl Into<Box<Node>> for i64 {
+//         fn into(self) -> Node {
+//             Box::new(Node::Number(Number::Integer(self)))
+//         }
+//     }
 
-    impl Into<Node> for f64 {
-        fn into(self) -> Node {
-            Node::Number(Number::Rational(self))
-        }
-    }
+//     impl Into<Node> for f64 {
+//         fn into(self) -> Node {
+//             Node::Number(Number::Rational(self))
+//         }
+//     }
 
-    impl Into<Box<Node>> for f64 {
-        fn into(self) -> Node {
-            Box::new(Node::Number(Number::Rational(self)))
-        }
-    }
+//     impl Into<Box<Node>> for f64 {
+//         fn into(self) -> Node {
+//             Box::new(Node::Number(Number::Rational(self)))
+//         }
+//     }
 
-    impl Into<Node> for Vec<Node> {
-        fn into(self) -> Node {
-            Node::List(self)
-        }
-    }
+//     impl Into<Node> for Vec<Node> {
+//         fn into(self) -> Node {
+//             Node::List(self)
+//         }
+//     }
 
-    impl Into<Key> for &'static Meta {
-        fn into(self) -> Key {
-            Key::Meta(self)
-        }
-    }
+//     impl Into<Key> for &'static Meta {
+//         fn into(self) -> Key {
+//             Key::Meta(self)
+//         }
+//     }
 
-    fn pair(key: impl Into<Key>, value: impl Into<Node>) -> Node {
-        Node::Pair(key.into(), Box::new(value.into()))
-    }
+//     fn pair(key: impl Into<Key>, value: impl Into<Node>) -> Node {
+//         Node::Pair(key.into(), Box::new(value.into()))
+//     }
 
-    fn create(node: impl Into<Node>) -> Operation {
-        Operation::Create(node.into())
-    }
+//     fn create(node: impl Into<Node>) -> Operation {
+//         Operation::Create(node.into())
+//     }
 
-    fn destroy(key: key::Key) -> Operation {
-        Operation::Destroy(key)
-    }
+//     fn destroy(key: key::Key) -> Operation {
+//         Operation::Destroy(key)
+//     }
 
-    fn modify(key: key::Key, node: impl Into<Node>) -> Operation {
-        Operation::Modify(key, node.into())
-    }
+//     fn modify(key: key::Key, node: impl Into<Node>) -> Operation {
+//         Operation::Modify(key, node.into())
+//     }
 
-    fn increment(node: impl Into<Number>) -> Node {
-        Node::Increment(node.into())
-    }
+//     fn increment(node: impl Into<Number>) -> Node {
+//         Node::Increment(node.into())
+//     }
 
-    #[test]
-    fn database_run_create() {
-        use Node::*;
+//     #[test]
+//     fn database_run_create() {
+//         use Node::*;
 
-        let database = Database::new();
-        database.run([
-            create(vec![
-                pair(
-                    "Position",
-                    vec![pair("x", 0.0), pair("y", 1.0), pair("z", 2.0)],
-                ),
-                pair(
-                    velocity(),
-                    vec![pair("x", 0.0), pair("y", 1.0), pair("z", 2.0)],
-                ),
-                pair("Mass", vec![Node::from(0.0)]),
-            ]),
-            destroy(Key::NULL),
-            modify(Key::NULL, vec![pair("Position", pair("x", increment(5.0)))]),
-        ]);
-    }
+//         let database = Database::new();
+//         database.run([
+//             create(vec![
+//                 pair(
+//                     "Position",
+//                     vec![pair("x", 0.0), pair("y", 1.0), pair("z", 2.0)],
+//                 ),
+//                 pair(
+//                     velocity(),
+//                     vec![pair("x", 0.0), pair("y", 1.0), pair("z", 2.0)],
+//                 ),
+//                 pair("Mass", vec![Node::from(0.0)]),
+//             ]),
+//             destroy(Key::NULL),
+//             modify(Key::NULL, vec![pair("Position", pair("x", increment(5.0)))]),
+//         ]);
+//     }
 
-    fn position() -> &'static Meta {
-        dynamic(
-            "component::Position",
-            [field("x", r#static::<f64>), field("y", r#static::<f64>)],
-        )
-    }
+//     fn position() -> &'static Meta {
+//         dynamic(
+//             "component::Position",
+//             [field("x", r#static::<f64>), field("y", r#static::<f64>)],
+//         )
+//     }
 
-    fn velocity() -> &'static Meta {
-        dynamic(
-            "component::Velocity",
-            [field("x", r#static::<f64>), field("y", r#static::<f64>)],
-        )
-    }
+//     fn velocity() -> &'static Meta {
+//         dynamic(
+//             "component::Velocity",
+//             [field("x", r#static::<f64>), field("y", r#static::<f64>)],
+//         )
+//     }
 
-    struct Field {
-        offset: usize,
-        name: String,
-        meta: LazyLock<&'static Meta, Box<dyn FnOnce() -> &'static Meta + Send + Sync + 'static>>,
-    }
+//     struct Field {
+//         offset: usize,
+//         name: String,
+//         meta: LazyLock<&'static Meta, Box<dyn FnOnce() -> &'static Meta + Send + Sync + 'static>>,
+//     }
 
-    struct Meta {
-        index: usize,
-        name: String,
-        layout: Layout,
-        fields: Box<[Field]>,
-    }
+//     struct Meta {
+//         index: usize,
+//         name: String,
+//         layout: Layout,
+//         fields: Box<[Field]>,
+//     }
 
-    enum Identifier {
-        Type(TypeId),
-        Index(usize),
-    }
+//     enum Identifier {
+//         Type(TypeId),
+//         Index(usize),
+//     }
 
-    impl Meta {
-        pub unsafe fn new(&self, capacity: usize) -> NonNull<u8> {
-            if self.layout.size() == 0 {
-                self.layout.dangling().cast()
-            } else {
-                let (layout, _) = self.layout.repeat(capacity).unwrap_unchecked();
-                NonNull::new_unchecked(alloc(layout).cast())
-            }
-        }
+//     impl Meta {
+//         pub unsafe fn new(&self, capacity: usize) -> NonNull<u8> {
+//             if self.layout.size() == 0 {
+//                 self.layout.dangling().cast()
+//             } else {
+//                 let (layout, _) = self.layout.repeat(capacity).unwrap_unchecked();
+//                 NonNull::new_unchecked(alloc(layout).cast())
+//             }
+//         }
 
-        pub unsafe fn copy(
-            &self,
-            source: (NonNull<u8>, usize),
-            target: (NonNull<u8>, usize),
-            count: NonZeroUsize,
-        ) {
-            if self.layout.size() > 0 {
-                let source = source
-                    .0
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(source.1 * self.layout.size());
-                let target = target
-                    .0
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(target.1 * self.layout.size());
-                copy(source, target, count.get() * self.layout.size());
-            }
-        }
+//         pub unsafe fn copy(
+//             &self,
+//             source: (NonNull<u8>, usize),
+//             target: (NonNull<u8>, usize),
+//             count: NonZeroUsize,
+//         ) {
+//             if self.layout.size() > 0 {
+//                 let source = source
+//                     .0
+//                     .as_ptr()
+//                     .cast::<u8>()
+//                     .add(source.1 * self.layout.size());
+//                 let target = target
+//                     .0
+//                     .as_ptr()
+//                     .cast::<u8>()
+//                     .add(target.1 * self.layout.size());
+//                 copy(source, target, count.get() * self.layout.size());
+//             }
+//         }
 
-        pub unsafe fn free(&self, data: NonNull<u8>, capacity: usize) {
-            let (layout, _) = self.layout.repeat(capacity).unwrap_unchecked();
-            dealloc(data.as_ptr().cast(), layout)
-        }
-    }
+//         pub unsafe fn free(&self, data: NonNull<u8>, capacity: usize) {
+//             let (layout, _) = self.layout.repeat(capacity).unwrap_unchecked();
+//             dealloc(data.as_ptr().cast(), layout)
+//         }
+//     }
 
-    fn field(
-        name: impl Into<String>,
-        meta: impl FnOnce() -> &'static Meta + Send + Sync + 'static,
-    ) -> Field {
-        Field {
-            offset: 0,
-            name: name.into(),
-            meta: LazyLock::new(Box::new(meta)),
-        }
-    }
+//     fn field(
+//         name: impl Into<String>,
+//         meta: impl FnOnce() -> &'static Meta + Send + Sync + 'static,
+//     ) -> Field {
+//         Field {
+//             offset: 0,
+//             name: name.into(),
+//             meta: LazyLock::new(Box::new(meta)),
+//         }
+//     }
 
-    static REGISTRY: RwLock<BTreeMap<String, &'static Meta>> = RwLock::new(BTreeMap::new());
+//     static REGISTRY: RwLock<BTreeMap<String, &'static Meta>> = RwLock::new(BTreeMap::new());
 
-    fn r#static<T: 'static>() -> &'static Meta {
-        let name = type_name::<T>().to_string();
-        if let Some(meta) = REGISTRY.read().get(&name) {
-            return meta;
-        }
+//     fn r#static<T: 'static>() -> &'static Meta {
+//         let name = type_name::<T>().to_string();
+//         if let Some(meta) = REGISTRY.read().get(&name) {
+//             return meta;
+//         }
 
-        let mut registry = REGISTRY.write();
-        let index = registry.len();
-        registry.entry(name).or_insert_with_key(|key| {
-            Box::leak(Box::new(Meta {
-                index,
-                name: key.clone(),
-                layout: Layout::new::<T>(),
-                fields: Box::new([]),
-            }))
-        })
-    }
+//         let mut registry = REGISTRY.write();
+//         let index = registry.len();
+//         registry.entry(name).or_insert_with_key(|key| {
+//             Box::leak(Box::new(Meta {
+//                 index,
+//                 name: key.clone(),
+//                 layout: Layout::new::<T>(),
+//                 fields: Box::new([]),
+//             }))
+//         })
+//     }
 
-    fn dynamic(name: impl Into<String>, fields: impl IntoIterator<Item = Field>) -> &'static Meta {
-        let name = name.into();
-        if let Some(meta) = REGISTRY.read().get(&name) {
-            return meta;
-        }
+//     fn dynamic(name: impl Into<String>, fields: impl IntoIterator<Item = Field>) -> &'static Meta {
+//         let name = name.into();
+//         if let Some(meta) = REGISTRY.read().get(&name) {
+//             return meta;
+//         }
 
-        let mut registry = REGISTRY.write();
-        let index = registry.len();
-        registry.entry(name.into()).or_insert_with_key(|key| {
-            let mut layout = Layout::new::<()>();
-            let fields = fields
-                .into_iter()
-                .map(|mut field| {
-                    let pair = layout.extend(field.meta.layout).unwrap();
-                    layout = pair.0;
-                    field.offset = pair.1;
-                    field
-                })
-                .collect();
-            Box::leak(Box::new(Meta {
-                index,
-                name: key.clone(),
-                layout: layout.pad_to_align(),
-                fields,
-            }))
-        })
-    }
-}
+//         let mut registry = REGISTRY.write();
+//         let index = registry.len();
+//         registry.entry(name.into()).or_insert_with_key(|key| {
+//             let mut layout = Layout::new::<()>();
+//             let fields = fields
+//                 .into_iter()
+//                 .map(|mut field| {
+//                     let pair = layout.extend(field.meta.layout).unwrap();
+//                     layout = pair.0;
+//                     field.offset = pair.1;
+//                     field
+//                 })
+//                 .collect();
+//             Box::leak(Box::new(Meta {
+//                 index,
+//                 name: key.clone(),
+//                 layout: layout.pad_to_align(),
+//                 fields,
+//             }))
+//         })
+//     }
+// }
+
+// mod events_by_table {
+//     use super::*;
+
+//     /*
+//         TODO: Have the events by stored by table.
+//         - Listeners would pull events from their elligible tables (ex: `OnAdd<T>` would only pull from tables where `table.has::<T>()`).
+//         - PRO: Allows using `Filter` to pull only events from filtered tables.
+//         - PRO: Much more granular `create/destroy/modify` counters to turn on/off event collection.
+//         - PRO: `fold_swap` can be used to pull events rather than blocking on a single mutex.
+//         - CON: Adds a fair amount of complexity and many atomic operations which may not be necessary if contention is not an issue in
+//         the first place.
+//         - Listen pulls will need to be very quick (probably a `swap`) such that they hold the lock for a very short time.
+//         - All table operations will not contend on the same mutex; in fact they will only contend on listeners since only one table
+//         operation can (currently) take place at a time (guaranteed by the upgradable lock held during these operations).
+//         - Events will be ordered within a table.
+//         - To get a global ordering of events, a global atomic counter will need to be used.
+//         - Tables will need to initialize their event collection counter with `Events` when created.
+//         - `Events` will need to maintain a `Vec<Box<dyn Fn(&Table)>>` which initialize a newly created table's event counters.
+//     */
+//     struct TableEvents {
+//         index: u32,
+//         counts: (AtomicU64, AtomicU64, AtomicU64),
+//         events: RwLock<(Vec<TableRaw>, Vec<Key>)>,
+//     }
+//     #[derive(Clone, Copy, Debug)]
+//     struct TableRaw(usize, Keys, TableKind);
+//     #[derive(Clone, Copy, Debug)]
+//     enum TableKind {
+//         Create,
+//         Modify(u32),
+//         Destroy,
+//     }
+//     fn from_table_to_key_history<'a>(
+//         collect: &mut (Vec<TableRaw>, Vec<Key>),
+//         indices: &mut [u32],
+//         tables: &[TableEvents],
+//     ) {
+//         let start = collect.0.len();
+//         fold_swap(
+//             indices,
+//             (),
+//             &mut *collect,
+//             |_, collect, index| {
+//                 let index = *index as usize;
+//                 let table = unsafe { get_unchecked(tables, index) };
+//                 let Some(events) = table.events.try_read() else { return Err(()); };
+//                 Ok(extend(collect, &events))
+//             },
+//             |_, collect, index| {
+//                 let index = *index as usize;
+//                 let table = unsafe { get_unchecked(tables, index) };
+//                 let events = table.events.read();
+//                 extend(collect, &events);
+//             },
+//         );
+//         collect.0[start..].sort_by_key(|event| event.0);
+
+//         #[inline]
+//         const fn decompose(value: u64) -> (u32, u32) {
+//             ((value >> 32) as u32, value as u32)
+//         }
+
+//         #[inline]
+//         const fn compose(read: u32, key: u32) -> u64 {
+//             ((read as u64) << 32) | (key as u64)
+//         }
+
+//         #[inline]
+//         fn extend(collect: &mut (Vec<TableRaw>, Vec<Key>), events: &(Vec<TableRaw>, Vec<Key>)) {
+//             collect.0.extend(events.0.iter().map(|&(mut event)| {
+//                 event.1.index = event.1.index.saturating_add(collect.1.len() as _);
+//                 event
+//             }));
+//             collect.1.extend_from_slice(&events.1);
+//         }
+
+//         fn emit(
+//             table: &TableEvents,
+//             keys: &[Key],
+//             kind: TableKind,
+//             local: &AtomicU64,
+//             global: &AtomicUsize,
+//         ) {
+//             let values = decompose(local.load(Ordering::Relaxed));
+//             if values.0 > 0 {
+//                 let order = global.fetch_add(1, Ordering::Relaxed);
+//                 let mut events = table.events.write();
+//                 if values.1 > 0 {
+//                     let index = events.1.len();
+//                     events.0.push(TableRaw(
+//                         order,
+//                         Keys {
+//                             index: index as _,
+//                             count: keys.len() as _,
+//                         },
+//                         kind,
+//                     ));
+//                     events.1.extend_from_slice(keys);
+//                 } else {
+//                     events.0.push(TableRaw(
+//                         order,
+//                         Keys {
+//                             index: u32::MAX,
+//                             count: keys.len() as _,
+//                         },
+//                         kind,
+//                     ));
+//                 }
+//             }
+//         }
+
+//         fn get_keys<'a>(event: &TableRaw, keys: &'a [Key]) -> Option<&'a [Key]> {
+//             keys.get(event.1.index as usize..(event.1.index + event.1.count) as usize)
+//         }
+
+//         fn history<'a>(
+//             key: Key,
+//             map: &'a HashMap<(Key, u32), u32>,
+//         ) -> impl Iterator<Item = u32> + 'a {
+//             let mut last = map.get(&(key, u32::MAX));
+//             from_fn(move || {
+//                 let &table = last?;
+//                 last = map.get(&(key, table));
+//                 Some(table)
+//             })
+//         }
+//     }
+// }
 
 // mod locks {
 //     use std::marker::PhantomData;

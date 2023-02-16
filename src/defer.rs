@@ -1,8 +1,4 @@
-use crate::{
-    key::{Key, Slot},
-    template::Template,
-    Database, Error,
-};
+use crate::Database;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,

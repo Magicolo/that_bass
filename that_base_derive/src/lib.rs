@@ -72,73 +72,98 @@ pub fn filter(input: TokenStream) -> TokenStream {
     } = parse_macro_input!(input as DeriveInput);
     let (impl_generics, type_generics, where_clauses) = generics.split_for_impl();
     let filter_path = path(ident.span(), ["that_bass", "filter", "Filter"]);
-    let any_path = path(ident.span(), ["that_bass", "filter", "Any"]);
-    let same_path = path(ident.span(), ["that_bass", "filter", "Same"]);
-    let same_utility_path = path(ident.span(), ["that_bass", "core", "utility", "same"]);
+    let any_filter_path = path(ident.span(), ["that_bass", "filter", "Any"]);
+    let any_path = path(ident.span(), ["that_bass", "filter", "any"]);
+    let same_filter_path = path(ident.span(), ["that_bass", "filter", "Same"]);
+    let same_path = path(ident.span(), ["that_bass", "filter", "same"]);
+    let dynamic_path = path(ident.span(), ["that_bass", "filter", "Dynamic"]);
     let database_path = path(ident.span(), ["that_bass", "Database"]);
     let table_path = path(ident.span(), ["that_bass", "table", "Table"]);
     match data {
         Data::Struct(DataStruct { fields, .. }) => {
             let (construct, _, names, ..) = deconstruct_fields(&fields);
             let construct = construct(&names);
-            let count = names.len();
             quote!(
                 #[automatically_derived]
                 impl #impl_generics #filter_path for #ident #type_generics #where_clauses {
                     fn filter(&self, _table: &#table_path, _database: &#database_path) -> bool {
                         let #ident #construct = self;
-                        true #(&& #filter_path::filter(#names, _table, _database))*
+                        #filter_path::filter(&(#(#names,)*), _table, _database)
+                    }
+
+                    fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
+                        let #ident #construct = self;
+                        #filter_path::dynamic(&(#(#names,)*), _database)
                     }
                 }
 
                 #[automatically_derived]
-                impl #impl_generics #filter_path for #any_path<#ident #type_generics> #where_clauses {
+                impl #impl_generics #filter_path for #any_filter_path<#ident #type_generics> #where_clauses {
                     fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
                         let #ident #construct = self.inner();
-                        false #(|| #filter_path::filter(#names, _table, _database))*
+                        #filter_path::filter(&#any_path((#(#names,)*)), _table, _database)
+                    }
+
+                    fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
+                        let #ident #construct = self.inner();
+                        #filter_path::dynamic(&#any_path((#(#names,)*)), _database)
                     }
                 }
 
                 #[automatically_derived]
-                impl #impl_generics #filter_path for #same_path<#ident #type_generics> #where_clauses {
+                impl #impl_generics #filter_path for #same_filter_path<#ident #type_generics> #where_clauses {
                     fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
                         let #ident #construct = self.inner();
-                        #same_utility_path::<[bool; #count]>([#(#filter_path::filter(#names, _table, _database),)*]).unwrap_or(true)
+                        #filter_path::filter(&#same_path((#(#names,)*)), _table, _database)
+                    }
+
+                    fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
+                        let #ident #construct = self.inner();
+                        #filter_path::dynamic(&#same_path((#(#names,)*)), _database)
                     }
                 }
             )
         }
         Data::Enum(DataEnum { variants, .. }) => {
-            let mut all = Vec::new();
-            let mut any = Vec::new();
-            let mut same = Vec::new();
+            let mut matches = Vec::new();
+            let mut tuples = Vec::new();
             for Variant { ident:name, fields, .. } in variants {
                 let (construct, _, names, ..) = deconstruct_fields(&fields);
                 let construct = construct(&names);
-                let count = names.len();
-                all.push(quote!(#ident::#name #construct => true #(&& #filter_path::filter(#names, _table, _database))*));
-                any.push(quote!(#ident::#name #construct => false #(|| #filter_path::filter(#names, _table, _database))*));
-                same.push(quote!(#ident::#name #construct => #same_utility_path::<[bool; #count]>([#(#filter_path::filter(#names, _table, _database),)*]).unwrap_or(true)));
+                matches.push(quote!(#ident::#name #construct));
+                tuples.push(quote!((#(#names,)*)));
             }
             quote!(
                 #[automatically_derived]
                 impl #impl_generics #filter_path for #ident #type_generics #where_clauses {
                     fn filter(&self, _table: &#table_path, _database: &#database_path) -> bool {
-                        match self { #(#all,)* _ => true }
+                        match self { #(#matches => #filter_path::filter(&#tuples, _table, _database),)* _ => false }
+                    }
+
+                    fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
+                        match self { #(#matches => #filter_path::dynamic(&#tuples, _database),)* _ => #filter_path::dynamic(&false, _database) }
                     }
                 }
 
                 #[automatically_derived]
-                impl #impl_generics #filter_path for #any_path<#ident #type_generics> #where_clauses {
+                impl #impl_generics #filter_path for #any_filter_path<#ident #type_generics> #where_clauses {
                     fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
-                        match self.inner() { #(#any,)* _ => false }
+                        match self.inner() { #(#matches => #filter_path::filter(&#any_path(#tuples), _table, _database),)* _ => false }
+                    }
+
+                    fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
+                        match self.inner() { #(#matches => #filter_path::dynamic(&#any_path(#tuples), _database),)* _ => #filter_path::dynamic(&false, _database) }
                     }
                 }
 
                 #[automatically_derived]
-                impl #impl_generics #filter_path for #same_path<#ident #type_generics> #where_clauses {
+                impl #impl_generics #filter_path for #same_filter_path<#ident #type_generics> #where_clauses {
                     fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
-                        match self.inner() { #(#same,)* _ => false }
+                        match self.inner() { #(#matches => #filter_path::filter(&#same_path(#tuples), _table, _database),)* _ => false }
+                    }
+
+                    fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
+                        match self.inner() { #(#matches => #filter_path::dynamic(&#same_path(#tuples), _database),)* _ => #filter_path::dynamic(&false, _database) }
                     }
                 }
             )
