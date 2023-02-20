@@ -9,23 +9,34 @@ use std::{
     any::TypeId,
     collections::VecDeque,
     marker::PhantomData,
-    mem::{replace, ManuallyDrop},
+    mem::replace,
     ops::ControlFlow::{self, *},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering::*},
 };
 
 pub trait Event: Sized {
     fn declare(context: DeclareContext);
-    fn process<C: Collect<Self>>(collect: &mut C, context: ProcessContext) -> ControlFlow<()>;
+    fn process<C: Collect<Self>>(
+        collect: &mut C,
+        context: ProcessContext,
+    ) -> ControlFlow<(), usize>;
 }
 
 pub trait Collect<T> {
-    fn one(&mut self, item: T) -> ControlFlow<()>;
-    fn all<I: IntoIterator<Item = T>>(&mut self, items: I) -> ControlFlow<()>;
-    fn next(&mut self) -> Option<T>;
+    fn collect<I: IntoIterator<Item = T>>(&mut self, items: I) -> ControlFlow<(), usize>;
+
+    fn adapt<U, F: FnMut(U) -> T>(&mut self, adapt: F) -> Adapt<Self, T, U, F>
+    where
+        Self: Sized,
+    {
+        Adapt(self, adapt, PhantomData, PhantomData)
+    }
 }
 
-pub struct Events {
+#[derive(Clone)]
+pub struct Events<'a>(&'a State, table::Tables<'a>);
+
+pub(crate) struct State {
     ready: RwLock<Ready>,
     pending: Mutex<Chunk>,
     create: AtomicU64,
@@ -34,10 +45,15 @@ pub struct Events {
 }
 
 pub struct Listen<'d, E: Event> {
-    guard: Guard<'d, E>,
-    tables: table::Tables<'d>,
-    head: usize,
+    events: Events<'d>,
+    cursor: Cursor<E>,
     buffer: Buffer<E>,
+}
+
+pub struct Cursor<E: Event> {
+    head: usize,
+    version: usize,
+    _marker: PhantomData<E>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -52,6 +68,7 @@ pub struct DeclareContext<'a> {
     values: &'a mut [bool; 6],
 }
 
+#[derive(Clone)]
 pub struct ProcessContext<'a> {
     events: &'a [Raw],
     keys: &'a [Key],
@@ -77,7 +94,8 @@ pub enum Raw {
     Modify { keys: Keys, tables: Tables },
 }
 
-struct Guard<'a, E: Event>(&'a Events, usize, PhantomData<E>);
+pub struct Adapt<'a, C, S, T, A>(&'a mut C, A, PhantomData<S>, PhantomData<T>);
+
 struct Buffer<T>(VecDeque<T>, Keep);
 
 #[derive(Default)]
@@ -99,16 +117,69 @@ struct Chunk {
 
 impl Database {
     #[inline]
-    pub const fn events(&self) -> &Events {
-        &self.events
-    }
-
-    pub fn listen<E: Event>(&self) -> Listen<E> {
-        Listen::new(self)
+    pub fn events(&self) -> Events {
+        Events(&self.events, self.tables())
     }
 }
 
-impl Events {
+impl<'a> Events<'a> {
+    pub fn listen<E: Event>(&self) -> Listen<'a, E> {
+        Listen::new_with(self.clone())
+    }
+
+    #[inline]
+    pub(crate) fn emit_create(&self, keys: &[Key], table: &Table) {
+        self.emit(&self.0.destroy, keys, |index| Raw::Create {
+            keys: Keys {
+                index: index as _,
+                count: keys.len() as _,
+            },
+            table: table.index(),
+        })
+    }
+
+    #[inline]
+    pub(crate) fn emit_destroy(&self, keys: &[Key], table: &Table) {
+        self.emit(&self.0.destroy, keys, |index| Raw::Destroy {
+            keys: Keys {
+                index: index as _,
+                count: keys.len() as _,
+            },
+            table: table.index(),
+        })
+    }
+
+    #[inline]
+    pub(crate) fn emit_modify(&self, keys: &[Key], tables: (&Table, &Table)) {
+        self.emit(&self.0.modify, keys, |index| Raw::Modify {
+            keys: Keys {
+                index: index as _,
+                count: keys.len() as _,
+            },
+            tables: Tables {
+                source: tables.0.index(),
+                target: tables.1.index(),
+            },
+        })
+    }
+
+    fn emit(&self, guard: &AtomicU64, keys: &[Key], event: impl FnOnce(usize) -> Raw) {
+        let values = decompose(guard.load(Relaxed));
+        if values.0 == 0 {
+            return;
+        }
+
+        let mut pending = self.0.pending.lock();
+        let index = pending.keys.len();
+        pending.events.push(event(index));
+        if values.1 == 0 {
+            return;
+        }
+        pending.keys.extend_from_slice(keys);
+    }
+}
+
+impl State {
     pub fn new() -> Self {
         Self {
             pending: Default::default(),
@@ -119,179 +190,56 @@ impl Events {
         }
     }
 
-    pub(crate) fn emit_create(&self, keys: &[Key], table: &Table) {
-        let values = decompose(self.create.load(Relaxed));
-        if values.0 == 0 {
-            return;
-        }
-
-        let mut pending = self.pending.lock();
-        let index = pending.keys.len();
-        pending.events.push(Raw::Create {
-            keys: Keys {
-                index: index as _,
-                count: keys.len() as _,
-            },
-            table: table.index(),
+    fn add_declare(&self, values: [bool; 6]) {
+        self.update_declare(values, |source, target| {
+            target.fetch_add(source, Relaxed);
         });
-        if values.1 == 0 {
-            return;
-        }
-        pending.keys.extend_from_slice(keys);
     }
 
-    pub(crate) fn emit_destroy(&self, keys: &[Key], table: &Table) {
-        let values = decompose(self.destroy.load(Relaxed));
-        if values.0 == 0 {
-            return;
-        }
-
-        let mut pending = self.pending.lock();
-        let index = pending.keys.len();
-        pending.events.push(Raw::Destroy {
-            keys: Keys {
-                index: index as _,
-                count: keys.len() as _,
-            },
-            table: table.index(),
+    fn remove_declare(&self, values: [bool; 6]) {
+        self.update_declare(values, |source, target| {
+            target.fetch_sub(source, Relaxed);
         });
-        if values.1 == 0 {
-            return;
-        }
-        pending.keys.extend_from_slice(keys);
     }
 
-    pub(crate) fn emit_modify(&self, keys: &[Key], tables: (&Table, &Table)) {
-        let values = decompose(self.modify.load(Relaxed));
-        if values.0 == 0 {
-            return;
-        }
-
-        let mut pending = self.pending.lock();
-        let index = pending.keys.len();
-        pending.events.push(Raw::Modify {
-            keys: Keys {
-                index: index as _,
-                count: keys.len() as _,
-            },
-            tables: Tables {
-                source: tables.0.index(),
-                target: tables.1.index(),
-            },
-        });
-        if values.1 == 0 {
-            return;
-        }
-        pending.keys.extend_from_slice(keys);
-    }
-
-    fn update<E: Event, C: Collect<E>>(
-        &self,
-        collect: &mut C,
-        head: &mut usize,
-        version: &mut usize,
-        tables: &mut table::Tables,
-    ) -> Option<E> {
-        if let Some(event) = collect.next() {
-            return Some(event);
-        }
-
-        let ready = self.ready.read();
-        debug_assert!(*version + 1 >= ready.version);
-        if *version < ready.version {
-            *head -= ready.head;
-            *version = ready.version;
-            ready.seen.fetch_add(1, Relaxed);
-        }
-        self.process(collect, &ready, head, tables);
-        if let Some(event) = collect.next() {
-            return Some(event);
-        }
-
-        // TODO: There should be some kind of version check with `self.pending` that would allow to return early without taking a
-        // write lock if there are no new events.
-        drop(ready);
-
-        let mut ready = self.ready.write();
-        let chunk = {
-            let chunk = ready.last.take().unwrap_or_default();
-            // The time spent with the `pending` lock is minimized as much as possible since it may block other threads
-            // that hold database locks. The trade-off here is that the `ready` write lock may be taken in vain when `pending`
-            // has no new events.
-            let mut pending = self.pending.lock();
-            if pending.events.len() == 0 {
-                ready.last = Some(chunk);
-                return None;
-            }
-            replace(&mut *pending, chunk)
-        };
-
-        ready.chunks.push_back(chunk);
-        let drain = ready.next;
-        let buffers = *ready.count.get_mut();
-        let seen = ready.seen.get_mut();
-        if *seen >= buffers {
-            *seen = 1;
-            if let Some(mut chunk) = ready
-                .chunks
-                .drain(..drain)
-                .max_by_key(|chunk| chunk.events.capacity() + chunk.keys.capacity())
-            {
-                chunk.events.clear();
-                chunk.keys.clear();
-                ready.last = Some(chunk);
-            }
-            ready.version += 1;
-            ready.head = ready.next;
-            ready.next = ready.chunks.len();
-            *head -= ready.head;
-            *version = ready.version;
-        }
-
-        self.process(collect, &RwLockWriteGuard::downgrade(ready), head, tables);
-        collect.next()
-    }
-
-    fn process<E: Event, C: Collect<E>>(
-        &self,
-        collect: &mut C,
-        ready: &Ready,
-        head: &mut usize,
-        tables: &mut table::Tables,
-    ) {
-        tables.update();
-        let head = replace(head, ready.chunks.len());
-        for chunk in ready.chunks.range(head..) {
-            let context = ProcessContext {
-                events: &chunk.events,
-                keys: &chunk.keys,
-                tables: &tables,
-            };
-            if let Break(_) = E::process(collect, context) {
-                break;
+    fn update_declare(&self, values: [bool; 6], update: impl Fn(u64, &AtomicU64)) {
+        fn next(listen: bool, keys: bool, target: &AtomicU64, update: impl Fn(u64, &AtomicU64)) {
+            if listen {
+                update(recompose(1, if keys { 1 } else { 0 }), target);
             }
         }
+        next(values[0], values[1], &self.create, &update);
+        next(values[2], values[3], &self.destroy, &update);
+        next(values[4], values[5], &self.modify, &update);
+    }
+}
+
+impl<'a, C: Collect<S>, S, T, A: FnMut(T) -> S> Collect<T> for Adapt<'a, C, S, T, A> {
+    #[inline]
+    fn collect<I: IntoIterator<Item = T>>(&mut self, items: I) -> ControlFlow<(), usize> {
+        self.0.collect(items.into_iter().map(&mut self.1))
     }
 }
 
 impl<T> Collect<T> for Buffer<T> {
-    fn one(&mut self, item: T) -> ControlFlow<()> {
-        self.0.push_back(item);
-        self.1.apply(&mut self.0)
-    }
-
-    fn all<I: IntoIterator<Item = T>>(&mut self, items: I) -> ControlFlow<()> {
+    fn collect<I: IntoIterator<Item = T>>(&mut self, items: I) -> ControlFlow<(), usize> {
+        let count = self.0.len();
         self.0.extend(items);
-        self.1.apply(&mut self.0)
-    }
-
-    #[inline]
-    fn next(&mut self) -> Option<T> {
-        self.0.pop_front()
+        if self.1.apply(&mut self.0) {
+            Continue(self.0.len() - count)
+        } else {
+            Break(())
+        }
     }
 }
 
 impl DeclareContext<'_> {
+    pub fn any(&mut self, keys: bool) {
+        self.create(keys);
+        self.modify(keys);
+        self.destroy(keys);
+    }
+
     pub fn create(&mut self, keys: bool) {
         self.values[0] |= true;
         self.values[1] |= keys;
@@ -305,6 +253,15 @@ impl DeclareContext<'_> {
     pub fn modify(&mut self, keys: bool) {
         self.values[4] |= true;
         self.values[5] |= keys;
+    }
+}
+
+impl<'a> DeclareContext<'a> {
+    #[inline]
+    pub fn own(&mut self) -> DeclareContext {
+        DeclareContext {
+            values: self.values,
+        }
     }
 }
 
@@ -344,27 +301,108 @@ impl<'a, E: Event> Listen<'a, E> {
     }
 
     pub fn with<F: Event>(self) -> Listen<'a, F> {
-        // Dropping the guard only to create a new one right after would be useless ceremony. `ManuallyDrop` helps skip some of it.
-        let guard = ManuallyDrop::new(self.guard);
-        Self::remove_declare(guard.0);
-        Listen::<F>::add_declare(guard.0);
-        Listen {
-            guard: Guard(guard.0, guard.1, PhantomData),
-            tables: self.tables,
-            head: self.head,
-            buffer: Buffer(VecDeque::new(), self.buffer.1),
-        }
-    }
-
-    fn new(database: &'a Database) -> Self {
-        Self::add_declare(database.events());
-        let ready = database.events().ready.read();
+        self.events.0.add_declare(Listen::<F>::declare());
+        let ready = self.events.0.ready.read();
         ready.count.fetch_add(1, Relaxed);
         ready.seen.fetch_add(1, Relaxed);
         Listen {
-            guard: Guard(database.events(), ready.version, PhantomData),
-            tables: database.tables(),
-            head: ready.chunks.len(),
+            events: self.events.clone(),
+            cursor: Cursor {
+                head: self.cursor.head,
+                version: self.cursor.version,
+                _marker: PhantomData,
+            },
+            buffer: Buffer(VecDeque::new(), Keep::All),
+        }
+    }
+
+    pub fn update(&mut self) -> bool {
+        let ready = self.events.0.ready.read();
+        debug_assert!(self.cursor.version + 1 >= ready.version);
+        if self.cursor.version < ready.version {
+            self.cursor.head -= ready.head;
+            self.cursor.version = ready.version;
+            ready.seen.fetch_add(1, Relaxed);
+        }
+
+        let count = self.process(&ready);
+        if count > 0 {
+            return true;
+        }
+
+        // TODO: There should be some kind of version check with `self.pending` that would allow to return early without taking a
+        // write lock if there are no new events.
+        drop(ready);
+
+        let mut ready = self.events.0.ready.write();
+        let chunk = {
+            let chunk = ready.last.take().unwrap_or_default();
+            // The time spent with the `pending` lock is minimized as much as possible since it may block other threads
+            // that hold database locks. The trade-off here is that the `ready` write lock may be taken in vain when `pending`
+            // has no new events.
+            let mut pending = self.events.0.pending.lock();
+            if pending.events.len() == 0 {
+                ready.last = Some(chunk);
+                return false;
+            }
+            replace(&mut *pending, chunk)
+        };
+
+        ready.chunks.push_back(chunk);
+        let drain = ready.next;
+        let buffers = *ready.count.get_mut();
+        let seen = ready.seen.get_mut();
+        if *seen >= buffers {
+            *seen = 1;
+            if let Some(mut chunk) = ready
+                .chunks
+                .drain(..drain)
+                .max_by_key(|chunk| chunk.events.capacity() + chunk.keys.capacity())
+            {
+                chunk.events.clear();
+                chunk.keys.clear();
+                ready.last = Some(chunk);
+            }
+            ready.version += 1;
+            ready.head = ready.next;
+            ready.next = ready.chunks.len();
+            self.cursor.head -= ready.head;
+            self.cursor.version = ready.version;
+        }
+
+        self.process(&RwLockWriteGuard::downgrade(ready)) > 0
+    }
+
+    fn process(&mut self, ready: &Ready) -> usize {
+        self.events.1.update();
+        let head = replace(&mut self.cursor.head, ready.chunks.len());
+        let mut sum = 0;
+        for chunk in ready.chunks.range(head..) {
+            let context = ProcessContext {
+                events: &chunk.events,
+                keys: &chunk.keys,
+                tables: &self.events.1,
+            };
+            match E::process(&mut self.buffer, context) {
+                Continue(count) => sum += count,
+                Break(_) => break,
+            }
+        }
+        sum
+    }
+
+    fn new_with(events: Events<'a>) -> Self {
+        events.0.add_declare(Self::declare());
+        let ready = events.0.ready.read();
+        ready.count.fetch_add(1, Relaxed);
+        ready.seen.fetch_add(1, Relaxed);
+        Listen {
+            events,
+            cursor: Cursor {
+                head: ready.chunks.len(),
+                version: ready.version,
+                _marker: PhantomData,
+            },
             buffer: Buffer(VecDeque::new(), Keep::All),
         }
     }
@@ -376,28 +414,6 @@ impl<'a, E: Event> Listen<'a, E> {
         });
         values
     }
-
-    fn add_declare(events: &Events) {
-        Self::update(events, Self::declare(), |source, target| {
-            target.fetch_add(source, Relaxed);
-        });
-    }
-
-    fn remove_declare(events: &Events) {
-        Self::update(events, Self::declare(), |source, target| {
-            target.fetch_sub(source, Relaxed);
-        });
-    }
-
-    fn update(events: &Events, values: [bool; 6], update: impl Fn(u64, &AtomicU64)) {
-        let mut index = 0;
-        for channel in [&events.create, &events.destroy, &events.modify] {
-            if values[index] {
-                update(recompose(1, if values[index + 1] { 1 } else { 0 }), channel);
-            }
-            index += 2;
-        }
-    }
 }
 
 impl<E: Event> Iterator for Listen<'_, E> {
@@ -405,45 +421,67 @@ impl<E: Event> Iterator for Listen<'_, E> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.guard.0.update(
-            &mut self.buffer,
-            &mut self.head,
-            &mut self.guard.1,
-            &mut self.tables,
-        )
+        if let Some(event) = self.buffer.0.pop_front() {
+            return Some(event);
+        }
+        self.update();
+        self.buffer.0.pop_front()
     }
 }
 
-impl<E: Event> Drop for Guard<'_, E> {
+impl<E: Event> Drop for Listen<'_, E> {
     fn drop(&mut self) {
-        Listen::<E>::remove_declare(self.0);
-        let ready = self.0.ready.read();
+        self.events.0.remove_declare(Listen::<E>::declare());
+        let ready = self.events.0.ready.read();
         ready.count.fetch_sub(1, Relaxed);
-        if self.1 == ready.version {
+        if self.cursor.version == ready.version {
             ready.seen.fetch_sub(1, Relaxed);
         }
     }
 }
 
 impl Keep {
-    fn apply<T>(&self, items: &mut VecDeque<T>) -> ControlFlow<()> {
+    fn apply<T>(&self, items: &mut VecDeque<T>) -> bool {
         match *self {
-            Keep::All => Continue(()),
+            Keep::All => true,
             Keep::First(0) | Keep::Last(0) => {
                 items.clear();
-                Break(())
+                false
             }
-            Keep::First(count) if items.len() < count => Continue(()),
+            Keep::First(count) if items.len() < count => true,
             Keep::First(count) => {
                 items.truncate(count);
-                Break(())
+                false
             }
-            Keep::Last(count) if items.len() < count => Continue(()),
+            Keep::Last(count) if items.len() < count => true,
             Keep::Last(count) => {
                 items.drain(..items.len() - count);
-                Continue(())
+                true
             }
         }
+    }
+}
+
+impl Event for () {
+    fn declare(_: DeclareContext) {}
+    fn process<C: Collect<Self>>(_: &mut C, _: ProcessContext) -> ControlFlow<(), usize> {
+        Break(())
+    }
+}
+
+impl Event for Raw {
+    fn declare(mut context: DeclareContext) {
+        context.create(true);
+        context.destroy(true);
+        context.modify(true);
+    }
+
+    #[inline]
+    fn process<C: Collect<Self>>(
+        collect: &mut C,
+        context: ProcessContext,
+    ) -> ControlFlow<(), usize> {
+        collect.collect(context.events().iter().copied())
     }
 }
 
@@ -484,12 +522,7 @@ pub mod events {
     }
 
     macro_rules! with {
-        ($n:ident, $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident) => {
-            impl Database {
-                pub fn $n(&self) -> Listen<$on> {
-                    self.listen()
-                }
-            }
+        ($on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident) => {
             impl<'a> Listen<'a, $on> {
                 pub fn with_key(self) -> Listen<'a, $on_key> {
                     self.with()
@@ -517,27 +550,6 @@ pub mod events {
             impl<'a> Listen<'a, $on_types> {
                 pub fn with_key(self) -> Listen<'a, $on_key_types> {
                     self.with()
-                }
-            }
-
-            impl Into<Key> for $on_key {
-                #[inline]
-                fn into(self) -> Key {
-                    self.key
-                }
-            }
-
-            impl<T> Into<Key> for $on_key_type<T> {
-                #[inline]
-                fn into(self) -> Key {
-                    self.key
-                }
-            }
-
-            impl Into<Key> for $on_key_types {
-                #[inline]
-                fn into(self) -> Key {
-                    self.key
                 }
             }
         };
@@ -590,7 +602,6 @@ pub mod events {
             }
 
             with!(
-                $n,
                 $on,
                 $on_key,
                 $on_type,
@@ -598,6 +609,33 @@ pub mod events {
                 $on_key_type,
                 $on_key_types
             );
+
+            impl Into<Key> for $on_key {
+                #[inline]
+                fn into(self) -> Key {
+                    self.key
+                }
+            }
+
+            impl<T> Into<Key> for $on_key_type<T> {
+                #[inline]
+                fn into(self) -> Key {
+                    self.key
+                }
+            }
+
+            impl Into<Key> for $on_key_types {
+                #[inline]
+                fn into(self) -> Key {
+                    self.key
+                }
+            }
+
+            impl<'a> Events<'a> {
+                pub fn $n(&self) -> Listen<'a, $on> {
+                    self.listen()
+                }
+            }
 
             impl Event for $on {
                 fn declare(mut context: DeclareContext) {
@@ -608,17 +646,16 @@ pub mod events {
                 fn process<C: Collect<Self>>(
                     collect: &mut C,
                     context: ProcessContext,
-                ) -> ControlFlow<()> {
-                    for event in context.events() {
-                        let &Raw::$raw { keys, $table_f } = event else { continue; };
+                ) -> ControlFlow<(), usize> {
+                    collect.collect(context.events().iter().filter_map(|event| {
+                        let &Raw::$raw { keys, $table_f } = event else { return None; };
                         let types = $count(&context, $table_f);
-                        collect.one(Self {
+                        Some(Self {
                             keys: keys.count as _,
                             types: types,
                             $table_f,
-                        })?;
-                    }
-                    Continue(())
+                        })
+                    }))
                 }
             }
 
@@ -631,18 +668,23 @@ pub mod events {
                 fn process<C: Collect<Self>>(
                     collect: &mut C,
                     context: ProcessContext,
-                ) -> ControlFlow<()> {
-                    for event in context.events() {
-                        let &Raw::$raw { keys, $table_f } = event else { continue; };
-                        let keys = context.keys(keys);
-                        let types = $count(&context, $table_f);
-                        collect.all(keys.iter().map(|&key| Self {
-                            key,
-                            types,
-                            $table_f,
-                        }))?;
-                    }
-                    Continue(())
+                ) -> ControlFlow<(), usize> {
+                    collect.collect(
+                        context
+                            .events()
+                            .iter()
+                            .filter_map(|event| {
+                                let &Raw::$raw { keys, $table_f } = event else { return None; };
+                                let keys = context.keys(keys);
+                                let types = $count(&context, $table_f);
+                                Some(keys.iter().map(move |&key| Self {
+                                    key,
+                                    types,
+                                    $table_f,
+                                }))
+                            })
+                            .flatten(),
+                    )
                 }
             }
 
@@ -655,16 +697,21 @@ pub mod events {
                 fn process<C: Collect<Self>>(
                     collect: &mut C,
                     context: ProcessContext,
-                ) -> ControlFlow<()> {
-                    for event in context.events() {
-                        let &Raw::$raw { keys, $table_f } = event else { continue; };
-                        collect.all($types(&context, $table_f).map(|r#type| Self {
-                            keys: keys.count as _,
-                            r#type,
-                            $table_f,
-                        }))?;
-                    }
-                    Continue(())
+                ) -> ControlFlow<(), usize> {
+                    collect.collect(
+                        context
+                            .events()
+                            .iter()
+                            .filter_map(|event| {
+                                let &Raw::$raw { keys, $table_f } = event else { return None; };
+                                Some($types(&context, $table_f).map(move |r#type| Self {
+                                    keys: keys.count as _,
+                                    r#type,
+                                    $table_f,
+                                }))
+                            })
+                            .flatten(),
+                    )
                 }
             }
 
@@ -677,19 +724,24 @@ pub mod events {
                 fn process<C: Collect<Self>>(
                     collect: &mut C,
                     context: ProcessContext,
-                ) -> ControlFlow<()> {
-                    for event in context.events() {
-                        let &Raw::$raw { keys, $table_f } = event else { continue; };
-                        let keys = context.keys(keys);
-                        for r#type in $types(&context, $table_f) {
-                            collect.all(keys.iter().map(move |&key| Self {
-                                key,
-                                r#type,
-                                $table_f,
-                            }))?;
-                        }
-                    }
-                    Continue(())
+                ) -> ControlFlow<(), usize> {
+                    collect.collect(
+                        context
+                            .events()
+                            .iter()
+                            .filter_map(|event| {
+                                let &Raw::$raw { keys, $table_f } = event else { return None; };
+                                let keys = context.keys(keys);
+                                Some($types(&context, $table_f).flat_map(move |r#type| {
+                                    keys.iter().map(move |&key| Self {
+                                        key,
+                                        r#type,
+                                        $table_f,
+                                    })
+                                }))
+                            })
+                            .flatten(),
+                    )
                 }
             }
 
@@ -702,18 +754,19 @@ pub mod events {
                 fn process<C: Collect<Self>>(
                     collect: &mut C,
                     context: ProcessContext,
-                ) -> ControlFlow<()> {
-                    for event in context.events() {
-                        let &Raw::$raw { keys, $table_f } = event else { continue; };
+                ) -> ControlFlow<(), usize> {
+                    collect.collect(context.events().iter().filter_map(|event| {
+                        let &Raw::$raw { keys, $table_f } = event else { return None; };
                         if $has::<D>(&context, $table_f) {
-                            collect.one(Self {
+                            Some(Self {
                                 keys: keys.count as _,
                                 $table_f,
                                 _marker: PhantomData,
-                            })?;
+                            })
+                        } else {
+                            None
                         }
-                    }
-                    Continue(())
+                    }))
                 }
             }
 
@@ -726,19 +779,26 @@ pub mod events {
                 fn process<C: Collect<Self>>(
                     collect: &mut C,
                     context: ProcessContext,
-                ) -> ControlFlow<()> {
-                    for event in context.events() {
-                        let &Raw::$raw { keys, $table_f } = event else { continue; };
-                        let keys = context.keys(keys);
-                        if $has::<D>(&context, $table_f) {
-                            collect.all(keys.iter().map(|&key| Self {
-                                key,
-                                $table_f,
-                                _marker: PhantomData,
-                            }))?;
-                        }
-                    }
-                    Continue(())
+                ) -> ControlFlow<(), usize> {
+                    collect.collect(
+                        context
+                            .events()
+                            .iter()
+                            .filter_map(|event| {
+                                let &Raw::$raw { keys, $table_f } = event else { return None; };
+                                let keys = context.keys(keys);
+                                if $has::<D>(&context, $table_f) {
+                                    Some(keys.iter().map(move |&key| Self {
+                                        key,
+                                        $table_f,
+                                        _marker: PhantomData,
+                                    }))
+                                } else {
+                                    None
+                                }
+                            })
+                            .flatten(),
+                    )
                 }
             }
         };
@@ -918,4 +978,131 @@ pub mod events {
         remove_types,
         remove_has
     );
+
+    pub enum OnAny {
+        Create(OnCreate),
+        Modify(OnModify),
+        Destroy(OnDestroy),
+    }
+    pub enum OnAnyKey {
+        Create(OnCreateKey),
+        Modify(OnModifyKey),
+        Destroy(OnDestroyKey),
+    }
+    pub enum OnAnyType<T> {
+        Create(OnCreateType<T>),
+        Modify(OnModifyType<T>),
+        Destroy(OnDestroyType<T>),
+    }
+    pub enum OnAnyTypes {
+        Create(OnCreateTypes),
+        Modify(OnModifyTypes),
+        Destroy(OnDestroyTypes),
+    }
+    pub enum OnAnyKeyType<T> {
+        Create(OnCreateKeyType<T>),
+        Modify(OnModifyKeyType<T>),
+        Destroy(OnDestroyKeyType<T>),
+    }
+    pub enum OnAnyKeyTypes {
+        Create(OnCreateKeyTypes),
+        Modify(OnModifyKeyTypes),
+        Destroy(OnDestroyKeyTypes),
+    }
+
+    with!(
+        OnAny,
+        OnAnyKey,
+        OnAnyType,
+        OnAnyTypes,
+        OnAnyKeyType,
+        OnAnyKeyTypes
+    );
+
+    macro_rules! body {
+        ($keys:expr) => {
+            fn declare(mut context: DeclareContext) {
+                context.any($keys)
+            }
+
+            #[inline]
+            fn process<C: Collect<Self>>(
+                collect: &mut C,
+                context: ProcessContext,
+            ) -> ControlFlow<(), usize> {
+                let mut sum = 0;
+                for event in context.events() {
+                    sum += match *event {
+                        Raw::Create { .. } => {
+                            Event::process(&mut collect.adapt(Self::Create), context.clone())
+                        }
+                        Raw::Destroy { .. } => {
+                            Event::process(&mut collect.adapt(Self::Destroy), context.clone())
+                        }
+                        Raw::Modify { .. } => {
+                            Event::process(&mut collect.adapt(Self::Modify), context.clone())
+                        }
+                    }?;
+                }
+                Continue(sum)
+            }
+        };
+    }
+
+    impl Event for OnAny {
+        body!(false);
+    }
+
+    impl Event for OnAnyKey {
+        body!(true);
+    }
+
+    impl<T: Datum> Event for OnAnyType<T> {
+        body!(false);
+    }
+
+    impl Event for OnAnyTypes {
+        body!(false);
+    }
+
+    impl<T: Datum> Event for OnAnyKeyType<T> {
+        body!(true);
+    }
+
+    impl Event for OnAnyKeyTypes {
+        body!(true);
+    }
+
+    impl Into<Key> for OnAnyKey {
+        #[inline]
+        fn into(self) -> Key {
+            match self {
+                OnAnyKey::Create(event) => event.into(),
+                OnAnyKey::Modify(event) => event.into(),
+                OnAnyKey::Destroy(event) => event.into(),
+            }
+        }
+    }
+
+    impl<T> Into<Key> for OnAnyKeyType<T> {
+        #[inline]
+        fn into(self) -> Key {
+            match self {
+                OnAnyKeyType::Create(event) => event.into(),
+                OnAnyKeyType::Modify(event) => event.into(),
+                OnAnyKeyType::Destroy(event) => event.into(),
+            }
+        }
+    }
+
+    impl Into<Key> for OnAnyKeyTypes {
+        #[inline]
+        fn into(self) -> Key {
+            match self {
+                OnAnyKeyTypes::Create(event) => event.into(),
+                OnAnyKeyTypes::Modify(event) => event.into(),
+                OnAnyKeyTypes::Destroy(event) => event.into(),
+            }
+        }
+    }
 }

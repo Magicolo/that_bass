@@ -1,4 +1,5 @@
 use crate::{
+    event::Events,
     key::{Key, Keys},
     table::Table,
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
@@ -11,8 +12,8 @@ use std::{
 };
 
 pub struct Create<'d, T: Template> {
-    database: &'d Database,
     keys: Keys<'d>,
+    events: Events<'d>,
     state: Arc<T::State>,
     table: Arc<Table>,
     reserved: Vec<Key>,
@@ -24,8 +25,8 @@ struct Share<T: Template>(Arc<T::State>, Arc<Table>);
 impl Database {
     pub fn create<T: Template>(&self) -> Result<Create<T>, Error> {
         Share::<T>::from(self).map(|(inner, table)| Create {
-            database: self,
             keys: self.keys(),
+            events: self.events(),
             state: inner,
             table,
             reserved: Vec::new(),
@@ -166,8 +167,7 @@ impl<T: Template> Create<'_, T> {
         self.table
             .count
             .fetch_add(count.get() as _, Ordering::Release);
-        self.database
-            .events()
+        self.events
             .emit_create(&keys[start..start + count.get()], &self.table);
         drop(keys);
         self.reserved.clear();

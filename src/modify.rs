@@ -2,6 +2,7 @@ use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 
 use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
+    event::Events,
     filter::Filter,
     key::{Key, Keys},
     table::{Column, Table, Tables},
@@ -20,6 +21,7 @@ use std::{
 pub struct Modify<'d, A: Template, R: Template, F> {
     database: &'d Database,
     keys: Keys<'d>,
+    events: Events<'d>,
     pairs: HashMap<Key, MaybeUninit<A>>, // A `HashMap` is used because the move algorithm assumes that rows will be unique.
     indices: Vec<usize>,                 // May be reordered (ex: by `fold_swap`).
     states: Vec<Result<State<A>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
@@ -35,6 +37,7 @@ pub struct ModifyAll<'d, A: Template, R: Template, F> {
     database: &'d Database,
     tables: Tables<'d>,
     keys: Keys<'d>,
+    events: Events<'d>,
     index: usize,
     states: Vec<StateAll<A>>,
     filter: F,
@@ -73,6 +76,7 @@ impl Database {
         ShareMeta::<(A, R)>::from(self).map(|_| Modify {
             database: self,
             keys: self.keys(),
+            events: self.events(),
             pairs: HashMap::new(),
             pending: Vec::new(),
             indices: Vec::new(),
@@ -90,6 +94,7 @@ impl Database {
             database: self,
             tables: self.tables(),
             keys: self.keys(),
+            events: self.events(),
             index: 0,
             states: Vec::new(),
             filter: (),
@@ -163,6 +168,7 @@ impl<'d, A: Template, R: Template, F> Modify<'d, A, R, F> {
         Modify {
             database: self.database,
             keys: self.keys,
+            events: self.events,
             pairs: self.pairs,
             pending: self.pending,
             states: self.states,
@@ -291,8 +297,8 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                     return Ok(sum);
                 };
                 move_to(
-                    &self.database,
                     &self.keys,
+                    &self.events,
                     &self.pairs,
                     &mut state.templates,
                     moves,
@@ -346,8 +352,8 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                         (source, target, low, high, count)
                     };
                 move_to(
-                    &self.database,
                     &self.keys,
+                    &self.events,
                     &self.pairs,
                     &mut state.templates,
                     moves,
@@ -476,6 +482,7 @@ impl<'d, A: Template, R: Template, F> ModifyAll<'d, A, R, F> {
             database: self.database,
             tables: self.tables,
             keys: self.keys,
+            events: self.events,
             index: self.index,
             states: self.states,
             filter: (self.filter, filter),
@@ -521,8 +528,8 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
                             source,
                             target,
                             state,
-                            self.database,
                             &self.keys,
+                            &self.events,
                             with,
                         ))
                 } else if set {
@@ -540,8 +547,8 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
                         source,
                         target,
                         state,
-                        self.database,
                         &self.keys,
+                        &self.events,
                         with,
                     )
                 } else if state.source.index() > state.target.index() {
@@ -551,8 +558,8 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
                         source,
                         target,
                         state,
-                        self.database,
                         &self.keys,
+                        &self.events,
                         with,
                     )
                 } else if set {
@@ -569,8 +576,8 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
         mut source: RwLockWriteGuard<Vec<Key>>,
         target: RwLockUpgradableReadGuard<Vec<Key>>,
         state: &StateAll<A>,
-        database: &Database,
         keys: &Keys,
+        events: &Events,
         mut with: impl FnMut() -> A,
     ) -> usize {
         let count = state.source.count.swap(0, Ordering::AcqRel);
@@ -606,7 +613,7 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
         drop(source);
         // Although `source` has been dropped, coherence with be maintained since the `target` lock prevent the keys
         // moving again before `on_remove` is done.
-        database.events().emit_modify(
+        events.emit_modify(
             &target[start..start + count.get()],
             (&state.source, &state.target),
         );
@@ -690,8 +697,8 @@ impl<A: Template, R: Template> ShareTable<A, R> {
 }
 
 fn move_to<'d, 'a, V, A: Template>(
-    database: &Database,
     keys: &Keys,
+    events: &Events,
     set: &HashMap<Key, V>,
     templates: &mut Vec<A>,
     moves: &mut Vec<(usize, usize, NonZeroUsize)>,
@@ -775,7 +782,7 @@ fn move_to<'d, 'a, V, A: Template>(
     drop(source_keys);
     // Although `source_keys` has been dropped, coherence will be maintained since the `target` lock prevents the keys from
     // moving again before `emit` is done.
-    database.events().emit_modify(
+    events.emit_modify(
         &target_keys[start..start + count.get()],
         (source_table, target_table),
     );

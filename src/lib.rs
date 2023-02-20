@@ -14,12 +14,10 @@ pub mod resources;
 pub mod row;
 pub mod table;
 pub mod template;
-mod trace;
 
 #[cfg(test)]
 mod test;
 
-use event::Events;
 use key::Key;
 use resources::Resources;
 use std::{
@@ -33,6 +31,8 @@ use std::{
 pub use that_base_derive::{Datum, Filter, Template};
 
 /*
+    TODO: Add filters to events.
+        - database.listen::<OnCreate>().filter::<Has<Mass>>();
     TODO: Implement an interpreter.
         - This would allow sending dynamic requests to the database in the form of `String`s and listen response also a `String`s.
         - With this feature, the database becomes usable from any ecosystem and can serve similar purposes as other in-memory
@@ -215,8 +215,8 @@ impl error::Error for Error {}
 pub struct Database {
     keys: key::State,
     tables: table::State,
+    events: event::State,
     resources: Resources,
-    events: Events,
 }
 
 pub struct Meta {
@@ -296,7 +296,7 @@ impl Database {
             keys: key::State::new(),
             tables: table::State::new(),
             resources: Resources::new(),
-            events: Events::new(),
+            events: event::State::new(),
         }
     }
 }

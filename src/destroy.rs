@@ -1,5 +1,6 @@
 use crate::{
     core::utility::{fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, ONE},
+    event::Events,
     filter::Filter,
     key::{Key, Keys},
     table::{Table, Tables},
@@ -15,6 +16,7 @@ use std::{
 pub struct Destroy<'d, F> {
     database: &'d Database,
     keys: Keys<'d>,
+    events: Events<'d>,
     set: HashSet<Key>, // A `HashSet` is used because the move algorithm assumes that rows will be unique.
     indices: Vec<usize>, // May be reordered (ex: by `fold_swap`).
     states: Vec<Result<State, u32>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
@@ -29,6 +31,7 @@ pub struct DestroyAll<'d, F = ()> {
     database: &'d Database,
     tables: Tables<'d>,
     keys: Keys<'d>,
+    events: Events<'d>,
     index: usize,
     states: Vec<Arc<Table>>,
     filter: F,
@@ -44,6 +47,7 @@ impl Database {
         Destroy {
             database: self,
             keys: self.keys(),
+            events: self.events(),
             set: HashSet::new(),
             pending: Vec::new(),
             states: Vec::new(),
@@ -59,6 +63,7 @@ impl Database {
             database: self,
             tables: self.tables(),
             keys: self.keys(),
+            events: self.events(),
             index: 0,
             states: Vec::new(),
             filter: (),
@@ -95,6 +100,7 @@ impl<'d, F> Destroy<'d, F> {
         Destroy {
             database: self.database,
             keys: self.keys,
+            events: self.events,
             set: self.set,
             pending: self.pending,
             states: self.states,
@@ -195,8 +201,8 @@ impl<'d, F: Filter> Destroy<'d, F> {
                     drops,
                     keys,
                     (low, high, count),
-                    self.database,
                     &self.keys,
+                    &self.events,
                 );
                 Ok(sum + count.get())
             },
@@ -216,8 +222,8 @@ impl<'d, F: Filter> Destroy<'d, F> {
                     drops,
                     keys,
                     (low, high, count),
-                    self.database,
                     &self.keys,
+                    &self.events,
                 );
                 sum + count.get()
             },
@@ -232,8 +238,8 @@ impl<'d, F: Filter> Destroy<'d, F> {
         drops: &mut Vec<(usize, NonZeroUsize)>,
         table_keys: RwLockUpgradableReadGuard<Vec<Key>>,
         (low, high, count): (u32, u32, NonZeroUsize),
-        database: &Database,
         keys: &Keys,
+        events: &Events,
     ) {
         debug_assert_eq!(moves.len(), 0);
         debug_assert_eq!(drops.len(), 0);
@@ -325,9 +331,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             }
         }
 
-        database
-            .events()
-            .emit_destroy(&table_keys[head..head + count.get()], table);
+        events.emit_destroy(&table_keys[head..head + count.get()], table);
         drop(table_keys);
         // The `recycle` step can be done outside of the lock. This means that the keys within `rows` may be very briefly
         // non-reusable for other threads, which is fine.
@@ -417,6 +421,7 @@ impl<'d, F> DestroyAll<'d, F> {
             database: self.database,
             tables: self.tables,
             keys: self.keys,
+            events: self.events,
             index: self.index,
             states: self.states,
             filter: (self.filter, filter),
@@ -436,14 +441,14 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
         fold_swap(
             &mut self.states,
             0,
-            &mut self.keys,
-            |sum, keys, table| {
+            (&mut self.keys, &self.events),
+            |sum, (keys, events), table| {
                 let table_keys = table.keys.try_upgradable_read().ok_or(sum)?;
-                Ok(sum + Self::resolve_table(table_keys, table, self.database, keys))
+                Ok(sum + Self::resolve_table(table_keys, table, keys, events))
             },
-            |sum, keys, table| {
+            |sum, (keys, events), table| {
                 let table_keys = table.keys.upgradable_read();
-                sum + Self::resolve_table(table_keys, table, self.database, keys)
+                sum + Self::resolve_table(table_keys, table, keys, events)
             },
         )
     }
@@ -451,8 +456,8 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
     fn resolve_table(
         table_keys: RwLockUpgradableReadGuard<Vec<Key>>,
         table: &Table,
-        database: &Database,
         keys: &mut Keys,
+        events: &Events,
     ) -> usize {
         let count = table.count.swap(0, Ordering::AcqRel);
         let Some(count) = NonZeroUsize::new(count) else {
@@ -470,9 +475,7 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
         }
         keys.update();
         keys.release_all(&table_keys[..count.get()]);
-        database
-            .events()
-            .emit_destroy(&table_keys[..count.get()], table);
+        events.emit_destroy(&table_keys[..count.get()], table);
         keys.recycle_all(table_keys[..count.get()].iter().copied());
         return count.get();
     }
