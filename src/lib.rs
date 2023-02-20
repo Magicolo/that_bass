@@ -4,7 +4,6 @@
 
 pub mod core;
 pub mod create;
-mod defer;
 pub mod destroy;
 pub mod event;
 pub mod filter;

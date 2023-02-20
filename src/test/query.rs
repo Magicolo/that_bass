@@ -1,6 +1,5 @@
-use std::{any::TypeId, thread::scope};
-
 use super::*;
+use std::{any::TypeId, thread::scope};
 
 #[test]
 fn query_is_some_create_one_key() -> Result<(), Error> {
@@ -164,15 +163,15 @@ fn query_split_chunk_on_multiple_threads() -> Result<(), Error> {
 
 #[test]
 fn query_multi_join() -> Result<(), Error> {
-    struct A(Vec<Key>);
-    impl Datum for A {}
+    #[derive(Datum)]
+    struct Join(Vec<Key>);
 
     let database = Database::new();
-    let a = create_one(&database, A(vec![]))?;
-    let b = create_one(&database, A(vec![a, a, Key::NULL]))?;
-    create_one(&database, A(vec![Key::NULL, Key::NULL, a, b]))?;
+    let a = create_one(&database, Join(vec![]))?;
+    let b = create_one(&database, Join(vec![a, a, Key::NULL]))?;
+    create_one(&database, Join(vec![Key::NULL, Key::NULL, a, b]))?;
 
-    let mut query = database.query::<&A>()?;
+    let mut query = database.query::<&Join>()?;
     assert_eq!(query.count(), 3);
     let mut by = By::new();
     assert_eq!(by.len(), 0);
@@ -193,8 +192,8 @@ fn query_multi_join() -> Result<(), Error> {
 
 #[test]
 fn query_copy_to() -> Result<(), Error> {
+    #[derive(Datum)]
     struct CopyTo(Key);
-    impl Datum for CopyTo {}
 
     let database = Database::new();
     let mut a = create_one(&database, C(1))?;
@@ -215,8 +214,8 @@ fn query_copy_to() -> Result<(), Error> {
 
 #[test]
 fn query_copy_from() -> Result<(), Error> {
+    #[derive(Datum)]
     struct CopyFrom(Key);
-    impl Datum for CopyFrom {}
 
     let database = Database::new();
     let a = create_one(&database, C(1))?;
@@ -252,8 +251,8 @@ fn query_copy_from() -> Result<(), Error> {
 
 #[test]
 fn query_swap() -> Result<(), Error> {
+    #[derive(Datum)]
     struct Swap(Key, Key);
-    impl Datum for Swap {}
 
     let database = Database::new();
     let mut a = create_one(&database, C(1))?;
