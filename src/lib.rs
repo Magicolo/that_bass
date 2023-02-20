@@ -1,5 +1,6 @@
 #![feature(alloc_layout_extra)]
 #![feature(once_cell)]
+#![feature(type_alias_impl_trait)]
 
 pub mod core;
 pub mod create;

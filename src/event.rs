@@ -1,5 +1,5 @@
 use crate::{
-    core::utility::get_unchecked,
+    core::utility::{get_unchecked, sorted_difference, sorted_symmetric_difference_by},
     key::Key,
     table::{self, Table},
     Database, Datum,
@@ -7,6 +7,7 @@ use crate::{
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::{
     any::TypeId,
+    array::from_ref,
     collections::VecDeque,
     marker::PhantomData,
     mem::replace,
@@ -15,22 +16,10 @@ use std::{
 };
 
 pub trait Event: Sized {
+    type Events<'a>: Iterator<Item = Self> + 'a;
+
     fn declare(context: DeclareContext);
-    fn process<C: Collect<Self>>(
-        collect: &mut C,
-        context: ProcessContext,
-    ) -> ControlFlow<(), usize>;
-}
-
-pub trait Collect<T> {
-    fn collect<I: IntoIterator<Item = T>>(&mut self, items: I) -> ControlFlow<(), usize>;
-
-    fn adapt<U, F: FnMut(U) -> T>(&mut self, adapt: F) -> Adapt<Self, T, U, F>
-    where
-        Self: Sized,
-    {
-        Adapt(self, adapt, PhantomData, PhantomData)
-    }
+    fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a>;
 }
 
 #[derive(Clone)]
@@ -70,7 +59,6 @@ pub struct DeclareContext<'a> {
 
 #[derive(Clone)]
 pub struct ProcessContext<'a> {
-    events: &'a [Raw],
     keys: &'a [Key],
     tables: &'a table::Tables<'a>,
 }
@@ -93,8 +81,6 @@ pub enum Raw {
     Destroy { keys: Keys, table: u32 },
     Modify { keys: Keys, tables: Tables },
 }
-
-pub struct Adapt<'a, C, S, T, A>(&'a mut C, A, PhantomData<S>, PhantomData<T>);
 
 struct Buffer<T>(VecDeque<T>, Keep);
 
@@ -214,15 +200,8 @@ impl State {
     }
 }
 
-impl<'a, C: Collect<S>, S, T, A: FnMut(T) -> S> Collect<T> for Adapt<'a, C, S, T, A> {
-    #[inline]
-    fn collect<I: IntoIterator<Item = T>>(&mut self, items: I) -> ControlFlow<(), usize> {
-        self.0.collect(items.into_iter().map(&mut self.1))
-    }
-}
-
-impl<T> Collect<T> for Buffer<T> {
-    fn collect<I: IntoIterator<Item = T>>(&mut self, items: I) -> ControlFlow<(), usize> {
+impl<T> Buffer<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, items: I) -> ControlFlow<(), usize> {
         let count = self.0.len();
         self.0.extend(items);
         if self.1.apply(&mut self.0) {
@@ -266,11 +245,6 @@ impl<'a> DeclareContext<'a> {
 }
 
 impl<'a> ProcessContext<'a> {
-    #[inline]
-    pub const fn events(&self) -> &'a [Raw] {
-        self.events
-    }
-
     #[inline]
     pub fn keys(&self, keys: Keys) -> &'a [Key] {
         unsafe {
@@ -379,11 +353,10 @@ impl<'a, E: Event> Listen<'a, E> {
         let mut sum = 0;
         for chunk in ready.chunks.range(head..) {
             let context = ProcessContext {
-                events: &chunk.events,
                 keys: &chunk.keys,
                 tables: &self.events.1,
             };
-            match E::process(&mut self.buffer, context) {
+            match self.buffer.extend(E::process(&chunk.events, context)) {
                 Continue(count) => sum += count,
                 Break(_) => break,
             }
@@ -462,29 +435,6 @@ impl Keep {
     }
 }
 
-impl Event for () {
-    fn declare(_: DeclareContext) {}
-    fn process<C: Collect<Self>>(_: &mut C, _: ProcessContext) -> ControlFlow<(), usize> {
-        Break(())
-    }
-}
-
-impl Event for Raw {
-    fn declare(mut context: DeclareContext) {
-        context.create(true);
-        context.destroy(true);
-        context.modify(true);
-    }
-
-    #[inline]
-    fn process<C: Collect<Self>>(
-        collect: &mut C,
-        context: ProcessContext,
-    ) -> ControlFlow<(), usize> {
-        collect.collect(context.events().iter().copied())
-    }
-}
-
 #[inline]
 const fn decompose(value: u64) -> (u32, u32) {
     ((value >> 32) as u32, value as u32)
@@ -495,611 +445,599 @@ const fn recompose(listeners: u32, keys: u32) -> u64 {
     ((listeners as u64) << 32) | (keys as u64)
 }
 
-pub mod events {
-    use super::*;
-    use crate::core::utility::{sorted_difference, sorted_symmetric_difference_by};
+#[derive(Clone, Copy, Debug)]
+pub enum Type {
+    Add(TypeId),
+    Remove(TypeId),
+}
 
-    #[derive(Clone, Copy, Debug)]
-    pub enum Type {
-        Add(TypeId),
-        Remove(TypeId),
-    }
+#[derive(Clone, Copy, Debug)]
+pub struct Types {
+    pub add: usize,
+    pub remove: usize,
+}
 
-    #[derive(Clone, Copy, Debug)]
-    pub struct Types {
-        pub add: usize,
-        pub remove: usize,
-    }
-
-    impl Type {
-        #[inline]
-        pub fn identifier(&self) -> TypeId {
-            match self {
-                Type::Add(identifier) => *identifier,
-                Type::Remove(identifier) => *identifier,
-            }
+impl Type {
+    #[inline]
+    pub fn identifier(&self) -> TypeId {
+        match self {
+            Type::Add(identifier) => *identifier,
+            Type::Remove(identifier) => *identifier,
         }
     }
+}
 
-    macro_rules! with {
-        ($n:ident, $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident) => {
-            impl<'a> Events<'a> {
-                pub fn $n(&self) -> Listen<'a, $on> {
-                    self.listen()
-                }
+macro_rules! with {
+    ($n:ident, $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident) => {
+        impl<'a> Events<'a> {
+            pub fn $n(&self) -> Listen<'a, $on> {
+                self.listen()
+            }
+        }
+
+        impl<'a> Listen<'a, $on> {
+            pub fn with_key(self) -> Listen<'a, $on_key> {
+                self.with()
+            }
+            pub fn with_type<D: Datum>(self) -> Listen<'a, $on_type<D>> {
+                self.with()
+            }
+            pub fn with_types(self) -> Listen<'a, $on_types> {
+                self.with()
+            }
+        }
+
+        impl<'a> Listen<'a, $on_key> {
+            pub fn with_type<D: Datum>(self) -> Listen<'a, $on_key_type<D>> {
+                self.with()
+            }
+            pub fn with_types(self) -> Listen<'a, $on_key_types> {
+                self.with()
+            }
+        }
+
+        impl<'a, D: Datum> Listen<'a, $on_type<D>> {
+            pub fn with_key(self) -> Listen<'a, $on_key_type<D>> {
+                self.with()
+            }
+        }
+
+        impl<'a> Listen<'a, $on_types> {
+            pub fn with_key(self) -> Listen<'a, $on_key_types> {
+                self.with()
+            }
+        }
+    };
+}
+
+macro_rules! event {
+    (
+        $n:ident, $t:ty, $ts:ty, $d:ident, $table_f:ident, $table_t:ty,
+        $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident,
+        $raw:ident,
+        $count:ident,
+        $types:ident,
+        $has:ident
+    ) => {
+        #[derive(Clone, Debug)]
+        pub struct $on {
+            pub keys: usize,
+            pub types: $ts,
+            pub $table_f: $table_t,
+        }
+        #[derive(Clone, Debug)]
+        pub struct $on_key {
+            pub key: Key,
+            pub types: $ts,
+            pub $table_f: $table_t,
+        }
+        #[derive(Clone, Debug)]
+        pub struct $on_type<T> {
+            pub keys: usize,
+            pub $table_f: $table_t,
+            _marker: PhantomData<T>,
+        }
+        #[derive(Clone, Debug)]
+        pub struct $on_types {
+            pub keys: usize,
+            pub r#type: $t,
+            pub $table_f: $table_t,
+        }
+        #[derive(Clone, Debug)]
+        pub struct $on_key_type<T> {
+            pub key: Key,
+            pub $table_f: $table_t,
+            _marker: PhantomData<T>,
+        }
+        #[derive(Clone, Debug)]
+        pub struct $on_key_types {
+            pub key: Key,
+            pub r#type: $t,
+            pub $table_f: $table_t,
+        }
+
+        with!(
+            $n,
+            $on,
+            $on_key,
+            $on_type,
+            $on_types,
+            $on_key_type,
+            $on_key_types
+        );
+
+        impl Into<Key> for $on_key {
+            #[inline]
+            fn into(self) -> Key {
+                self.key
+            }
+        }
+
+        impl<T> Into<Key> for $on_key_type<T> {
+            #[inline]
+            fn into(self) -> Key {
+                self.key
+            }
+        }
+
+        impl Into<Key> for $on_key_types {
+            #[inline]
+            fn into(self) -> Key {
+                self.key
+            }
+        }
+
+        impl Event for $on {
+            type Events<'a> = impl Iterator<Item = Self> + 'a;
+
+            fn declare(mut context: DeclareContext) {
+                context.$d(false)
             }
 
-            impl<'a> Listen<'a, $on> {
-                pub fn with_key(self) -> Listen<'a, $on_key> {
-                    self.with()
-                }
-                pub fn with_type<D: Datum>(self) -> Listen<'a, $on_type<D>> {
-                    self.with()
-                }
-                pub fn with_types(self) -> Listen<'a, $on_types> {
-                    self.with()
-                }
+            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+                events.iter().filter_map(move |event| {
+                    let &Raw::$raw { keys, $table_f } = event else { return None; };
+                    let types = $count(&context, $table_f);
+                    Some(Self {
+                        keys: keys.count as _,
+                        types: types,
+                        $table_f,
+                    })
+                })
+            }
+        }
+
+        impl Event for $on_key {
+            type Events<'a> = impl Iterator<Item = Self> + 'a;
+
+            fn declare(mut context: DeclareContext) {
+                context.$d(true)
             }
 
-            impl<'a> Listen<'a, $on_key> {
-                pub fn with_type<D: Datum>(self) -> Listen<'a, $on_key_type<D>> {
-                    self.with()
-                }
-                pub fn with_types(self) -> Listen<'a, $on_key_types> {
-                    self.with()
-                }
-            }
-
-            impl<'a, D: Datum> Listen<'a, $on_type<D>> {
-                pub fn with_key(self) -> Listen<'a, $on_key_type<D>> {
-                    self.with()
-                }
-            }
-
-            impl<'a> Listen<'a, $on_types> {
-                pub fn with_key(self) -> Listen<'a, $on_key_types> {
-                    self.with()
-                }
-            }
-        };
-    }
-
-    macro_rules! event {
-        (
-            $n:ident, $t:ty, $ts:ty, $d:ident, $table_f:ident, $table_t:ty,
-            $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident,
-            $raw:ident,
-            $count:ident,
-            $types:ident,
-            $has:ident
-        ) => {
-            #[derive(Clone, Debug)]
-            pub struct $on {
-                pub keys: usize,
-                pub types: $ts,
-                pub $table_f: $table_t,
-            }
-            #[derive(Clone, Debug)]
-            pub struct $on_key {
-                pub key: Key,
-                pub types: $ts,
-                pub $table_f: $table_t,
-            }
-            #[derive(Clone, Debug)]
-            pub struct $on_type<T> {
-                pub keys: usize,
-                pub $table_f: $table_t,
-                _marker: PhantomData<T>,
-            }
-            #[derive(Clone, Debug)]
-            pub struct $on_types {
-                pub keys: usize,
-                pub r#type: $t,
-                pub $table_f: $table_t,
-            }
-            #[derive(Clone, Debug)]
-            pub struct $on_key_type<T> {
-                pub key: Key,
-                pub $table_f: $table_t,
-                _marker: PhantomData<T>,
-            }
-            #[derive(Clone, Debug)]
-            pub struct $on_key_types {
-                pub key: Key,
-                pub r#type: $t,
-                pub $table_f: $table_t,
-            }
-
-            with!(
-                $n,
-                $on,
-                $on_key,
-                $on_type,
-                $on_types,
-                $on_key_type,
-                $on_key_types
-            );
-
-            impl Into<Key> for $on_key {
-                #[inline]
-                fn into(self) -> Key {
-                    self.key
-                }
-            }
-
-            impl<T> Into<Key> for $on_key_type<T> {
-                #[inline]
-                fn into(self) -> Key {
-                    self.key
-                }
-            }
-
-            impl Into<Key> for $on_key_types {
-                #[inline]
-                fn into(self) -> Key {
-                    self.key
-                }
-            }
-
-            impl Event for $on {
-                fn declare(mut context: DeclareContext) {
-                    context.$d(false)
-                }
-
-                #[inline]
-                fn process<C: Collect<Self>>(
-                    collect: &mut C,
-                    context: ProcessContext,
-                ) -> ControlFlow<(), usize> {
-                    collect.collect(context.events().iter().filter_map(|event| {
+            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+                events
+                    .iter()
+                    .filter_map(move |event| {
                         let &Raw::$raw { keys, $table_f } = event else { return None; };
+                        let keys = context.keys(keys);
                         let types = $count(&context, $table_f);
+                        Some(keys.iter().map(move |&key| Self {
+                            key,
+                            types,
+                            $table_f,
+                        }))
+                    })
+                    .flatten()
+            }
+        }
+
+        impl Event for $on_types {
+            type Events<'a> = impl Iterator<Item = Self> + 'a;
+
+            fn declare(mut context: DeclareContext) {
+                context.$d(false)
+            }
+
+            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+                events
+                    .iter()
+                    .filter_map(move |event| {
+                        let &Raw::$raw { keys, $table_f } = event else { return None; };
+                        Some($types(&context, $table_f).map(move |r#type| Self {
+                            keys: keys.count as _,
+                            r#type,
+                            $table_f,
+                        }))
+                    })
+                    .flatten()
+            }
+        }
+
+        impl Event for $on_key_types {
+            type Events<'a> = impl Iterator<Item = Self> + 'a;
+
+            fn declare(mut context: DeclareContext) {
+                context.$d(true)
+            }
+
+            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+                events
+                    .iter()
+                    .filter_map(move |event| {
+                        let &Raw::$raw { keys, $table_f } = event else { return None; };
+                        let keys = context.keys(keys);
+                        Some($types(&context, $table_f).flat_map(move |r#type| {
+                            keys.iter().map(move |&key| Self {
+                                key,
+                                r#type,
+                                $table_f,
+                            })
+                        }))
+                    })
+                    .flatten()
+            }
+        }
+
+        impl<D: Datum> Event for $on_type<D> {
+            type Events<'a> = impl Iterator<Item = Self> + 'a;
+
+            fn declare(mut context: DeclareContext) {
+                context.$d(false)
+            }
+
+            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+                events.iter().filter_map(move |event| {
+                    let &Raw::$raw { keys, $table_f } = event else { return None; };
+                    if $has::<D>(&context, $table_f) {
                         Some(Self {
                             keys: keys.count as _,
-                            types: types,
                             $table_f,
+                            _marker: PhantomData,
                         })
-                    }))
-                }
+                    } else {
+                        None
+                    }
+                })
+            }
+        }
+
+        impl<D: Datum> Event for $on_key_type<D> {
+            type Events<'a> = impl Iterator<Item = Self> + 'a;
+
+            fn declare(mut context: DeclareContext) {
+                context.$d(true)
             }
 
-            impl Event for $on_key {
-                fn declare(mut context: DeclareContext) {
-                    context.$d(true)
-                }
-
-                #[inline]
-                fn process<C: Collect<Self>>(
-                    collect: &mut C,
-                    context: ProcessContext,
-                ) -> ControlFlow<(), usize> {
-                    collect.collect(
-                        context
-                            .events()
-                            .iter()
-                            .filter_map(|event| {
-                                let &Raw::$raw { keys, $table_f } = event else { return None; };
-                                let keys = context.keys(keys);
-                                let types = $count(&context, $table_f);
-                                Some(keys.iter().map(move |&key| Self {
-                                    key,
-                                    types,
-                                    $table_f,
-                                }))
-                            })
-                            .flatten(),
-                    )
-                }
-            }
-
-            impl Event for $on_types {
-                fn declare(mut context: DeclareContext) {
-                    context.$d(false)
-                }
-
-                #[inline]
-                fn process<C: Collect<Self>>(
-                    collect: &mut C,
-                    context: ProcessContext,
-                ) -> ControlFlow<(), usize> {
-                    collect.collect(
-                        context
-                            .events()
-                            .iter()
-                            .filter_map(|event| {
-                                let &Raw::$raw { keys, $table_f } = event else { return None; };
-                                Some($types(&context, $table_f).map(move |r#type| Self {
-                                    keys: keys.count as _,
-                                    r#type,
-                                    $table_f,
-                                }))
-                            })
-                            .flatten(),
-                    )
-                }
-            }
-
-            impl Event for $on_key_types {
-                fn declare(mut context: DeclareContext) {
-                    context.$d(true)
-                }
-
-                #[inline]
-                fn process<C: Collect<Self>>(
-                    collect: &mut C,
-                    context: ProcessContext,
-                ) -> ControlFlow<(), usize> {
-                    collect.collect(
-                        context
-                            .events()
-                            .iter()
-                            .filter_map(|event| {
-                                let &Raw::$raw { keys, $table_f } = event else { return None; };
-                                let keys = context.keys(keys);
-                                Some($types(&context, $table_f).flat_map(move |r#type| {
-                                    keys.iter().map(move |&key| Self {
-                                        key,
-                                        r#type,
-                                        $table_f,
-                                    })
-                                }))
-                            })
-                            .flatten(),
-                    )
-                }
-            }
-
-            impl<D: Datum> Event for $on_type<D> {
-                fn declare(mut context: DeclareContext) {
-                    context.$d(false)
-                }
-
-                #[inline]
-                fn process<C: Collect<Self>>(
-                    collect: &mut C,
-                    context: ProcessContext,
-                ) -> ControlFlow<(), usize> {
-                    collect.collect(context.events().iter().filter_map(|event| {
+            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+                events
+                    .iter()
+                    .filter_map(move |event| {
                         let &Raw::$raw { keys, $table_f } = event else { return None; };
+                        let keys = context.keys(keys);
                         if $has::<D>(&context, $table_f) {
-                            Some(Self {
-                                keys: keys.count as _,
+                            Some(keys.iter().map(move |&key| Self {
+                                key,
                                 $table_f,
                                 _marker: PhantomData,
-                            })
+                            }))
                         } else {
                             None
                         }
-                    }))
-                }
+                    })
+                    .flatten()
             }
+        }
+    };
+}
 
-            impl<D: Datum> Event for $on_key_type<D> {
-                fn declare(mut context: DeclareContext) {
-                    context.$d(true)
-                }
+#[inline]
+fn create_destroy_count(context: &ProcessContext, table: u32) -> usize {
+    context.table(table).columns().len()
+}
+#[inline]
+fn create_destroy_types<'a>(
+    context: &ProcessContext<'a>,
+    table: u32,
+) -> impl Iterator<Item = TypeId> + 'a {
+    context.table(table).types()
+}
+#[inline]
+fn create_destroy_has<D: Datum>(context: &ProcessContext, table: u32) -> bool {
+    context.table(table).has::<D>()
+}
+event!(
+    on_create,
+    TypeId,
+    usize,
+    create,
+    table,
+    u32,
+    OnCreate,
+    OnCreateKey,
+    OnCreateType,
+    OnCreateTypes,
+    OnCreateKeyType,
+    OnCreateKeyTypes,
+    Create,
+    create_destroy_count,
+    create_destroy_types,
+    create_destroy_has
+);
+event!(
+    on_destroy,
+    TypeId,
+    usize,
+    destroy,
+    table,
+    u32,
+    OnDestroy,
+    OnDestroyKey,
+    OnDestroyType,
+    OnDestroyTypes,
+    OnDestroyKeyType,
+    OnDestroyKeyTypes,
+    Destroy,
+    create_destroy_count,
+    create_destroy_types,
+    create_destroy_has
+);
 
-                #[inline]
-                fn process<C: Collect<Self>>(
-                    collect: &mut C,
-                    context: ProcessContext,
-                ) -> ControlFlow<(), usize> {
-                    collect.collect(
-                        context
-                            .events()
-                            .iter()
-                            .filter_map(|event| {
-                                let &Raw::$raw { keys, $table_f } = event else { return None; };
-                                let keys = context.keys(keys);
-                                if $has::<D>(&context, $table_f) {
-                                    Some(keys.iter().map(move |&key| Self {
-                                        key,
-                                        $table_f,
-                                        _marker: PhantomData,
-                                    }))
-                                } else {
-                                    None
-                                }
-                            })
-                            .flatten(),
-                    )
-                }
+#[inline]
+fn modify_count(context: &ProcessContext, tables: Tables) -> Types {
+    let (add, remove) = modify_types(context, tables).fold((0, 0), |counts, r#type| match r#type {
+        Type::Add(_) => (counts.0 + 1, counts.1),
+        Type::Remove(_) => (counts.0, counts.1 + 1),
+    });
+    Types { add, remove }
+}
+#[inline]
+fn modify_types<'a>(
+    context: &ProcessContext<'a>,
+    tables: Tables,
+) -> impl Iterator<Item = Type> + 'a {
+    let source = context.table(tables.source);
+    let target = context.table(tables.target);
+    sorted_symmetric_difference_by(
+        |left, right| Ord::cmp(&left.identifier(), &right.identifier()),
+        source.types().map(Type::Remove),
+        target.types().map(Type::Add),
+    )
+}
+#[inline]
+fn modify_has<D: Datum>(context: &ProcessContext, tables: Tables) -> bool {
+    let source = context.table(tables.source);
+    let target = context.table(tables.target);
+    source.has::<D>() != target.has::<D>()
+}
+event!(
+    on_modify,
+    Type,
+    Types,
+    modify,
+    tables,
+    Tables,
+    OnModify,
+    OnModifyKey,
+    OnModifyType,
+    OnModifyTypes,
+    OnModifyKeyType,
+    OnModifyKeyTypes,
+    Modify,
+    modify_count,
+    modify_types,
+    modify_has
+);
+
+#[inline]
+fn add_count(context: &ProcessContext, tables: Tables) -> usize {
+    add_types(context, tables).count()
+}
+#[inline]
+fn add_types<'a>(
+    context: &ProcessContext<'a>,
+    tables: Tables,
+) -> impl Iterator<Item = TypeId> + 'a {
+    let source = context.table(tables.source);
+    let target = context.table(tables.target);
+    sorted_difference(target.types(), source.types())
+}
+#[inline]
+fn add_has<D: Datum>(context: &ProcessContext, tables: Tables) -> bool {
+    let source = context.table(tables.source);
+    let target = context.table(tables.target);
+    !source.has::<D>() && target.has::<D>()
+}
+event!(
+    on_add,
+    TypeId,
+    usize,
+    modify,
+    tables,
+    Tables,
+    OnAdd,
+    OnAddKey,
+    OnAddType,
+    OnAddTypes,
+    OnAddKeyType,
+    OnAddKeyTypes,
+    Modify,
+    add_count,
+    add_types,
+    add_has
+);
+
+#[inline]
+fn remove_count(context: &ProcessContext, tables: Tables) -> usize {
+    remove_types(context, tables).count()
+}
+#[inline]
+fn remove_types<'a>(
+    context: &ProcessContext<'a>,
+    tables: Tables,
+) -> impl Iterator<Item = TypeId> + 'a {
+    let source = context.table(tables.source);
+    let target = context.table(tables.target);
+    sorted_difference(source.types(), target.types())
+}
+#[inline]
+fn remove_has<D: Datum>(context: &ProcessContext, tables: Tables) -> bool {
+    let source = context.table(tables.source);
+    let target = context.table(tables.target);
+    source.has::<D>() && !target.has::<D>()
+}
+event!(
+    on_remove,
+    TypeId,
+    usize,
+    modify,
+    tables,
+    Tables,
+    OnRemove,
+    OnRemoveKey,
+    OnRemoveType,
+    OnRemoveTypes,
+    OnRemoveKeyType,
+    OnRemoveKeyTypes,
+    Modify,
+    remove_count,
+    remove_types,
+    remove_has
+);
+
+pub enum OnAny {
+    Create(OnCreate),
+    Modify(OnModify),
+    Destroy(OnDestroy),
+}
+pub enum OnAnyKey {
+    Create(OnCreateKey),
+    Modify(OnModifyKey),
+    Destroy(OnDestroyKey),
+}
+pub enum OnAnyType<T> {
+    Create(OnCreateType<T>),
+    Modify(OnModifyType<T>),
+    Destroy(OnDestroyType<T>),
+}
+pub enum OnAnyTypes {
+    Create(OnCreateTypes),
+    Modify(OnModifyTypes),
+    Destroy(OnDestroyTypes),
+}
+pub enum OnAnyKeyType<T> {
+    Create(OnCreateKeyType<T>),
+    Modify(OnModifyKeyType<T>),
+    Destroy(OnDestroyKeyType<T>),
+}
+pub enum OnAnyKeyTypes {
+    Create(OnCreateKeyTypes),
+    Modify(OnModifyKeyTypes),
+    Destroy(OnDestroyKeyTypes),
+}
+
+with!(
+    on_any,
+    OnAny,
+    OnAnyKey,
+    OnAnyType,
+    OnAnyTypes,
+    OnAnyKeyType,
+    OnAnyKeyTypes
+);
+
+#[inline]
+fn map<'a, T: Event, U>(
+    map: impl FnMut(T) -> U + 'a,
+    event: &'a Raw,
+    context: ProcessContext<'a>,
+) -> impl Iterator<Item = U> + 'a {
+    T::process(from_ref(event), context).map(map)
+}
+
+enum One<T1, T2, T3> {
+    A(T1),
+    B(T2),
+    C(T3),
+}
+
+impl<I1: Iterator, I2: Iterator<Item = I1::Item>, I3: Iterator<Item = I1::Item>> Iterator
+    for One<I1, I2, I3>
+{
+    type Item = I1::Item;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            One::A(iterator) => iterator.next(),
+            One::B(iterator) => iterator.next(),
+            One::C(iterator) => iterator.next(),
+        }
+    }
+}
+
+macro_rules! body {
+    ($keys:expr) => {
+        type Events<'a> = impl Iterator<Item = Self> + 'a;
+
+        fn declare(mut context: DeclareContext) {
+            context.any($keys)
+        }
+
+        fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+            events.iter().flat_map(move |event| match event {
+                Raw::Create { .. } => One::A(map(Self::Create, event, context.clone())),
+                Raw::Destroy { .. } => One::B(map(Self::Destroy, event, context.clone())),
+                Raw::Modify { .. } => One::C(map(Self::Modify, event, context.clone())),
+            })
+        }
+    };
+}
+
+macro_rules! into {
+    () => {
+        #[inline]
+        fn into(self) -> Key {
+            match self {
+                Self::Create(event) => event.into(),
+                Self::Modify(event) => event.into(),
+                Self::Destroy(event) => event.into(),
             }
-        };
-    }
+        }
+    };
+}
 
-    #[inline]
-    fn create_destroy_count(context: &ProcessContext, table: u32) -> usize {
-        context.table(table).columns().len()
-    }
-    #[inline]
-    fn create_destroy_types<'a>(
-        context: &ProcessContext<'a>,
-        table: u32,
-    ) -> impl Iterator<Item = TypeId> + 'a {
-        context.table(table).types()
-    }
-    #[inline]
-    fn create_destroy_has<D: Datum>(context: &ProcessContext, table: u32) -> bool {
-        context.table(table).has::<D>()
-    }
-    event!(
-        on_create,
-        TypeId,
-        usize,
-        create,
-        table,
-        u32,
-        OnCreate,
-        OnCreateKey,
-        OnCreateType,
-        OnCreateTypes,
-        OnCreateKeyType,
-        OnCreateKeyTypes,
-        Create,
-        create_destroy_count,
-        create_destroy_types,
-        create_destroy_has
-    );
-    event!(
-        on_destroy,
-        TypeId,
-        usize,
-        destroy,
-        table,
-        u32,
-        OnDestroy,
-        OnDestroyKey,
-        OnDestroyType,
-        OnDestroyTypes,
-        OnDestroyKeyType,
-        OnDestroyKeyTypes,
-        Destroy,
-        create_destroy_count,
-        create_destroy_types,
-        create_destroy_has
-    );
+impl Event for OnAny {
+    body!(false);
+}
 
-    #[inline]
-    fn modify_count(context: &ProcessContext, tables: Tables) -> Types {
-        let (add, remove) =
-            modify_types(context, tables).fold((0, 0), |counts, r#type| match r#type {
-                Type::Add(_) => (counts.0 + 1, counts.1),
-                Type::Remove(_) => (counts.0, counts.1 + 1),
-            });
-        Types { add, remove }
-    }
-    #[inline]
-    fn modify_types<'a>(
-        context: &ProcessContext<'a>,
-        tables: Tables,
-    ) -> impl Iterator<Item = Type> + 'a {
-        let source = context.table(tables.source);
-        let target = context.table(tables.target);
-        sorted_symmetric_difference_by(
-            |left, right| Ord::cmp(&left.identifier(), &right.identifier()),
-            source.types().map(Type::Remove),
-            target.types().map(Type::Add),
-        )
-    }
-    #[inline]
-    fn modify_has<D: Datum>(context: &ProcessContext, tables: Tables) -> bool {
-        let source = context.table(tables.source);
-        let target = context.table(tables.target);
-        source.has::<D>() != target.has::<D>()
-    }
-    event!(
-        on_modify,
-        Type,
-        Types,
-        modify,
-        tables,
-        Tables,
-        OnModify,
-        OnModifyKey,
-        OnModifyType,
-        OnModifyTypes,
-        OnModifyKeyType,
-        OnModifyKeyTypes,
-        Modify,
-        modify_count,
-        modify_types,
-        modify_has
-    );
+impl Event for OnAnyKey {
+    body!(true);
+}
 
-    #[inline]
-    fn add_count(context: &ProcessContext, tables: Tables) -> usize {
-        add_types(context, tables).count()
-    }
-    #[inline]
-    fn add_types<'a>(
-        context: &ProcessContext<'a>,
-        tables: Tables,
-    ) -> impl Iterator<Item = TypeId> + 'a {
-        let source = context.table(tables.source);
-        let target = context.table(tables.target);
-        sorted_difference(target.types(), source.types())
-    }
-    #[inline]
-    fn add_has<D: Datum>(context: &ProcessContext, tables: Tables) -> bool {
-        let source = context.table(tables.source);
-        let target = context.table(tables.target);
-        !source.has::<D>() && target.has::<D>()
-    }
-    event!(
-        on_add,
-        TypeId,
-        usize,
-        modify,
-        tables,
-        Tables,
-        OnAdd,
-        OnAddKey,
-        OnAddType,
-        OnAddTypes,
-        OnAddKeyType,
-        OnAddKeyTypes,
-        Modify,
-        add_count,
-        add_types,
-        add_has
-    );
+impl<T: Datum> Event for OnAnyType<T> {
+    body!(false);
+}
 
-    #[inline]
-    fn remove_count(context: &ProcessContext, tables: Tables) -> usize {
-        remove_types(context, tables).count()
-    }
-    #[inline]
-    fn remove_types<'a>(
-        context: &ProcessContext<'a>,
-        tables: Tables,
-    ) -> impl Iterator<Item = TypeId> + 'a {
-        let source = context.table(tables.source);
-        let target = context.table(tables.target);
-        sorted_difference(source.types(), target.types())
-    }
-    #[inline]
-    fn remove_has<D: Datum>(context: &ProcessContext, tables: Tables) -> bool {
-        let source = context.table(tables.source);
-        let target = context.table(tables.target);
-        source.has::<D>() && !target.has::<D>()
-    }
-    event!(
-        on_remove,
-        TypeId,
-        usize,
-        modify,
-        tables,
-        Tables,
-        OnRemove,
-        OnRemoveKey,
-        OnRemoveType,
-        OnRemoveTypes,
-        OnRemoveKeyType,
-        OnRemoveKeyTypes,
-        Modify,
-        remove_count,
-        remove_types,
-        remove_has
-    );
+impl Event for OnAnyTypes {
+    body!(false);
+}
 
-    pub enum OnAny {
-        Create(OnCreate),
-        Modify(OnModify),
-        Destroy(OnDestroy),
-    }
-    pub enum OnAnyKey {
-        Create(OnCreateKey),
-        Modify(OnModifyKey),
-        Destroy(OnDestroyKey),
-    }
-    pub enum OnAnyType<T> {
-        Create(OnCreateType<T>),
-        Modify(OnModifyType<T>),
-        Destroy(OnDestroyType<T>),
-    }
-    pub enum OnAnyTypes {
-        Create(OnCreateTypes),
-        Modify(OnModifyTypes),
-        Destroy(OnDestroyTypes),
-    }
-    pub enum OnAnyKeyType<T> {
-        Create(OnCreateKeyType<T>),
-        Modify(OnModifyKeyType<T>),
-        Destroy(OnDestroyKeyType<T>),
-    }
-    pub enum OnAnyKeyTypes {
-        Create(OnCreateKeyTypes),
-        Modify(OnModifyKeyTypes),
-        Destroy(OnDestroyKeyTypes),
-    }
+impl<T: Datum> Event for OnAnyKeyType<T> {
+    body!(true);
+}
 
-    with!(
-        on_any,
-        OnAny,
-        OnAnyKey,
-        OnAnyType,
-        OnAnyTypes,
-        OnAnyKeyType,
-        OnAnyKeyTypes
-    );
+impl Event for OnAnyKeyTypes {
+    body!(true);
+}
 
-    macro_rules! body {
-        ($keys:expr) => {
-            fn declare(mut context: DeclareContext) {
-                context.any($keys)
-            }
+impl Into<Key> for OnAnyKey {
+    into!();
+}
 
-            #[inline]
-            fn process<C: Collect<Self>>(
-                collect: &mut C,
-                context: ProcessContext,
-            ) -> ControlFlow<(), usize> {
-                let mut sum = 0;
-                for event in context.events() {
-                    sum += match *event {
-                        Raw::Create { .. } => {
-                            Event::process(&mut collect.adapt(Self::Create), context.clone())
-                        }
-                        Raw::Destroy { .. } => {
-                            Event::process(&mut collect.adapt(Self::Destroy), context.clone())
-                        }
-                        Raw::Modify { .. } => {
-                            Event::process(&mut collect.adapt(Self::Modify), context.clone())
-                        }
-                    }?;
-                }
-                Continue(sum)
-            }
-        };
-    }
+impl<T> Into<Key> for OnAnyKeyType<T> {
+    into!();
+}
 
-    macro_rules! into {
-        () => {
-            #[inline]
-            fn into(self) -> Key {
-                match self {
-                    Self::Create(event) => event.into(),
-                    Self::Modify(event) => event.into(),
-                    Self::Destroy(event) => event.into(),
-                }
-            }
-        };
-    }
-
-    impl Event for OnAny {
-        body!(false);
-    }
-
-    impl Event for OnAnyKey {
-        body!(true);
-    }
-
-    impl<T: Datum> Event for OnAnyType<T> {
-        body!(false);
-    }
-
-    impl Event for OnAnyTypes {
-        body!(false);
-    }
-
-    impl<T: Datum> Event for OnAnyKeyType<T> {
-        body!(true);
-    }
-
-    impl Event for OnAnyKeyTypes {
-        body!(true);
-    }
-
-    impl Into<Key> for OnAnyKey {
-        into!();
-    }
-
-    impl<T> Into<Key> for OnAnyKeyType<T> {
-        into!();
-    }
-
-    impl Into<Key> for OnAnyKeyTypes {
-        into!();
-    }
+impl Into<Key> for OnAnyKeyTypes {
+    into!();
 }
