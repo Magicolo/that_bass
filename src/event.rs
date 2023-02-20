@@ -522,7 +522,13 @@ pub mod events {
     }
 
     macro_rules! with {
-        ($on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident) => {
+        ($n:ident, $on:ident, $on_key:ident, $on_type:ident, $on_types:ident, $on_key_type:ident, $on_key_types:ident) => {
+            impl<'a> Events<'a> {
+                pub fn $n(&self) -> Listen<'a, $on> {
+                    self.listen()
+                }
+            }
+
             impl<'a> Listen<'a, $on> {
                 pub fn with_key(self) -> Listen<'a, $on_key> {
                     self.with()
@@ -534,6 +540,7 @@ pub mod events {
                     self.with()
                 }
             }
+
             impl<'a> Listen<'a, $on_key> {
                 pub fn with_type<D: Datum>(self) -> Listen<'a, $on_key_type<D>> {
                     self.with()
@@ -542,11 +549,13 @@ pub mod events {
                     self.with()
                 }
             }
+
             impl<'a, D: Datum> Listen<'a, $on_type<D>> {
                 pub fn with_key(self) -> Listen<'a, $on_key_type<D>> {
                     self.with()
                 }
             }
+
             impl<'a> Listen<'a, $on_types> {
                 pub fn with_key(self) -> Listen<'a, $on_key_types> {
                     self.with()
@@ -602,6 +611,7 @@ pub mod events {
             }
 
             with!(
+                $n,
                 $on,
                 $on_key,
                 $on_type,
@@ -628,12 +638,6 @@ pub mod events {
                 #[inline]
                 fn into(self) -> Key {
                     self.key
-                }
-            }
-
-            impl<'a> Events<'a> {
-                pub fn $n(&self) -> Listen<'a, $on> {
-                    self.listen()
                 }
             }
 
@@ -1011,6 +1015,7 @@ pub mod events {
     }
 
     with!(
+        on_any,
         OnAny,
         OnAnyKey,
         OnAnyType,
@@ -1049,6 +1054,19 @@ pub mod events {
         };
     }
 
+    macro_rules! into {
+        () => {
+            #[inline]
+            fn into(self) -> Key {
+                match self {
+                    Self::Create(event) => event.into(),
+                    Self::Modify(event) => event.into(),
+                    Self::Destroy(event) => event.into(),
+                }
+            }
+        };
+    }
+
     impl Event for OnAny {
         body!(false);
     }
@@ -1074,35 +1092,14 @@ pub mod events {
     }
 
     impl Into<Key> for OnAnyKey {
-        #[inline]
-        fn into(self) -> Key {
-            match self {
-                OnAnyKey::Create(event) => event.into(),
-                OnAnyKey::Modify(event) => event.into(),
-                OnAnyKey::Destroy(event) => event.into(),
-            }
-        }
+        into!();
     }
 
     impl<T> Into<Key> for OnAnyKeyType<T> {
-        #[inline]
-        fn into(self) -> Key {
-            match self {
-                OnAnyKeyType::Create(event) => event.into(),
-                OnAnyKeyType::Modify(event) => event.into(),
-                OnAnyKeyType::Destroy(event) => event.into(),
-            }
-        }
+        into!();
     }
 
     impl Into<Key> for OnAnyKeyTypes {
-        #[inline]
-        fn into(self) -> Key {
-            match self {
-                OnAnyKeyTypes::Create(event) => event.into(),
-                OnAnyKeyTypes::Modify(event) => event.into(),
-                OnAnyKeyTypes::Destroy(event) => event.into(),
-            }
-        }
+        into!();
     }
 }
