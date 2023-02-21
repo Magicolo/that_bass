@@ -184,6 +184,7 @@ impl Column {
 }
 
 impl Tables<'_> {
+    #[inline]
     pub fn update(&mut self) {
         self.0.update();
     }

@@ -77,6 +77,7 @@ impl Key {
 }
 
 impl<'d> Keys<'d> {
+    #[inline]
     pub fn update(&mut self) {
         self.1.update();
     }
