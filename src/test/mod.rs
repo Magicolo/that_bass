@@ -6,9 +6,17 @@ pub mod event;
 pub mod query;
 pub mod remove;
 
-use crate::{self as that_bass};
-use checkito::{any, CheckParallel, FullGenerate, Generate, Prove};
-use std::{collections::HashSet, error, fmt, marker::PhantomData};
+use crate::{
+    self as that_bass,
+    create::Create,
+    destroy::Destroy,
+    filter::has,
+    modify::{Add, Remove},
+    query::Query,
+    row::Row,
+};
+use checkito::{constant::Constant, prove, FullGenerate, Generate};
+use std::{collections::HashSet, error, marker::PhantomData};
 use that_bass::{
     filter::{Any, Filter, Has, Is, Not},
     key::Key,
@@ -20,124 +28,339 @@ use that_bass::{
 #[derive(Debug, Clone, Copy, Default, Datum)]
 pub struct A;
 #[derive(Debug, Clone, Copy, Default, Datum)]
-pub struct B;
+pub struct B(usize);
 #[derive(Debug, Clone, Copy, Default, Datum)]
-pub struct C(usize);
+pub struct C(f64);
 
 const COUNT: usize = 37;
 
 #[test]
 fn boba() -> Result<(), Box<dyn error::Error>> {
     #[derive(Debug, Clone, Copy)]
+    enum Type {
+        Unit,
+        A,
+        B,
+        C,
+        AB,
+        AC,
+        BC,
+        ABC,
+    }
+
+    #[derive(Debug, Clone, Copy)]
     enum Action {
-        CreateA(usize, bool),
-        CreateB(bool),
-        CreateC(bool),
-        AddA(bool),
-        AddB(bool),
-        AddC(bool),
-        RemoveA(bool),
-        RemoveB(bool),
-        RemoveC(bool),
-        Destroy(usize, bool),
-    }
-    struct Proof<P>(&'static str, P);
-    impl<P> fmt::Debug for Proof<P> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str(&self.0)
-        }
-    }
-    impl<P> fmt::Display for Proof<P> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            fmt::Debug::fmt(&self.0, f)
-        }
-    }
-    impl<P> error::Error for Proof<P> {}
-    macro_rules! prove {
-        ($prove:expr) => {{
-            let prove = $prove;
-            if prove.prove() {
-                Ok(())
-            } else {
-                Err(Proof(stringify!($prove), prove))
-            }
-        }};
+        Create(usize, Type, bool),
+        Add(usize, Type, bool),
+        Remove(usize, Type, bool),
+        Destroy(usize, Type, bool),
     }
 
     let count = ..100usize;
+    let r#type = (
+        Constant(Type::Unit),
+        Constant(Type::A),
+        Constant(Type::B),
+        Constant(Type::C),
+        Constant(Type::AB),
+        Constant(Type::AC),
+        Constant(Type::BC),
+        Constant(Type::ABC),
+    )
+        .any()
+        .map(|one| one.fuse());
     let resolve = <bool>::generator();
-    let actions = any::Any((
-        (count.clone(), resolve.clone()).map(|(count, resolve)| Action::CreateA(count, resolve)),
-        <bool>::generator().map(Action::CreateB),
-        <bool>::generator().map(Action::CreateC),
-        <bool>::generator().map(Action::AddA),
-        <bool>::generator().map(Action::AddB),
-        <bool>::generator().map(Action::AddC),
-        <bool>::generator().map(Action::RemoveA),
-        <bool>::generator().map(Action::RemoveB),
-        <bool>::generator().map(Action::RemoveC),
-        (count.clone(), resolve.clone()).map(|(count, resolve)| Action::Destroy(count, resolve)),
-    ))
-    .collect_with::<_, Vec<Action>>(..256usize);
-    actions.check_parallel_with(u16::MAX as _, u8::MAX as _, None, |actions| {
-        let database = Database::new();
-        let mut create_a = None;
-        let mut destroy = None;
-        let mut query_keys = database.query::<Key>()?;
-        for &action in actions {
-            match action {
-                Action::CreateA(count, resolve) => {
-                    let create = match &mut create_a {
-                        Some(create) => create,
-                        None => create_a.insert(database.create::<A>()?),
-                    };
-                    let keys: Vec<_> = create.all(vec![A; count]).iter().copied().collect();
-                    prove!(keys.len() == count)?;
-                    if resolve {
-                        let resolved = create.resolve();
-                        prove!(keys.len() <= resolved)?;
-                        for key in keys {
-                            prove!(database.keys().get(key).is_ok())?;
-                        }
-                    } else {
-                        for key in keys {
-                            prove!(database.keys().get(key).is_err())?;
-                        }
+    (
+        (&count, &r#type, &resolve).map(|values| Action::Create(values.0, values.1, values.2)),
+        (&count, &r#type, &resolve).map(|values| Action::Add(values.0, values.1, values.2)),
+        (&count, &r#type, &resolve).map(|values| Action::Remove(values.0, values.1, values.2)),
+        (&count, &r#type, &resolve).map(|values| Action::Destroy(values.0, values.1, values.2)),
+    )
+        .any()
+        .map(|one| one.fuse())
+        .collect_with::<_, Vec<Action>>(..256usize)
+        .check(1000, |actions| {
+            let database = Database::new();
+            let mut queries = (
+                database.query::<()>()?,
+                database.query::<()>()?.filter::<Has<A>>(),
+                database.query::<()>()?.filter_with(has::<B>()),
+                database.query::<&C>()?,
+                database.query::<&A>()?.filter::<Has<B>>(),
+                database.query::<&A>()?.filter_with(has::<C>()),
+                database
+                    .query::<()>()?
+                    .filter_with((has::<B>(), has::<C>())),
+                database.query::<(&A, &B, &C)>()?,
+            );
+
+            let mut creates = (
+                database.create::<()>()?,
+                database.create::<A>()?,
+                database.create::<B>()?,
+                database.create::<C>()?,
+                database.create::<(A, B)>()?,
+                database.create::<(A, C)>()?,
+                database.create::<(B, C)>()?,
+                database.create::<(A, B, C)>()?,
+            );
+
+            let mut adds = (
+                database.add::<()>()?,
+                database.add::<A>()?,
+                database.add::<B>()?,
+                database.add::<C>()?,
+                database.add::<(A, B)>()?,
+                database.add::<(A, C)>()?,
+                database.add::<(B, C)>()?,
+                database.add::<(A, B, C)>()?,
+            );
+
+            let mut removes = (
+                database.remove::<()>()?,
+                database.remove::<A>()?,
+                database.remove::<B>()?,
+                database.remove::<C>()?,
+                database.remove::<(A, B)>()?,
+                database.remove::<(A, C)>()?,
+                database.remove::<(B, C)>()?,
+                database.remove::<(A, B, C)>()?,
+            );
+
+            let mut destroys = (
+                database.destroy(),
+                database.destroy().filter::<Has<A>>(),
+                database.destroy().filter_with(has::<B>()),
+                database.destroy().filter::<Has<C>>(),
+                database.destroy().filter_with((has::<A>(), has::<B>())),
+                database.destroy().filter::<Has<(A, C)>>(),
+                database.destroy().filter_with((has::<B>(), has::<C>())),
+                database.destroy().filter::<Has<(A, B, C)>>(),
+            );
+
+            fn create<T: Template + Default>(
+                count: usize,
+                resolve: bool,
+                create: &mut Create<T>,
+                database: &Database,
+            ) -> Result<(), Box<dyn error::Error + Sync + Send>> {
+                let keys: Vec<_> = create.defaults(count).iter().copied().collect();
+                let mut query = database.query::<()>()?.filter::<Has<T>>();
+                let mut by = By::new();
+                by.keys(keys.iter().copied());
+
+                prove!(keys.len() == count)?;
+                prove!(by.len() == count)?;
+                prove!(keys.iter().all(|&key| key != Key::NULL))?;
+
+                if resolve {
+                    let resolved = create.resolve();
+                    prove!(keys.len() <= resolved)?;
+                    prove!(database
+                        .keys()
+                        .get_all(keys.iter().copied())
+                        .all(|(_, slot)| slot.is_ok()))?;
+                    prove!(query.count_by(&by) == count)?;
+                    for &key in keys.iter() {
+                        prove!(database.keys().get(key).is_ok())?;
+                        prove!(query.find(key, |_| ()))?;
+                    }
+                } else {
+                    for &key in keys.iter() {
+                        prove!(database.keys().get(key).is_err())?;
+                        prove!(query.find(key, |_| ()).is_err())?;
                     }
                 }
-                Action::Destroy(count, resolve) => {
-                    let destroy = match &mut destroy {
-                        Some(destroy) => destroy,
-                        None => destroy.insert(database.destroy()),
-                    };
-                    let mut keys = Vec::new();
-                    query_keys.try_each(|key| {
-                        if keys.len() < count {
-                            keys.push(key);
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                    destroy.all(keys.iter().copied());
-                    if resolve {
-                        let resolved = destroy.resolve();
-                        prove!(keys.len() <= count)?;
-                        prove!(keys.len() <= resolved)?;
-                        for key in keys {
-                            prove!(database.keys().get(key).is_err())?;
-                        }
-                    } else {
-                        for key in keys {
-                            prove!(database.keys().get(key).is_ok())?;
-                        }
-                    }
-                }
-                _ => {}
+                Ok(())
             }
-        }
-        Ok::<(), Box<dyn error::Error + Send + Sync>>(())
-    })?;
+
+            fn add<T: Template + Default>(
+                count: usize,
+                resolve: bool,
+                keys: Vec<Key>,
+                add: &mut Add<T, impl Filter>,
+                query: &mut Query<impl Row, impl Filter>,
+                database: &Database,
+            ) -> Result<(), Box<dyn error::Error + Sync + Send>> {
+                let keys = &keys[..count.min(keys.len())];
+                add.all(keys.iter().copied());
+                if resolve {
+                    let resolved = add.resolve();
+                    prove!(keys.len() <= resolved)?;
+                    for &key in keys {
+                        prove!(database.keys().get(key).is_ok())?;
+                        prove!(query.find(key, |_| ()))?;
+                    }
+                }
+                Ok(())
+            }
+
+            fn remove<T: Template + Default>(
+                count: usize,
+                resolve: bool,
+                keys: Vec<Key>,
+                remove: &mut Remove<T, impl Filter>,
+                query: &mut Query<impl Row, impl Filter>,
+                database: &Database,
+            ) -> Result<(), Box<dyn error::Error + Sync + Send>> {
+                let keys = &keys[..count.min(keys.len())];
+                remove.all(keys.iter().copied());
+                if resolve {
+                    let resolved = remove.resolve();
+                    prove!(keys.len() <= resolved)?;
+                    for &key in keys {
+                        prove!(database.keys().get(key).is_ok())?;
+                        prove!(query.find(key, |_| ()).is_err())?;
+                    }
+                }
+                Ok(())
+            }
+
+            fn destroy(
+                count: usize,
+                resolve: bool,
+                destroy: &mut Destroy<impl Filter>,
+                query: &mut Query<impl Row, impl Filter>,
+                database: &Database,
+            ) -> Result<(), Box<dyn error::Error + Sync + Send>> {
+                let keys: Vec<_> = query.keys();
+                let keys = &keys[..count.min(keys.len())];
+                destroy.all(keys.iter().copied());
+                if resolve {
+                    let resolved = destroy.resolve();
+                    prove!(keys.len() <= resolved)?;
+                    for &key in keys {
+                        prove!(database.keys().get(key).is_err())?;
+                        prove!(query.find(key, |_| ()).is_err())?;
+                    }
+                } else {
+                    for &key in keys {
+                        prove!(database.keys().get(key).is_ok())?;
+                        prove!(query.find(key, |_| ()))?;
+                    }
+                }
+                Ok(())
+            }
+
+            for &action in actions {
+                match action {
+                    Action::Create(count, Type::Unit, resolve) => {
+                        create(count, resolve, &mut creates.0, &database)?
+                    }
+                    Action::Create(count, Type::A, resolve) => {
+                        create(count, resolve, &mut creates.1, &database)?
+                    }
+                    Action::Create(count, Type::B, resolve) => {
+                        create(count, resolve, &mut creates.2, &database)?
+                    }
+                    Action::Create(count, Type::C, resolve) => {
+                        create(count, resolve, &mut creates.3, &database)?
+                    }
+                    Action::Create(count, Type::AB, resolve) => {
+                        create(count, resolve, &mut creates.4, &database)?
+                    }
+                    Action::Create(count, Type::AC, resolve) => {
+                        create(count, resolve, &mut creates.5, &database)?
+                    }
+                    Action::Create(count, Type::BC, resolve) => {
+                        create(count, resolve, &mut creates.6, &database)?
+                    }
+                    Action::Create(count, Type::ABC, resolve) => {
+                        create(count, resolve, &mut creates.7, &database)?
+                    }
+                    Action::Add(count, Type::Unit, resolve) => add(
+                        count,
+                        resolve,
+                        queries.0.keys(),
+                        &mut adds.0,
+                        &mut queries.0,
+                        &database,
+                    )?,
+                    Action::Add(count, Type::A, resolve) => add(
+                        count,
+                        resolve,
+                        queries.2.keys(),
+                        &mut adds.1,
+                        &mut queries.1,
+                        &database,
+                    )?,
+                    Action::Add(count, Type::B, resolve) => add(
+                        count,
+                        resolve,
+                        queries.1.keys(),
+                        &mut adds.2,
+                        &mut queries.2,
+                        &database,
+                    )?,
+                    Action::Add(count, Type::C, resolve) => add(
+                        count,
+                        resolve,
+                        queries.1.keys(),
+                        &mut adds.3,
+                        &mut queries.5,
+                        &database,
+                    )?,
+                    Action::Remove(count, Type::Unit, resolve) => remove(
+                        count,
+                        resolve,
+                        queries.0.keys(),
+                        &mut removes.0,
+                        &mut queries.0,
+                        &database,
+                    )?,
+                    Action::Remove(count, Type::A, resolve) => remove(
+                        count,
+                        resolve,
+                        queries.1.keys(),
+                        &mut removes.1,
+                        &mut queries.0,
+                        &database,
+                    )?,
+                    Action::Remove(count, Type::B, resolve) => remove(
+                        count,
+                        resolve,
+                        queries.4.keys(),
+                        &mut removes.2,
+                        &mut queries.1,
+                        &database,
+                    )?,
+                    Action::Remove(count, Type::C, resolve) => remove(
+                        count,
+                        resolve,
+                        queries.6.keys(),
+                        &mut removes.3,
+                        &mut queries.4,
+                        &database,
+                    )?,
+                    Action::Destroy(count, Type::Unit, resolve) => {
+                        destroy(count, resolve, &mut destroys.0, &mut queries.0, &database)?
+                    }
+                    Action::Destroy(count, Type::A, resolve) => {
+                        destroy(count, resolve, &mut destroys.1, &mut queries.1, &database)?
+                    }
+                    Action::Destroy(count, Type::B, resolve) => {
+                        destroy(count, resolve, &mut destroys.2, &mut queries.2, &database)?
+                    }
+                    Action::Destroy(count, Type::C, resolve) => {
+                        destroy(count, resolve, &mut destroys.3, &mut queries.3, &database)?
+                    }
+                    Action::Destroy(count, Type::AB, resolve) => {
+                        destroy(count, resolve, &mut destroys.4, &mut queries.4, &database)?
+                    }
+                    Action::Destroy(count, Type::AC, resolve) => {
+                        destroy(count, resolve, &mut destroys.5, &mut queries.5, &database)?
+                    }
+                    Action::Destroy(count, Type::BC, resolve) => {
+                        destroy(count, resolve, &mut destroys.6, &mut queries.6, &database)?
+                    }
+                    Action::Destroy(count, Type::ABC, resolve) => {
+                        destroy(count, resolve, &mut destroys.7, &mut queries.7, &database)?
+                    }
+                    _ => {}
+                }
+            }
+            Ok::<(), Box<dyn error::Error + Send + Sync>>(())
+        })?;
     Ok(())
 }
 

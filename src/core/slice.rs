@@ -39,10 +39,12 @@ impl<T: Clone + Send + Sync> Slice<T> {
     }
 
     pub fn guard(&self) -> Guard<T> {
-        let mut count = self.seen.lock();
-        *count += 1;
+        let mut seen = self.seen.lock();
+        *seen += 1;
         // Load pointer under the lock to ensure that it is not modified at the same time.
-        Guard(self, self.data.load(Ordering::Relaxed).into())
+        let guard = Guard(self, self.data.load(Ordering::Relaxed).into());
+        drop(seen);
+        guard
     }
 }
 
@@ -50,11 +52,16 @@ impl<'a, T> Guard<'a, T> {
     #[inline]
     pub fn get(&mut self) -> &[T] {
         self.update();
-        unsafe { self.get_unchecked() }
+        self.get_weak()
     }
 
+    /// May return a version of the slice that is not up to date with recent changes. Use `update` to catch up on recent changes.
     #[inline]
-    pub unsafe fn get_unchecked(&self) -> &[T] {
+    pub fn get_weak(&self) -> &[T] {
+        // SAFETY:
+        // The pointer held in `self.1` is guaranteed to be always valid for as long as this guard is alive. This is ensured
+        // through the `seen` and `STASH` mechanisms.
+        // Note that the pointer might point to data that is not up to date with recent changes.
         unsafe {
             from_raw_parts(
                 self.1.add(self.0.offset).cast::<T>(),
@@ -63,26 +70,43 @@ impl<'a, T> Guard<'a, T> {
         }
     }
 
+    #[inline]
     pub fn update(&mut self) -> bool {
-        let data = self.0.data.load(Ordering::Relaxed);
-        if ptr::eq(self.1, data) {
-            // Fast path.
-            return false;
-        }
+        self.update_locked(None)
+    }
 
-        // The pointer has changed since last read.
-        let mut seen = self.0.seen.lock();
-        // Load the pointer again in case it changed between the `load` and `lock` above.
-        let data = self.0.data.load(Ordering::Relaxed);
-        *seen += 1;
-        drop(seen);
-
+    fn update_locked(&mut self, seen: Option<&mut usize>) -> bool {
+        let Some(data) = self.load() else { return false; };
+        let data = match seen {
+            Some(seen) => {
+                *seen += 1;
+                data
+            }
+            None => {
+                // The pointer has changed since last read.
+                let mut seen = self.0.seen.lock();
+                // Load the pointer again in case it changed between the `load` and `lock` above.
+                let data = self.0.data.load(Ordering::Relaxed);
+                *seen += 1;
+                drop(seen);
+                data
+            }
+        };
         Self::try_free(self.1);
         self.1 = data;
         true
     }
 
-    // Frees or decrements the count of the given pointer.
+    fn load(&self) -> Option<*mut u8> {
+        let data = self.0.data.load(Ordering::Relaxed);
+        if ptr::eq(self.1, data) {
+            None
+        } else {
+            Some(data)
+        }
+    }
+
+    /// Frees or decrements the count of the given pointer.
     fn try_free(data: *mut u8) {
         let key = Key(data);
         let mut stash = STASH.lock();
@@ -94,9 +118,10 @@ impl<'a, T> Guard<'a, T> {
             Some(count) => *count -= 1,
             None => unreachable!("A reader is holding an invalid pointer."),
         }
+        drop(stash);
     }
 
-    fn set(&mut self, old: *mut u8, new: *mut u8, seen: &mut usize) {
+    fn set_locked(&mut self, old: *mut u8, new: *mut u8, seen: &mut usize) {
         debug_assert!(*seen > 0);
         if *seen == 1 {
             unsafe { free::<T>(old) };
@@ -112,16 +137,7 @@ impl<'a, T> Guard<'a, T> {
 impl<T: Clone> Guard<'_, T> {
     pub fn truncate(&mut self, len: usize) -> &[T] {
         let mut seen = self.0.seen.lock();
-        // Call `self.get` under the lock such that the data pointer is not modified while truncating.
-        self.update();
-        let slice = unsafe { self.get_unchecked() };
-        if slice.len() > len {
-            let (new, offset) = unsafe { allocate_with(&slice[..len], &[]) };
-            let old = self.0.data.swap(new, Ordering::Relaxed);
-            debug_assert_eq!(offset, self.0.offset);
-            self.set(old, new, &mut seen);
-        }
-        unsafe { self.get_unchecked() }
+        self.truncate_locked(len, &mut seen)
     }
 
     pub fn extend<I: IntoIterator<Item = T>>(&mut self, items: I) -> &[T] {
@@ -130,46 +146,58 @@ impl<T: Clone> Guard<'_, T> {
     }
 
     pub fn extend_with<F: FnOnce(&[T]) -> Box<[T]>>(&mut self, with: F) -> &[T] {
-        let mut seen = self.0.seen.lock();
-        self.update();
-        self.append(&with(unsafe { self.get_unchecked() }), &mut seen)
+        self.extend_locked(&with(self.get_weak()), true, &mut self.0.seen.lock())
     }
 
     pub fn extend_filter<F: FnOnce(&[T]) -> Option<Box<[T]>>>(&mut self, with: F) -> Option<&[T]> {
-        let mut seen = self.0.seen.lock();
-        self.update();
-        Some(self.append(&with(unsafe { self.get_unchecked() })?, &mut seen))
+        Some(self.extend_locked(&with(self.get_weak())?, true, &mut self.0.seen.lock()))
     }
 
     pub fn push_with<F: FnOnce(&[T]) -> T>(&mut self, with: F) -> &[T] {
-        let mut seen = self.0.seen.lock();
-        self.update();
-        self.append(&[with(unsafe { self.get_unchecked() })], &mut seen)
+        self.extend_locked(&[with(self.get_weak())], true, &mut self.0.seen.lock())
     }
 
+    /// Pushes the `item` only if the slice wasn't modified since the last `update` of this `Guard`.
+    /// Note that almosts all operations on this `Guard` will cause an `update`.
     pub fn push_if_same(&mut self, item: T) -> Option<&[T]> {
         let mut seen = self.0.seen.lock();
-        if self.update() {
+        if self.update_locked(Some(&mut seen)) {
             None
         } else {
-            Some(self.append(&[item], &mut seen))
+            Some(self.extend_locked(&[item], false, &mut seen))
         }
     }
 
     pub fn push_filter<F: FnOnce(&[T]) -> Option<T>>(&mut self, with: F) -> Option<&[T]> {
-        let mut seen = self.0.seen.lock();
-        self.update();
-        Some(self.append(&[with(unsafe { self.get_unchecked() })?], &mut seen))
+        Some(self.extend_locked(&[with(self.get_weak())?], true, &mut self.0.seen.lock()))
     }
 
-    fn append(&mut self, items: &[T], seen: &mut usize) -> &[T] {
-        if items.len() > 0 {
-            let (new, offset) = unsafe { allocate_with(self.get_unchecked(), items) };
+    fn truncate_locked(&mut self, len: usize, seen: &mut usize) -> &[T] {
+        self.update_locked(Some(seen));
+
+        // Call `self.get_weak` under the lock such that the data pointer is not modified while truncating.
+        let slice = self.get_weak();
+        if slice.len() > len {
+            let (new, offset) = unsafe { allocate_with(&slice[..len], &[]) };
             let old = self.0.data.swap(new, Ordering::Relaxed);
             debug_assert_eq!(offset, self.0.offset);
-            self.set(old, new, seen);
+            self.set_locked(old, new, seen);
         }
-        unsafe { self.get_unchecked() }
+        self.get_weak()
+    }
+
+    fn extend_locked(&mut self, items: &[T], update: bool, seen: &mut usize) -> &[T] {
+        if update {
+            self.update_locked(Some(seen));
+        }
+
+        if items.len() > 0 {
+            let (new, offset) = unsafe { allocate_with(self.get_weak(), items) };
+            let old = self.0.data.swap(new, Ordering::Relaxed);
+            debug_assert_eq!(offset, self.0.offset);
+            self.set_locked(old, new, seen);
+        }
+        self.get_weak()
     }
 }
 
@@ -282,15 +310,15 @@ mod tests {
         let mut b = slice.guard();
 
         assert_eq!(STASH.lock().len(), 0);
-        assert_eq!(unsafe { a.get_unchecked() }, &[1]);
-        assert_eq!(unsafe { b.get_unchecked() }, &[1]);
+        assert_eq!(a.get_weak(), &[1]);
+        assert_eq!(b.get_weak(), &[1]);
         assert_eq!(a.get(), &[1]);
         assert_eq!(b.get(), &[1]);
 
         assert_eq!(a.push_with(|_| 2), &[1, 2]);
         assert_eq!(STASH.lock().len(), 1);
-        assert_eq!(unsafe { a.get_unchecked() }, &[1, 2]);
-        assert_eq!(unsafe { b.get_unchecked() }, &[1]);
+        assert_eq!(a.get_weak(), &[1, 2]);
+        assert_eq!(b.get_weak(), &[1]);
         assert_eq!(STASH.lock().len(), 1);
         assert_eq!(a.get(), &[1, 2]);
         assert_eq!(b.get(), &[1, 2]);
@@ -308,9 +336,9 @@ mod tests {
         assert_eq!(b.get(), &[1, 2]);
         assert_eq!(a.push_with(|_| 3), &[1, 2, 3]);
         assert_eq!(STASH.lock().len(), 2);
-        assert_eq!(unsafe { a.get_unchecked() }, &[1, 2, 3]);
-        assert_eq!(unsafe { b.get_unchecked() }, &[1, 2]);
-        assert_eq!(unsafe { c.get_unchecked() }, &[1]);
+        assert_eq!(a.get_weak(), &[1, 2, 3]);
+        assert_eq!(b.get_weak(), &[1, 2]);
+        assert_eq!(c.get_weak(), &[1]);
 
         drop(a);
         assert_eq!(STASH.lock().len(), 2);

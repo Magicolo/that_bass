@@ -34,7 +34,7 @@ fn remove_simple_template() -> Result<(), Error> {
 #[test]
 fn remove_simple_template_twice() -> Result<(), Error> {
     let database = Database::new();
-    let key = create_one(&database, (A, B))?;
+    let key = create_one(&database, (A, B(1)))?;
     let mut remove_a = database.remove::<A>()?;
     let mut remove_b = database.remove::<B>()?;
 
@@ -62,7 +62,7 @@ fn remove_simple_template_twice() -> Result<(), Error> {
 #[test]
 fn remove_composite_template() -> Result<(), Error> {
     let database = Database::new();
-    let key = create_one(&database, (A, B))?;
+    let key = create_one(&database, (A, B(1)))?;
     let mut remove = database.remove::<(A, B)>()?;
 
     remove.one(key);

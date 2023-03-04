@@ -13,7 +13,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
-pub struct Destroy<'d, F> {
+pub struct Destroy<'d, F = ()> {
     database: &'d Database,
     keys: Keys<'d>,
     events: Events<'d>,
@@ -43,7 +43,7 @@ struct State {
 }
 
 impl Database {
-    pub fn destroy(&self) -> Destroy<'_, ()> {
+    pub fn destroy(&self) -> Destroy<'_> {
         Destroy {
             database: self,
             keys: self.keys(),
@@ -58,7 +58,7 @@ impl Database {
         }
     }
 
-    pub fn destroy_all(&self) -> DestroyAll<'_, ()> {
+    pub fn destroy_all(&self) -> DestroyAll<'_> {
         DestroyAll {
             database: self,
             tables: self.tables(),

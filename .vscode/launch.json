@@ -11,9 +11,12 @@
             "cargo": {
                 "args": [
                     "test",
+                    "boba",
                     "--no-run",
                     "--lib",
-                    "--package=that_bass"
+                    "--package=that_bass",
+                    "--",
+                    "--nocapture"
                 ],
                 "filter": {
                     "name": "that_bass",

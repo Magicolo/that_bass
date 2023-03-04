@@ -96,7 +96,7 @@ impl<'d> Keys<'d> {
 
     #[inline]
     pub unsafe fn get_semi_checked(&self, key: Key) -> Result<(&Slot, u32), Error> {
-        let slots = self.1.get_unchecked();
+        let slots = self.1.get_weak();
         match slots.get(key.index() as usize) {
             Some(slot) => match slot.table(key) {
                 Ok(table) => Ok((&**slot, table)),
@@ -108,7 +108,7 @@ impl<'d> Keys<'d> {
 
     #[inline]
     pub unsafe fn get_unchecked(&self, key: Key) -> &Slot {
-        get_unchecked(self.1.get_unchecked(), key.index() as usize)
+        get_unchecked(self.1.get_weak(), key.index() as usize)
     }
 
     #[inline]
@@ -148,7 +148,7 @@ impl<'d> Keys<'d> {
         &self,
         keys: I,
     ) -> impl Iterator<Item = (Key, &Slot)> {
-        let slots = self.1.get_unchecked();
+        let slots = self.1.get_weak();
         keys.into_iter()
             .map(|key| (key, &**get_unchecked(slots, key.index() as usize)))
     }
@@ -177,6 +177,9 @@ impl<'d> Keys<'d> {
             for (i, key) in keys.iter_mut().enumerate() {
                 *key = Key::new((index + i) as u32);
             }
+        } else {
+            // Other parts of the code want to be able to assume that calling `reserve` updates the guard held in `self`.
+            self.1.update();
         }
     }
 

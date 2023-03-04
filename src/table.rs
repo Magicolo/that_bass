@@ -209,7 +209,7 @@ impl Tables<'_> {
 
     #[inline]
     pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
-        get_unchecked(self.0.get_unchecked(), index)
+        get_unchecked(self.0.get_weak(), index)
     }
 
     #[inline]
@@ -222,7 +222,7 @@ impl Tables<'_> {
 
     #[inline]
     pub unsafe fn get_shared_unchecked(&self, index: usize) -> Arc<Table> {
-        get_unchecked(self.0.get_unchecked(), index).clone()
+        get_unchecked(self.0.get_weak(), index).clone()
     }
 
     /// `metas` must be sorted by `meta.identifier()` and must be deduplicated.

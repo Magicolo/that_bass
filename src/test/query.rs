@@ -81,19 +81,42 @@ fn query_with_false_is_always_empty() -> Result<(), Error> {
 }
 
 #[test]
+fn query_with_wrong_filter_is_empty() -> Result<(), Error> {
+    let database = Database::new();
+    let mut query = database.query::<()>()?.filter::<Has<A>>();
+    assert_eq!(query.count(), 0);
+    let keys = create_n(&database, [(); COUNT])?;
+    let mut by = By::new();
+    assert_eq!(by.len(), 0);
+    by.keys(keys.iter().copied());
+    assert_eq!(by.len(), COUNT);
+    assert_eq!(query.count(), 0);
+    assert_eq!(query.count_by(&by), 0);
+
+    for &key in keys.iter() {
+        assert!(database.keys().get(key).is_ok());
+        assert_eq!(
+            query.find(key, |_| true).err(),
+            Some(Error::KeyNotInQuery(key))
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn query_reads_same_datum_as_create_one() -> Result<(), Error> {
     let database = Database::new();
-    let key = create_one(&database, C(1))?;
-    assert_eq!(database.query::<&C>()?.find(key, |c| c.0), Ok(1));
+    let key = create_one(&database, B(1))?;
+    assert_eq!(database.query::<&B>()?.find(key, |b| b.0), Ok(1));
     Ok(())
 }
 
 #[test]
 fn query1_reads_datum_written_by_query2() -> Result<(), Error> {
     let database = Database::new();
-    let key = create_one(&database, C(1))?;
-    database.query::<&mut C>()?.find(key, |c| c.0 += 1)?;
-    assert_eq!(database.query::<&C>()?.find(key, |c| c.0), Ok(2));
+    let key = create_one(&database, B(1))?;
+    database.query::<&mut B>()?.find(key, |b| b.0 += 1)?;
+    assert_eq!(database.query::<&B>()?.find(key, |b| b.0), Ok(2));
     Ok(())
 }
 
@@ -113,10 +136,10 @@ fn query_option_read() -> Result<(), Error> {
 #[test]
 fn query_split_item_on_multiple_threads() -> Result<(), Error> {
     let database = Database::new();
-    create_n(&database, [C(0); COUNT])?;
-    create_n(&database, [(A, C(0)); COUNT * 2])?;
-    create_n(&database, [(B, C(0)); COUNT * 3])?;
-    create_n(&database, [(A, B, C(0)); COUNT * 4])?;
+    create_n(&database, [C(0.0); COUNT])?;
+    create_n(&database, [(A, C(0.0)); COUNT * 2])?;
+    create_n(&database, [(B(0), C(0.0)); COUNT * 3])?;
+    create_n(&database, [(A, B(0), C(0.0)); COUNT * 4])?;
     let mut query = database.query::<&mut C>()?;
     assert_eq!(query.split().len(), 4);
     assert!(query
@@ -127,20 +150,20 @@ fn query_split_item_on_multiple_threads() -> Result<(), Error> {
     scope(|scope| {
         for (i, split) in query.split().enumerate() {
             assert_eq!(split.count(), (i + 1) * COUNT);
-            scope.spawn(move || split.each(|c| c.0 += 1));
+            scope.spawn(move || split.each(|c| c.0 += 1.0));
         }
     });
-    query.each(|c| assert_eq!(c.0, 1));
+    query.each(|c| assert_eq!(c.0, 1.0));
     Ok(())
 }
 
 #[test]
 fn query_split_chunk_on_multiple_threads() -> Result<(), Error> {
     let database = Database::new();
-    create_n(&database, [C(0); COUNT])?;
-    create_n(&database, [(A, C(0)); COUNT * 2])?;
-    create_n(&database, [(B, C(0)); COUNT * 3])?;
-    create_n(&database, [(A, B, C(0)); COUNT * 4])?;
+    create_n(&database, [C(0.0); COUNT])?;
+    create_n(&database, [(A, C(0.0)); COUNT * 2])?;
+    create_n(&database, [(B(0), C(0.0)); COUNT * 3])?;
+    create_n(&database, [(A, B(0), C(0.0)); COUNT * 4])?;
     let mut query = database.query::<&mut C>()?.chunk();
     assert_eq!(query.count(), 4);
     assert_eq!(query.split().len(), 4);
@@ -151,7 +174,7 @@ fn query_split_chunk_on_multiple_threads() -> Result<(), Error> {
                 let value = split.map(|c| {
                     assert_eq!(c.len(), (i + 1) * COUNT);
                     for c in c {
-                        c.0 += 1;
+                        c.0 += 1.0;
                     }
                 });
                 assert_eq!(value, Some(()));
@@ -196,18 +219,18 @@ fn query_copy_to() -> Result<(), Error> {
     struct CopyTo(Key);
 
     let database = Database::new();
-    let mut a = create_one(&database, C(1))?;
+    let mut a = create_one(&database, B(1))?;
     let mut create = database.create()?;
     for i in 0..COUNT {
-        a = create.one((C(i), CopyTo(a)));
+        a = create.one((B(i), CopyTo(a)));
     }
     assert_eq!(create.resolve(), COUNT);
 
-    let mut sources = database.query::<(&C, &CopyTo)>()?;
-    let mut targets = database.query::<&mut C>()?;
+    let mut sources = database.query::<(&B, &CopyTo)>()?;
+    let mut targets = database.query::<&mut B>()?;
     let mut by = By::new();
-    sources.each(|(c, copy)| by.pair(copy.0, c.0));
-    targets.each_by_ok(&mut by, |value, c| c.0 = value);
+    sources.each(|(b, copy)| by.pair(copy.0, b.0));
+    targets.each_by_ok(&mut by, |value, b| b.0 = value);
     // TODO: Add assertions.
     Ok(())
 }
@@ -218,22 +241,22 @@ fn query_copy_from() -> Result<(), Error> {
     struct CopyFrom(Key);
 
     let database = Database::new();
-    let a = create_one(&database, C(1))?;
+    let a = create_one(&database, B(1))?;
     let mut create = database.create()?;
     for i in 0..COUNT {
-        create.one((C(i), CopyFrom(a)));
+        create.one((B(i), CopyFrom(a)));
     }
     assert_eq!(create.resolve(), COUNT);
 
     let mut copies = database.query::<(Key, &CopyFrom)>()?;
-    let mut sources = database.query::<&C>()?;
-    let mut targets = database.query::<&mut C>()?;
+    let mut sources = database.query::<&B>()?;
+    let mut targets = database.query::<&mut B>()?;
     let mut by_source = By::new();
     let mut by_target = By::new();
 
     copies.each(|(key, copy)| by_source.pair(copy.0, key));
     assert_eq!(by_source.len(), COUNT);
-    sources.each_by_ok(&mut by_source, |target, c| by_target.pair(target, c.0));
+    sources.each_by_ok(&mut by_source, |target, b| by_target.pair(target, b.0));
     assert_eq!(by_source.len(), 0);
     assert_eq!(by_target.len(), COUNT);
     targets.each_by_ok(&mut by_target, |value, c| c.0 = value);
@@ -255,24 +278,24 @@ fn query_swap() -> Result<(), Error> {
     struct Swap(Key, Key);
 
     let database = Database::new();
-    let mut a = create_one(&database, C(1))?;
-    let mut b = create_one(&database, C(2))?;
+    let mut a = create_one(&database, B(1))?;
+    let mut b = create_one(&database, B(2))?;
     let mut create = database.create()?;
     for i in 0..COUNT {
-        let c = create.one((C(i), Swap(a, b)));
+        let c = create.one((B(i), Swap(a, b)));
         a = b;
         b = c;
     }
     assert_eq!(create.resolve(), COUNT);
 
     let mut swaps = database.query::<&Swap>()?;
-    let mut sources = database.query::<&C>()?;
-    let mut targets = database.query::<&mut C>()?;
+    let mut sources = database.query::<&B>()?;
+    let mut targets = database.query::<&mut B>()?;
     let mut by_source = By::new();
     let mut by_target = By::new();
     swaps.each(|swap| by_source.pairs([(swap.0, swap.1), (swap.1, swap.0)]));
-    sources.each_by_ok(&mut by_source, |target, c| by_target.pair(target, c.0));
-    targets.each_by_ok(&mut by_target, |value, c| c.0 = value);
+    sources.each_by_ok(&mut by_source, |target, b| by_target.pair(target, b.0));
+    targets.each_by_ok(&mut by_target, |value, b| b.0 = value);
     // TODO: Add assertions.
     Ok(())
 }

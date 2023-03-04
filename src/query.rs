@@ -67,6 +67,25 @@ impl Database {
 }
 
 impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
+    pub fn keys<K: Default + Extend<Key>>(&mut self) -> K {
+        let mut keys = K::default();
+        self.keys_in(&mut keys);
+        keys
+    }
+
+    pub fn keys_in<K: Extend<Key>>(&mut self, keys: &mut K) {
+        self.update();
+        Self::try_guards(
+            keys,
+            &mut self.indices,
+            &self.states,
+            |state, _, _, _, keys, count| {
+                state.extend(keys.iter().take(count.get()).copied());
+                Continue(state)
+            },
+        );
+    }
+
     pub fn tables(&mut self) -> impl FullIterator<Item = &Table> {
         self.update();
         self.states.iter().map(|state| &*state.table)
@@ -276,7 +295,13 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     #[inline]
     pub fn count_by<V>(&mut self, by: &By<V>) -> usize {
         self.update();
-        by.pairs.iter().filter(|&&(key, ..)| self.has(key)).count()
+        by.pairs
+            .iter()
+            .filter(|&&(key, ..)| match self.keys.get(key) {
+                Ok((_, table)) => find_state(&mut self.states, table).is_some(),
+                Err(_) => false,
+            })
+            .count()
     }
 
     #[inline]

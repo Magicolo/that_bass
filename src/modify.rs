@@ -18,7 +18,7 @@ use std::{
 };
 
 /// Adds template `A` and removes template `R` to accumulated keys that satisfy the filter `F`.
-pub struct Modify<'d, A: Template, R: Template, F> {
+pub struct Modify<'d, A: Template, R: Template, F = ()> {
     database: &'d Database,
     keys: Keys<'d>,
     events: Events<'d>,
@@ -33,7 +33,7 @@ pub struct Modify<'d, A: Template, R: Template, F> {
 }
 
 /// Adds template `A` and removes template `R` to all keys in tables that satisfy the filter `F`.
-pub struct ModifyAll<'d, A: Template, R: Template, F> {
+pub struct ModifyAll<'d, A: Template, R: Template, F = ()> {
     database: &'d Database,
     tables: Tables<'d>,
     keys: Keys<'d>,
@@ -43,6 +43,11 @@ pub struct ModifyAll<'d, A: Template, R: Template, F> {
     filter: F,
     _marker: PhantomData<fn(R)>,
 }
+
+pub type Add<'d, T, F = ()> = Modify<'d, T, (), F>;
+pub type AddAll<'d, T, F = ()> = ModifyAll<'d, T, (), F>;
+pub type Remove<'d, T, F = ()> = Modify<'d, (), T, F>;
+pub type RemoveAll<'d, T, F = ()> = ModifyAll<'d, (), T, F>;
 
 struct State<T: Template> {
     source: Arc<Table>,
@@ -71,7 +76,7 @@ struct ShareTable<A: Template, R: Template> {
 }
 
 impl Database {
-    pub fn modify<A: Template, R: Template>(&self) -> Result<Modify<A, R, ()>, Error> {
+    pub fn modify<A: Template, R: Template>(&self) -> Result<Modify<A, R>, Error> {
         // Validate metas here (no duplicates allowed), but there is no need to store them.
         ShareMeta::<(A, R)>::from(self).map(|_| Modify {
             database: self,
@@ -88,7 +93,7 @@ impl Database {
         })
     }
 
-    pub fn modify_all<A: Template, R: Template>(&self) -> Result<ModifyAll<A, R, ()>, Error> {
+    pub fn modify_all<A: Template, R: Template>(&self) -> Result<ModifyAll<A, R>, Error> {
         // Validate metas here (no duplicates allowed), but there is no need to store them.
         ShareMeta::<(A, R)>::from(self).map(|_| ModifyAll {
             database: self,
@@ -102,19 +107,19 @@ impl Database {
         })
     }
 
-    pub fn add<T: Template>(&self) -> Result<Modify<T, (), ()>, Error> {
+    pub fn add<T: Template>(&self) -> Result<Add<T>, Error> {
         self.modify()
     }
 
-    pub fn add_all<T: Template>(&self) -> Result<ModifyAll<T, (), ()>, Error> {
+    pub fn add_all<T: Template>(&self) -> Result<AddAll<T>, Error> {
         self.modify_all()
     }
 
-    pub fn remove<T: Template>(&self) -> Result<Modify<(), T, ()>, Error> {
+    pub fn remove<T: Template>(&self) -> Result<Remove<T>, Error> {
         self.modify()
     }
 
-    pub fn remove_all<T: Template>(&self) -> Result<ModifyAll<(), T, ()>, Error> {
+    pub fn remove_all<T: Template>(&self) -> Result<RemoveAll<T>, Error> {
         self.modify_all()
     }
 }
