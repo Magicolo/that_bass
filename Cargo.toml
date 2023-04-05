@@ -9,7 +9,7 @@ that_base_derive = { path = "./that_base_derive" }
 parking_lot = "*"
 
 [dev-dependencies]
-checkito = "0.2.0"
+checkito = "1.0.0"
 
 [workspace]
 members = ["that_base_derive"]
