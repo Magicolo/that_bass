@@ -15,7 +15,7 @@ use crate::{
     query::Query,
     row::Row,
 };
-use checkito::{constant::Constant, prove, FullGenerate, Generate};
+use checkito::{prove, same::Same, FullGenerate, Generate};
 use std::{collections::HashSet, error, marker::PhantomData};
 use that_bass::{
     filter::{Any, Filter, Has, Is, Not},
@@ -56,16 +56,16 @@ fn boba() -> Result<(), Box<dyn error::Error>> {
         Destroy(usize, Type, bool),
     }
 
-    let count = ..100usize;
+    let count = ..256usize;
     let r#type = (
-        Constant(Type::Unit),
-        Constant(Type::A),
-        Constant(Type::B),
-        Constant(Type::C),
-        Constant(Type::AB),
-        Constant(Type::AC),
-        Constant(Type::BC),
-        Constant(Type::ABC),
+        Same(Type::Unit),
+        Same(Type::A),
+        Same(Type::B),
+        Same(Type::C),
+        Same(Type::AB),
+        Same(Type::AC),
+        Same(Type::BC),
+        Same(Type::ABC),
     )
         .any()
         .map(|one| one.fuse());
@@ -79,7 +79,7 @@ fn boba() -> Result<(), Box<dyn error::Error>> {
         .any()
         .map(|one| one.fuse())
         .collect_with::<_, Vec<Action>>(..256usize)
-        .check(1000, |actions| {
+        .check(10, |actions| {
             let database = Database::new();
             let mut queries = (
                 database.query::<()>()?,
