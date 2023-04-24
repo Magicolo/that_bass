@@ -15,7 +15,7 @@ use crate::{
     query::Query,
     row::Row,
 };
-use checkito::{prove, same::Same, FullGenerate, Generate};
+use checkito::{any::Unify, prove, same::Same, FullGenerate, Generate};
 use std::{collections::HashSet, error, marker::PhantomData};
 use that_bass::{
     filter::{Any, Filter, Has, Is, Not},
@@ -68,7 +68,7 @@ fn boba() -> Result<(), Box<dyn error::Error>> {
         Same(Type::ABC),
     )
         .any()
-        .map(|one| one.fuse());
+        .map(Unify::unify);
     let resolve = <bool>::generator();
     (
         (&count, &r#type, &resolve).map(|values| Action::Create(values.0, values.1, values.2)),
@@ -77,7 +77,7 @@ fn boba() -> Result<(), Box<dyn error::Error>> {
         (&count, &r#type, &resolve).map(|values| Action::Destroy(values.0, values.1, values.2)),
     )
         .any()
-        .map(|one| one.fuse())
+        .map(Unify::unify)
         .collect_with::<_, Vec<Action>>(..256usize)
         .check(10, |actions| {
             let database = Database::new();
