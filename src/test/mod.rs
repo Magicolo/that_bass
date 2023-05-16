@@ -163,7 +163,7 @@ fn boba() -> Result<(), Box<dyn error::Error>> {
                     prove!(query.count_by(&by) == count)?;
                     for &key in keys.iter() {
                         prove!(database.keys().get(key).is_ok())?;
-                        prove!(query.find(key, |_| ()))?;
+                        prove!(query.find(key, |_| ()))??;
                     }
                 } else {
                     for &key in keys.iter() {
@@ -189,7 +189,7 @@ fn boba() -> Result<(), Box<dyn error::Error>> {
                     prove!(keys.len() <= resolved)?;
                     for &key in keys {
                         prove!(database.keys().get(key).is_ok())?;
-                        prove!(query.find(key, |_| ()))?;
+                        prove!(query.find(key, |_| ()))??;
                     }
                 }
                 Ok(())
@@ -236,7 +236,7 @@ fn boba() -> Result<(), Box<dyn error::Error>> {
                 } else {
                     for &key in keys {
                         prove!(database.keys().get(key).is_ok())?;
-                        prove!(query.find(key, |_| ()))?;
+                        prove!(query.find(key, |_| ()))??;
                     }
                 }
                 Ok(())

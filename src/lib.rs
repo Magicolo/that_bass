@@ -1,6 +1,6 @@
 #![feature(alloc_layout_extra)]
-#![feature(once_cell)]
 #![feature(type_alias_impl_trait)]
+#![feature(impl_trait_in_assoc_type)]
 
 pub mod core;
 pub mod create;
@@ -72,10 +72,10 @@ pub use that_base_derive::{Datum, Filter, Template};
         - Requires to stop using `Table::index`.
     TODO: Queries don't prevent visiting a key twice if another thread resolves a move operation from a visited table to an unvisited
     one while the query is iterating.
-        - It may be resonnable to require from users (or a scheduler) to resolve deferred operations at an appropriate time.
+        - It may be reasonable to require from users (or a scheduler) to resolve deferred operations at an appropriate time.
     TODO: Implement a table `If` operation.
         - The if checks some condition on tables with an upgradable lock and executes its body with a write lock on success.
-        - This ensures that no structural operation has occured on the table between the check and the body.
+        - This ensures that no structural operation has occurred on the table between the check and the body.
         - The motivating scenario is `FindOrCreate` which tries to match a given row and creates the row if it is missing.
             - Usage could look like (arguments to `If` should be inferred): `|mut a: If| {
                 // fn find_or_create<F, T: Template>(&mut self, find: impl FnMut(T::Read) -> Option<F>, create: impl FnMut() -> T) -> Result<Option<F>, Error>;
@@ -117,21 +117,21 @@ pub use that_base_derive::{Datum, Filter, Template};
     TODO (POSTPONED): Add an option to split large table stores in chunks of fixed size.
         - Large stores have better locality but might cause more contention on their locks.
         - Small stores cause less contention but have worse locality.
-        - Imposes a design dillema on the user:
+        - Imposes a design dilemma on the user:
             - Use more static templates with dynamic values (larger stores).
             - Use more dynamic templates (using `Add/Remove` operations) with static datum (smaller stores).
         - Tables may have a `size: u32` that defaults to `u32::MAX` that defines the maximum store size.
         - After the first chunk has grown to full size (ex: 1024), change growing strategy to allocating
         full chunks with separate locks.
-        - This removes the dillema from the user in favor of more static templates since they'll have similar
+        - This removes the dilemma from the user in favor of more static templates since they'll have similar
         locality and parallelism properties compared to more dynamic templates, but in the dynamic case, there'll be more
         move operations.
-        - Should offer some benefits in terms in parallelism (parallelise more granularly by chunk).
+        - Should offer some benefits in terms in parallelism (parallelize more granularly by chunk).
         - Should offer some opportunities when moving/destroying rows such that only one chunk will need to be locked.
             - Each chunk may have its own `count` such that `squash` can be used within a chunk.
         - This solution will add a lot of complexity.
         - Will this require table + chunk + column locks vs table + column locks (currently)?
-        *** It seems that locality should be prioritise since it allows work on columns do be completed sooner which reduces
+        *** It seems that locality should be prioritize since it allows work on columns do be completed sooner which reduces
         contention. Locality also allows a more efficient use of SIMD instructions.
     TODO (POSTPONED): Implement `Row` for `Add<T: Template>`?
         - The added constraints on `Query`, the added locks, the added complexity and the added confusion in the API tend
@@ -153,11 +153,11 @@ pub use that_base_derive::{Datum, Filter, Template};
             - With `Add<A>, Add<B>, Add<C>`: `A & B & C`, (`A & B`) | (`A & C`) | (`B & C`), A | B | C, others.
         - Because of this ordering, `Add<T>` will not be allowed with `Remove<U>` in the same query.
     TODO (POSTPONED): Implement `Row` for `Remove<T: Template>`:
-        - Same benefits and inconvenients as `Add<T>`.
+        - Same benefits and inconveniences as `Add<T>`.
         - Requires the reverse ordering as `Add<T>`.
         - Do not allow `Add`-like and `Remove`-like operators in the same query.
     TODO (POSTPONED): Implement nest operations for query:
-        - Forces the outer query to take additionnal locks in case the inner query needs to produce the same item as the outer query:
+        - Forces the outer query to take additional locks in case the inner query needs to produce the same item as the outer query:
             - An outer read that conflicts with an inner write becomes an upgradable read.
             - An inner read that is missing in outer becomes a read if its index is lower than the last outer column.
             - An inner write that is missing in outer becomes an upgradable read if its index is lower than the last outer column.
@@ -601,7 +601,7 @@ impl Database {
 
 //     /*
 //         TODO: Have the events by stored by table.
-//         - Listeners would pull events from their elligible tables (ex: `OnAdd<T>` would only pull from tables where `table.has::<T>()`).
+//         - Listeners would pull events from their eligible tables (ex: `OnAdd<T>` would only pull from tables where `table.has::<T>()`).
 //         - PRO: Allows using `Filter` to pull only events from filtered tables.
 //         - PRO: Much more granular `create/destroy/modify` counters to turn on/off event collection.
 //         - PRO: `fold_swap` can be used to pull events rather than blocking on a single mutex.
