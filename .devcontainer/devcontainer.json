@@ -1,5 +1,5 @@
 {
-  "image": "mcr.microsoft.com/vscode/devcontainers/rust",
+  "image": "ubuntu",
   "features": {
     "ghcr.io/devcontainers/features/rust:latest": {
       "profile": "default"
@@ -19,6 +19,9 @@
       ]
     }
   },
-  "postCreateCommand": "rustup install nightly && rustup default nightly",
+  "postCreateCommand": {
+    "apt-get": "apt-get update && apt-get upgrade -y && apt-get install -y git curl", 
+    "rustup": "rustup install nightly && rustup default nightly"
+  },
   "postStartCommand": "rustup update"
 }
