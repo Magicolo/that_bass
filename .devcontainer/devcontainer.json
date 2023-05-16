@@ -1,5 +1,5 @@
 {
-  "image": "ubuntu",
+  "image": "mcr.microsoft.com/vscode/devcontainers/rust",
   "features": {
     "ghcr.io/devcontainers/features/rust:latest": {
       "profile": "default"
