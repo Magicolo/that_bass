@@ -3,14 +3,11 @@
   "features": {
     "ghcr.io/devcontainers/features/git:latest": {},
     "ghcr.io/devcontainers/features/git-lfs:latest": {},
-    "ghcr.io/devcontainers/features/common-utils:latest": {
-      "configureZshAsDefaultShell": true
-    },
+    "ghcr.io/devcontainers/features/common-utils:latest": {},
     "ghcr.io/devcontainers/features/rust:latest": {
       "profile": "default"
     },
-    "ghcr.io/lee-orr/rusty-dev-containers/cargo-expand:latest": {},
-    "ghcr.io/lee-orr/rusty-dev-containers/cargo-watch:latest": {}
+    "ghcr.io/lee-orr/rusty-dev-containers/cargo-expand:latest": {}
   },
   "customizations": {
     "vscode": {
@@ -27,6 +24,6 @@
       ]
     }
   },
-  "postCreateCommand": "rustup install nightly && rustup default nightly",
+  "postCreateCommand": "rustup install nightly && rustup default nightly && rustup component add rustfmt clippy miri",
   "postStartCommand": "rustup update"
 }
