@@ -31,6 +31,26 @@ use std::{
 pub use that_base_derive::{Datum, Filter, Template};
 
 /*
+    TODO: Dynamic disk/network save/load of data.
+        - Tables will be able to save/load their data to some target. Whenever the data is requested, the table will load it.
+        - Add `memory_pressure_threshold` parameter to `Database`.
+            - It will represent the memory usage at which the `Database` should start offloading its data to some external storage.
+            - Memory usage may temporarily go over the threshold, but when the `Database` is "at rest" (i.e. no operations are ongoing),
+            its memory usage should remain `<= memory_pressure_threshold`.
+        - Add `maximum_memory_size` parameter to `Database`.
+            - It represents the absolute memory limit that the `Database` may reach. If the `Database` were to have more in memory data
+            than `maximum_memory_size`, it will use more drastic measures to always stay `<= maximum_memory_size`.
+            - `assert!(maximum_memory_size >= memory_pressure_threshold);`
+        - Track current memory size of the `Database` and expose it.
+        - Add `maximum_table_size` parameter to `Database`.
+            - `assert!(maximum_table_size >= table_item_size);`
+            - `maximum_table_size` must always be greater than one table item (unlikely a problem, but still).
+            - When a table grows, it can only grow up to `maximum_table_size / table_item_size` item count. If there is an overflow,
+            create a new table with the same schema.
+            - It may be worth factoring out the schema from the tables since many tables may share the same schema.
+        - Memory policy must be applied on table creation, table growth and on table load.
+            - Ex: tables that are less accessed can be dumped to storage
+
     TODO: Add filters to events.
         - database.listen::<OnCreate>().filter::<Has<Mass>>();
     TODO: Implement an interpreter.
