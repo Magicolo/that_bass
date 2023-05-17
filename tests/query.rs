@@ -1,5 +1,5 @@
-use super::*;
-use std::{any::TypeId, thread::scope};
+pub mod common;
+use common::*;
 
 #[test]
 fn query_is_some_create_one_key() -> Result<(), Error> {

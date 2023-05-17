@@ -15,9 +15,6 @@ pub mod row;
 pub mod table;
 pub mod template;
 
-#[cfg(test)]
-mod test;
-
 use key::Key;
 use resources::Resources;
 use std::{

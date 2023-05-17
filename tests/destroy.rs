@@ -1,4 +1,5 @@
-use super::*;
+pub mod common;
+use common::*;
 
 #[test]
 fn destroy_one_fails_with_null_key() {

@@ -1,4 +1,5 @@
-use super::*;
+pub mod common;
+use common::*;
 
 #[test]
 fn create_adds_a_table() -> Result<(), Error> {

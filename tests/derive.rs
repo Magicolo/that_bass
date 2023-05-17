@@ -1,4 +1,5 @@
-use super::*;
+pub mod common;
+use common::*;
 
 pub mod filter {
     use super::*;
@@ -69,7 +70,7 @@ pub mod filter {
         let database = Database::new();
         database.destroy().filter::<UnitStruct>();
         database.destroy().filter::<EmptyTupleStruct>();
-        database.destroy().filter::<Any<EmptyMapStruct>>();
+        database.destroy().filter::<Any<(EmptyMapStruct,)>>();
         database.destroy().filter::<(Enum, Enum)>();
         database.destroy().filter::<Any<(TupleStruct, MapStruct)>>();
         database

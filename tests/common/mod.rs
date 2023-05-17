@@ -1,26 +1,15 @@
-pub mod add;
-pub mod create;
-pub mod derive;
-pub mod destroy;
-pub mod event;
-pub mod query;
-pub mod remove;
-
-use crate::{
-    self as that_bass,
+pub use checkito::{any::Unify, prove, same::Same, FullGenerate, Generate};
+pub use std::{any::TypeId, collections::HashSet, error, marker::PhantomData, thread::scope};
+pub use that_bass::{
     create::Create,
     destroy::Destroy,
     filter::has,
-    modify::{Add, Remove},
-    query::Query,
-    row::Row,
-};
-use checkito::{any::Unify, prove, same::Same, FullGenerate, Generate};
-use std::{collections::HashSet, error, marker::PhantomData};
-use that_bass::{
     filter::{Any, Filter, Has, Is, Not},
     key::Key,
+    modify::{Add, Remove},
     query::By,
+    query::Query,
+    row::Row,
     template::Template,
     Database, Datum, Error, Filter, Template,
 };
@@ -28,11 +17,11 @@ use that_bass::{
 #[derive(Debug, Clone, Copy, Default, Datum)]
 pub struct A;
 #[derive(Debug, Clone, Copy, Default, Datum)]
-pub struct B(usize);
+pub struct B(pub usize);
 #[derive(Debug, Clone, Copy, Default, Datum)]
-pub struct C(f64);
+pub struct C(pub f64);
 
-const COUNT: usize = 37;
+pub const COUNT: usize = 37;
 
 #[test]
 fn boba() -> Result<(), Box<dyn error::Error>> {
@@ -364,14 +353,14 @@ fn boba() -> Result<(), Box<dyn error::Error>> {
     Ok(())
 }
 
-fn create_one(database: &Database, template: impl Template) -> Result<Key, Error> {
+pub fn create_one(database: &Database, template: impl Template) -> Result<Key, Error> {
     let mut create = database.create()?;
     let key = create.one(template);
     assert_eq!(create.resolve(), 1);
     Ok(key)
 }
 
-fn create_n<const N: usize>(
+pub fn create_n<const N: usize>(
     database: &Database,
     templates: [impl Template; N],
 ) -> Result<[Key; N], Error> {
@@ -381,14 +370,14 @@ fn create_n<const N: usize>(
     Ok(keys)
 }
 
-fn destroy_one(database: &Database, key: Key) -> Result<(), Error> {
+pub fn destroy_one(database: &Database, key: Key) -> Result<(), Error> {
     let mut destroy = database.destroy();
     destroy.one(key);
     assert_eq!(destroy.resolve(), 1);
     Ok(())
 }
 
-fn destroy_all(database: &Database, keys: &[Key]) {
+pub fn destroy_all(database: &Database, keys: &[Key]) {
     let mut destroy = database.destroy();
     destroy.all(keys.iter().copied());
     assert_eq!(destroy.resolve(), keys.len());

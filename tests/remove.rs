@@ -1,4 +1,5 @@
-use super::*;
+pub mod common;
+use common::*;
 
 #[test]
 fn remove_resolve_is_0() -> Result<(), Error> {

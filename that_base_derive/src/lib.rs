@@ -97,31 +97,31 @@ pub fn filter(input: TokenStream) -> TokenStream {
                     }
                 }
 
-                #[automatically_derived]
-                impl #impl_generics #filter_path for #any_filter_path<#ident #type_generics> #where_clauses {
-                    fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
-                        let #ident #construct = self.inner();
-                        #filter_path::filter(&#any_path((#(#names,)*)), _table, _database)
-                    }
+                // #[automatically_derived]
+                // impl #impl_generics #filter_path for #any_filter_path<#ident #type_generics> #where_clauses {
+                //     fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
+                //         let #ident #construct = self.inner();
+                //         #filter_path::filter(&#any_path((#(#names,)*)), _table, _database)
+                //     }
 
-                    fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
-                        let #ident #construct = self.inner();
-                        #filter_path::dynamic(&#any_path((#(#names,)*)), _database)
-                    }
-                }
+                //     fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
+                //         let #ident #construct = self.inner();
+                //         #filter_path::dynamic(&#any_path((#(#names,)*)), _database)
+                //     }
+                // }
 
-                #[automatically_derived]
-                impl #impl_generics #filter_path for #same_filter_path<#ident #type_generics> #where_clauses {
-                    fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
-                        let #ident #construct = self.inner();
-                        #filter_path::filter(&#same_path((#(#names,)*)), _table, _database)
-                    }
+                // #[automatically_derived]
+                // impl #impl_generics #filter_path for #same_filter_path<#ident #type_generics> #where_clauses {
+                //     fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
+                //         let #ident #construct = self.inner();
+                //         #filter_path::filter(&#same_path((#(#names,)*)), _table, _database)
+                //     }
 
-                    fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
-                        let #ident #construct = self.inner();
-                        #filter_path::dynamic(&#same_path((#(#names,)*)), _database)
-                    }
-                }
+                //     fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
+                //         let #ident #construct = self.inner();
+                //         #filter_path::dynamic(&#same_path((#(#names,)*)), _database)
+                //     }
+                // }
             )
         }
         Data::Enum(DataEnum { variants, .. }) => {
@@ -145,27 +145,27 @@ pub fn filter(input: TokenStream) -> TokenStream {
                     }
                 }
 
-                #[automatically_derived]
-                impl #impl_generics #filter_path for #any_filter_path<#ident #type_generics> #where_clauses {
-                    fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
-                        match self.inner() { #(#matches => #filter_path::filter(&#any_path(#tuples), _table, _database),)* _ => false }
-                    }
+                // #[automatically_derived]
+                // impl #impl_generics #filter_path for #any_filter_path<#ident #type_generics> #where_clauses {
+                //     fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
+                //         match self.inner() { #(#matches => #filter_path::filter(&#any_path(#tuples), _table, _database),)* _ => false }
+                //     }
 
-                    fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
-                        match self.inner() { #(#matches => #filter_path::dynamic(&#any_path(#tuples), _database),)* _ => #filter_path::dynamic(&false, _database) }
-                    }
-                }
+                //     fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
+                //         match self.inner() { #(#matches => #filter_path::dynamic(&#any_path(#tuples), _database),)* _ => #filter_path::dynamic(&false, _database) }
+                //     }
+                // }
 
-                #[automatically_derived]
-                impl #impl_generics #filter_path for #same_filter_path<#ident #type_generics> #where_clauses {
-                    fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
-                        match self.inner() { #(#matches => #filter_path::filter(&#same_path(#tuples), _table, _database),)* _ => false }
-                    }
+                // #[automatically_derived]
+                // impl #impl_generics #filter_path for #same_filter_path<#ident #type_generics> #where_clauses {
+                //     fn filter(&self,_table: &#table_path, _database: &#database_path) -> bool {
+                //         match self.inner() { #(#matches => #filter_path::filter(&#same_path(#tuples), _table, _database),)* _ => false }
+                //     }
 
-                    fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
-                        match self.inner() { #(#matches => #filter_path::dynamic(&#same_path(#tuples), _database),)* _ => #filter_path::dynamic(&false, _database) }
-                    }
-                }
+                //     fn dynamic(&self, _database: &#database_path) -> #dynamic_path {
+                //         match self.inner() { #(#matches => #filter_path::dynamic(&#same_path(#tuples), _database),)* _ => #filter_path::dynamic(&false, _database) }
+                //     }
+                // }
             )
         }
         Data::Union(_) => quote!(compile_error!("Union types are not supported for this derive.");),
