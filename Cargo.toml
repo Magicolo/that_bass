@@ -9,7 +9,12 @@ that_base_derive = { path = "./that_base_derive" }
 parking_lot = "0.12.1"
 
 [dev-dependencies]
-checkito = "1.3.1"
+checkito = "1.3.5"
+criterion = "0.4.0"
 
 [workspace]
 members = ["that_base_derive"]
+
+[[bench]]
+name = "create"
+harness = false
