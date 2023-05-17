@@ -72,10 +72,10 @@ pub fn filter(input: TokenStream) -> TokenStream {
     } = parse_macro_input!(input as DeriveInput);
     let (impl_generics, type_generics, where_clauses) = generics.split_for_impl();
     let filter_path = path(ident.span(), ["that_bass", "filter", "Filter"]);
-    let any_filter_path = path(ident.span(), ["that_bass", "filter", "Any"]);
-    let any_path = path(ident.span(), ["that_bass", "filter", "any"]);
-    let same_filter_path = path(ident.span(), ["that_bass", "filter", "Same"]);
-    let same_path = path(ident.span(), ["that_bass", "filter", "same"]);
+    // let any_filter_path = path(ident.span(), ["that_bass", "filter", "Any"]);
+    // let any_path = path(ident.span(), ["that_bass", "filter", "any"]);
+    // let same_filter_path = path(ident.span(), ["that_bass", "filter", "Same"]);
+    // let same_path = path(ident.span(), ["that_bass", "filter", "same"]);
     let dynamic_path = path(ident.span(), ["that_bass", "filter", "Dynamic"]);
     let database_path = path(ident.span(), ["that_bass", "Database"]);
     let table_path = path(ident.span(), ["that_bass", "table", "Table"]);
