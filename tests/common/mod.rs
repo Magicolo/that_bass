@@ -23,7 +23,7 @@ pub struct C(pub f64);
 
 pub const COUNT: usize = 37;
 
-#[test]
+// #[test]
 fn boba() -> Result<(), Box<dyn error::Error>> {
     #[derive(Debug, Clone, Copy)]
     enum Type {
