@@ -134,7 +134,7 @@ impl<T: Template> Create<'_, T> {
 
         // The upgradable lock serves 2 purposes:
         // 1- It can be upgraded to grow the columns if required.
-        // 2- It prevents this operation from overlaping with the end of `destroy/remove` operations, which is important since `create`
+        // 2- It prevents this operation from overlapping with the end of `destroy/remove` operations, which is important since `create`
         // writes to keys and columns without locking.
         let keys = self.table.keys.upgradable_read();
         let (start, keys) = self.table.reserve(keys, count);

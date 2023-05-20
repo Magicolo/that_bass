@@ -32,7 +32,7 @@ impl DeclareContext<'_> {
     }
 
     pub fn apply<D: Datum>(&mut self) -> Result<(), Error> {
-        self.apply_with(D::meta())
+        self.apply_with(Meta::get::<D>())
     }
 
     pub fn apply_with(&mut self, meta: &'static Meta) -> Result<(), Error> {

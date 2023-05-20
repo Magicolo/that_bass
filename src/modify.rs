@@ -5,7 +5,7 @@ use crate::{
     event::Events,
     filter::Filter,
     key::{Key, Keys},
-    table::{Column, Table, Tables},
+    table::{self, Column, Table, Tables},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
     Database, Error,
 };
@@ -377,7 +377,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
     fn resolve_set(
         keys: &Keys,
         table: &Table,
-        table_keys: RwLockReadGuard<Vec<Key>>,
+        table_keys: RwLockReadGuard<table::Keys>,
         state: &A::State,
         rows: &mut Vec<(Key, u32)>,
         templates: &mut Vec<A>,
@@ -578,8 +578,8 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
     }
 
     fn resolve_tables(
-        mut source: RwLockWriteGuard<Vec<Key>>,
-        target: RwLockUpgradableReadGuard<Vec<Key>>,
+        mut source: RwLockWriteGuard<table::Keys>,
+        target: RwLockUpgradableReadGuard<table::Keys>,
         state: &StateAll<A>,
         keys: &Keys,
         events: &Events,
@@ -626,7 +626,7 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
     }
 
     fn resolve_table(
-        keys: RwLockReadGuard<Vec<Key>>,
+        keys: RwLockReadGuard<table::Keys>,
         state: &StateAll<A>,
         with: &mut impl FnMut() -> A,
     ) -> usize {
@@ -674,7 +674,7 @@ impl<A: Template, R: Template> ShareTable<A, R> {
             let mut apply = Vec::new();
             for meta in adds.iter() {
                 let (index, column) = target.column_with(meta.identifier())?;
-                if column.meta().layout().size() > 0 {
+                if column.meta().size() > 0 {
                     apply.push(index);
                 }
             }
@@ -708,8 +708,8 @@ fn move_to<'d, 'a, V, A: Template>(
     templates: &mut Vec<A>,
     moves: &mut Vec<(usize, usize, NonZeroUsize)>,
     copies: &mut Vec<(usize, usize, NonZeroUsize)>,
-    (source_table, source_keys): (&Table, RwLockUpgradableReadGuard<'a, Vec<Key>>),
-    (target_table, target_keys): (&Table, RwLockUpgradableReadGuard<'a, Vec<Key>>),
+    (source_table, source_keys): (&Table, RwLockUpgradableReadGuard<'a, table::Keys>),
+    (target_table, target_keys): (&Table, RwLockUpgradableReadGuard<'a, table::Keys>),
     (low, high, count): (u32, u32, NonZeroUsize),
     rows: &mut Vec<(Key, u32)>,
     inner: &Inner<A>,
@@ -813,8 +813,8 @@ fn resolve_copy_move(
 
     let mut index = 0;
     for source_column in source_table.columns() {
-        let copy = source_column.meta().layout().size() > 0;
-        let mut drop = source_column.meta().drop.0();
+        let copy = source_column.meta().size() > 0;
+        let mut drop = source_column.meta().drop.0;
         while let Some(target_column) = target_table.columns().get(index) {
             if source_column.meta().identifier() == target_column.meta().identifier() {
                 index += 1;
@@ -855,7 +855,7 @@ fn lock<T>(indices: &[usize], table: &Table, with: impl FnOnce(&Table) -> T) -> 
     match indices.split_first() {
         Some((&index, rest)) => {
             let column = unsafe { get_unchecked(table.columns(), index) };
-            debug_assert!(column.meta().layout().size() > 0);
+            debug_assert!(column.meta().size() > 0);
             let _guard = column.data().write();
             lock(rest, table, with)
         }

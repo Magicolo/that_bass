@@ -3,7 +3,7 @@ use crate::{
     event::Events,
     filter::Filter,
     key::{Key, Keys},
-    table::{Table, Tables},
+    table::{self, Table, Tables},
     Database,
 };
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
@@ -236,7 +236,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         set: &HashSet<Key>,
         moves: &mut Vec<(usize, usize, NonZeroUsize)>,
         drops: &mut Vec<(usize, NonZeroUsize)>,
-        table_keys: RwLockUpgradableReadGuard<Vec<Key>>,
+        table_keys: RwLockUpgradableReadGuard<table::Keys>,
         (low, high, count): (u32, u32, NonZeroUsize),
         keys: &Keys,
         events: &Events,
@@ -301,7 +301,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             keys.update_all(&table_keys, target..target + count.get());
         }
         for column in table.columns() {
-            if column.meta().layout().size() > 0 {
+            if column.meta().size() > 0 {
                 for &(source, target, count) in moves.iter() {
                     // Since a write lock is held on `keys`, no need to take a column lock.
                     unsafe { column.squash(source, target, count) };
@@ -321,7 +321,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         // `query.has` does not do the additionnal validation.
         keys.release_all(&table_keys[head..head + count.get()]);
         for column in table.columns() {
-            if column.meta().drop.0() {
+            if column.meta().drop.0 {
                 for &(index, count) in drops.iter() {
                     // Since the `table.count` has been decremented under the `keys` write lock was held, these indices are only observable
                     // by this thread (assuming the indices are `> head`).
@@ -454,7 +454,7 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
     }
 
     fn resolve_table(
-        table_keys: RwLockUpgradableReadGuard<Vec<Key>>,
+        table_keys: RwLockUpgradableReadGuard<table::Keys>,
         table: &Table,
         keys: &mut Keys,
         events: &Events,
@@ -464,7 +464,7 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
             return 0;
         };
         for column in table.columns() {
-            if column.meta().drop.0() {
+            if column.meta().drop.0 {
                 let write = column.data().write();
                 unsafe { column.drop(0, count) };
                 // No need to accumulate locks since new queries will observe the `table.count` to be 0 and old ones that are still

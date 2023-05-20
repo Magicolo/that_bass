@@ -1,6 +1,8 @@
 #![feature(alloc_layout_extra)]
 #![feature(type_alias_impl_trait)]
 #![feature(impl_trait_in_assoc_type)]
+#![feature(const_type_id)]
+#![feature(const_type_name)]
 
 pub mod core;
 pub mod create;
@@ -18,10 +20,10 @@ pub mod template;
 use key::Key;
 use resources::Resources;
 use std::{
-    alloc::Layout,
+    alloc::{Layout, LayoutError},
     any::{type_name, TypeId},
     error, fmt,
-    mem::{needs_drop, size_of, ManuallyDrop},
+    mem::{needs_drop, size_of},
     num::NonZeroUsize,
     ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
 };
@@ -29,6 +31,7 @@ pub use that_base_derive::{Datum, Filter, Template};
 
 /*
     TODO: Dynamic disk/network save/load of data.
+        - In `enum Data { Unloaded, Loaded(NonNull<()>) }` such that `Column::data` is of type `RwLock<Data>`.
         - Tables will be able to save/load their data to some target. Whenever the data is requested, the table will load it.
         - Add `memory_pressure_threshold` parameter to `Database`.
             - It will represent the memory usage at which the `Database` should start offloading its data to some external storage.
@@ -47,6 +50,25 @@ pub use that_base_derive::{Datum, Filter, Template};
             - It may be worth factoring out the schema from the tables since many tables may share the same schema.
         - Memory policy must be applied on table creation, table growth and on table load.
             - Ex: tables that are less accessed can be dumped to storage
+
+    TODO: Tables vs Chunks architecture.
+        - Tables:
+            - Have a 1 to 1 mapping between schemas and storage.
+            - Have a variable size from 0 to u32::MAX.
+            - Slots need 84-96 bits to represent the location of keys (32 bits: generation, 20-32 bits: table, 32 bits: row).
+            - When creating a row, there is no ambiguity as to which table will hold it. As such, `Create` operations can keep
+            a single reference to the target table.
+            - Very cache friendly.
+        - Chunks
+            - Storage grows in 'chunks' of 256.
+            - Keys can be held in an array RwLock<[Key; 256]>.
+            - Slots need 64 bits to hold the location of keys (32 bits: generation, 24 bits: table, 8 bits: row).
+            - Allows for more parallelism since there are more locks.
+            - May allow for more optimization around locking especially when moving a row. After taking the source lock,
+            if none of the target locks can be taken, a new chunk can be created.
+            - Will likely be wasteful of memory.
+            - Most operations already operate on multiple tables, so they would need little adaptation.
+            - Will complexify the logic of `Create`.
 
     TODO: Add filters to events.
         - database.listen::<OnCreate>().filter::<Has<Mass>>();
@@ -237,73 +259,53 @@ pub struct Database {
 }
 
 pub struct Meta {
-    identifier: fn() -> TypeId,
-    name: fn() -> &'static str,
-    layout: fn() -> Layout,
-    new: unsafe fn(usize) -> NonNull<()>,
-    free: unsafe fn(NonNull<()>, usize, usize),
-    copy: unsafe fn((NonNull<()>, usize), (NonNull<()>, usize), NonZeroUsize),
-    drop: (fn() -> bool, unsafe fn(NonNull<()>, usize, NonZeroUsize)),
+    identifier: TypeId,
+    name: &'static str,
+    size: usize,
+    layout: fn(usize) -> Result<Layout, LayoutError>,
+    copy: unsafe fn((NonNull<u8>, usize), (NonNull<u8>, usize), NonZeroUsize),
+    drop: (bool, unsafe fn(NonNull<u8>, usize, NonZeroUsize)),
 }
 
-pub trait Datum: Sized + 'static {
+pub trait Datum: Sized + 'static {}
+
+impl Meta {
     #[inline]
-    fn meta() -> &'static Meta {
+    pub const fn get<T: Sized + 'static>() -> &'static Meta {
         &Meta {
-            identifier: TypeId::of::<Self>,
-            name: type_name::<Self>,
-            layout: Layout::new::<Self>,
-            new: |capacity| unsafe {
-                let mut items = ManuallyDrop::new(Vec::<Self>::with_capacity(capacity));
-                debug_assert!(items.capacity() == capacity || items.capacity() == usize::MAX);
-                NonNull::new_unchecked(items.as_mut_ptr()).cast::<()>()
-            },
-            free: |data, count, capacity| unsafe {
-                Vec::from_raw_parts(data.as_ptr().cast::<Self>(), count, capacity);
-            },
+            identifier: TypeId::of::<T>(),
+            name: type_name::<T>(),
+            size: size_of::<T>(),
+            layout: Layout::array::<T>,
             copy: |source, target, count| unsafe {
-                if size_of::<Self>() > 0 {
-                    let source = source.0.as_ptr().cast::<Self>().add(source.1);
-                    let target = target.0.as_ptr().cast::<Self>().add(target.1);
+                if size_of::<T>() > 0 {
+                    let source = source.0.as_ptr().cast::<T>().add(source.1);
+                    let target = target.0.as_ptr().cast::<T>().add(target.1);
                     copy(source, target, count.get());
                 }
             },
-            drop: (needs_drop::<Self>, |data, index, count| unsafe {
-                if needs_drop::<Self>() {
-                    let data = data.as_ptr().cast::<Self>().add(index);
+            drop: (needs_drop::<T>(), |data, index, count| unsafe {
+                if needs_drop::<T>() {
+                    let data = data.as_ptr().cast::<T>().add(index);
                     drop_in_place(slice_from_raw_parts_mut(data, count.get()));
                 }
             }),
         }
     }
-}
 
-impl Meta {
     #[inline]
-    pub fn identifier(&self) -> TypeId {
-        (self.identifier)()
+    pub const fn identifier(&self) -> TypeId {
+        self.identifier
     }
 
     #[inline]
-    pub fn name(&self) -> &'static str {
-        (self.name)()
+    pub const fn name(&self) -> &'static str {
+        self.name
     }
 
     #[inline]
-    pub fn layout(&self) -> Layout {
-        (self.layout)()
-    }
-}
-
-pub mod boba {
-    use crate as that_bass;
-    // #[derive(super::Filter)]
-    // pub struct Boba;
-    #[derive(super::Filter)]
-    pub enum Fett {
-        A,
-        B,
-        C,
+    pub const fn size(&self) -> usize {
+        self.size
     }
 }
 

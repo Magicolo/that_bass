@@ -9,10 +9,12 @@ use crate::{
 };
 use parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
+    alloc::{alloc, dealloc, Layout, LayoutError},
     any::TypeId,
     num::NonZeroUsize,
-    ptr::NonNull,
-    slice::from_raw_parts_mut,
+    ops::{Deref, DerefMut},
+    ptr::{copy_nonoverlapping, NonNull},
+    slice::{from_raw_parts, from_raw_parts_mut},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -22,18 +24,23 @@ use std::{
 pub struct Table {
     index: u32,
     pub(crate) count: AtomicUsize,
-    pub(crate) keys: RwLock<Vec<Key>>,
+    pub(crate) keys: RwLock<Keys>,
     /// Columns are ordered consistently between tables.
     pub(crate) columns: Box<[Column]>,
 }
 
 pub struct Column {
     meta: &'static Meta,
-    data: RwLock<NonNull<()>>,
+    data: RwLock<NonNull<u8>>,
 }
 
 pub(crate) struct State {
     tables: Slice<Arc<Table>>,
+}
+
+pub(crate) struct Keys {
+    data: NonNull<Key>,
+    capacity: usize,
 }
 
 #[derive(Clone)]
@@ -47,9 +54,9 @@ impl Database {
 }
 
 impl Column {
-    pub(crate) fn new(meta: &'static Meta, capacity: usize) -> Self {
+    pub(crate) fn new(meta: &'static Meta) -> Self {
         Self {
-            data: RwLock::new(unsafe { (meta.new)(capacity) }),
+            data: RwLock::new(NonNull::dangling()),
             meta,
         }
     }
@@ -60,7 +67,7 @@ impl Column {
     }
 
     #[inline]
-    pub(crate) const fn data(&self) -> &RwLock<NonNull<()>> {
+    pub(crate) const fn data(&self) -> &RwLock<NonNull<u8>> {
         &self.data
     }
 
@@ -77,45 +84,6 @@ impl Column {
             (*target.0.data.data_ptr(), target.1),
             count,
         );
-    }
-
-    pub(crate) unsafe fn grow(&self, old_capacity: usize, new_capacity: NonZeroUsize) {
-        debug_assert!(old_capacity < new_capacity.get());
-        let &Meta {
-            new, free, copy, ..
-        } = self.meta();
-        let data = &mut *self.data.data_ptr();
-        let old_data = *data;
-        let new_data = new(new_capacity.get());
-        if let Some(old_capacity) = NonZeroUsize::new(old_capacity) {
-            copy((old_data, 0), (new_data, 0), old_capacity);
-        }
-        // A count of 0 is sent to `free` because the values of `old_data` have been moved to `new_data`, so they must not be dropped.
-        free(old_data, 0, old_capacity);
-        *data = new_data;
-    }
-
-    pub(crate) unsafe fn shrink(&mut self, old_capacity: NonZeroUsize, new_capacity: usize) {
-        debug_assert!(old_capacity.get() > new_capacity);
-        let &Meta {
-            new,
-            free,
-            copy,
-            drop,
-            ..
-        } = self.meta();
-        let data = self.data.get_mut();
-        let old_data = *data;
-        let new_data = new(new_capacity);
-        if let Some(new_capacity) = NonZeroUsize::new(new_capacity) {
-            copy((old_data, 0), (new_data, 0), new_capacity);
-        }
-        if let Some(over) = NonZeroUsize::new(old_capacity.get() - new_capacity) {
-            drop.1(old_data, new_capacity, over);
-        }
-        // A count of 0 is sent to `free` because the values of `old_data` have been moved to `new_data`, so they must not be dropped.
-        free(old_data, 0, old_capacity.get());
-        *data = new_data;
     }
 
     /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the column.
@@ -152,13 +120,6 @@ impl Column {
         let &Meta { drop, .. } = self.meta();
         let data = unsafe { *self.data.data_ptr() };
         drop.1(data, index, count);
-    }
-
-    #[inline]
-    pub(crate) unsafe fn free(&mut self, count: usize, capacity: usize) {
-        let &Meta { free, .. } = self.meta();
-        let data = *self.data.get_mut();
-        free(data, count, capacity);
     }
 
     #[inline]
@@ -243,11 +204,11 @@ impl Tables<'_> {
             }
             index = tables.len();
 
-            let columns = metas.iter().map(|&meta| Column::new(meta, 0)).collect();
+            let columns = metas.iter().map(|&meta| Column::new(meta)).collect();
             let table = Arc::new(Table {
                 index: index as _,
                 count: 0.into(),
-                keys: RwLock::new(Vec::new()),
+                keys: RwLock::new(Keys::default()),
                 columns,
             });
             if let Some(_) = self.0.push_if_same(table.clone()) {
@@ -315,50 +276,71 @@ impl Table {
         Ok((index, &self.columns[index]))
     }
 
-    pub fn shrink(&mut self) {
-        let keys = self.keys.get_mut();
-        let Some(old_capacity) = NonZeroUsize::new(keys.len()) else {
-            return;
-        };
-        let new_capacity = *self.count.get_mut() as usize;
-        if new_capacity == old_capacity.get() {
-            return;
-        }
-
-        debug_assert!(new_capacity <= old_capacity.get());
-        keys.truncate(new_capacity as _);
-        keys.shrink_to_fit();
-
-        let new_capacity = keys.len();
-        for column in self.columns.iter_mut() {
-            unsafe { column.shrink(old_capacity, new_capacity) };
-        }
-    }
-
     pub(crate) fn reserve<'a>(
         &self,
-        keys: RwLockUpgradableReadGuard<'a, Vec<Key>>,
+        keys: RwLockUpgradableReadGuard<'a, Keys>,
         count: NonZeroUsize,
-    ) -> (usize, RwLockUpgradableReadGuard<'a, Vec<Key>>) {
+    ) -> (usize, RwLockUpgradableReadGuard<'a, Keys>) {
+        fn next(
+            columns: &[Column],
+            capacities: (usize, usize),
+            layouts: (Layout, Layout),
+        ) -> Result<(*mut u8, Layout), LayoutError> {
+            match columns.split_first() {
+                Some((column, columns)) if column.meta().size() == 0 => {
+                    next(columns, capacities, layouts)
+                }
+                Some((column, columns)) => {
+                    let Meta { layout, .. } = column.meta();
+                    let old: (Layout, usize) = layouts.0.extend(layout(capacities.0)?)?;
+                    let new: (Layout, usize) = layouts.1.extend(layout(capacities.1)?)?;
+                    let (target, layout) = next(columns, capacities, (old.0, new.0))?;
+                    let guard = column.data().write();
+                    unsafe {
+                        copy_nonoverlapping(
+                            guard.as_ptr(),
+                            target.add(new.1),
+                            old.0.size() - old.1,
+                        );
+                        *guard = NonNull::new_unchecked(target.add(new.1));
+                    }
+                    drop(guard);
+                    Ok((target, layout))
+                }
+                None => Ok((alloc(layouts.1), layouts.0)),
+            }
+        }
+
         let start = self.count.load(Ordering::Acquire);
         assert!(
             start < u32::MAX as usize - count.get(),
             "There can not be more than `u32::MAX` keys at a given time."
         );
 
-        let old_capacity = keys.len();
-        let new_capacity = count.saturating_add(start as _);
-        if new_capacity.get() <= old_capacity {
+        let end = count.saturating_add(start as _);
+        let old_capacity = keys.capacity;
+        let new_capacity = end.get().next_power_of_two();
+        if new_capacity <= old_capacity {
             return (start, keys);
         }
 
+        let mut old_layout = Layout::array::<Key>(old_capacity).unwrap();
+        let mut new_layout = Layout::array::<Key>(new_capacity).unwrap();
+        let (target, layout) = next(
+            &self.columns,
+            (old_capacity, new_capacity),
+            (old_layout, new_layout),
+        )
+        .unwrap();
+        let source = keys.data.cast().as_ptr();
+        // Copy can happen outside of write lock since `Key` is immutable.
+        unsafe { copy_nonoverlapping(source, target, old_layout.size()) };
         let mut keys = RwLockUpgradableReadGuard::upgrade(keys);
-        keys.resize(new_capacity.get(), Key::NULL);
+        keys.data = unsafe { NonNull::new_unchecked(target).cast() };
+        keys.capacity = new_capacity;
         let keys = RwLockWriteGuard::downgrade_to_upgradable(keys);
-        for column in self.columns.iter() {
-            let guard = column.data().write();
-            unsafe { column.grow(old_capacity, new_capacity) };
-            drop(guard);
+        if old_capacity > 0 {
+            unsafe { dealloc(source, layout) };
         }
         (start, keys)
     }
@@ -381,11 +363,42 @@ unsafe impl Sync for Table {}
 
 impl Drop for Table {
     fn drop(&mut self) {
-        let count = *self.count.get_mut() as usize;
-        let capacity = self.keys.get_mut().len();
+        let count = *self.count.get_mut();
+        let Keys { data, capacity } = *self.keys.get_mut();
         debug_assert!(count <= capacity);
+        let mut total = Layout::array::<Key>(capacity).unwrap();
         for column in self.columns.iter_mut() {
-            unsafe { column.free(count, capacity) };
+            let Meta { drop, layout, .. } = column.meta();
+            if let Some(count) = NonZeroUsize::new(count) {
+                if drop.0 {
+                    drop.1(*column.data.get_mut(), 0, count);
+                }
+            }
+            (total, _) = total.extend(layout(capacity).unwrap()).unwrap();
+        }
+        unsafe { dealloc(data.cast().as_ptr(), total) };
+    }
+}
+
+impl Deref for Keys {
+    type Target = [Key];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { from_raw_parts(self.data.as_ptr(), self.capacity) }
+    }
+}
+
+impl DerefMut for Keys {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { from_raw_parts_mut(self.data.as_ptr(), self.capacity) }
+    }
+}
+
+impl Default for Keys {
+    fn default() -> Self {
+        Self {
+            data: NonNull::dangling(),
+            capacity: 0,
         }
     }
 }
