@@ -76,14 +76,15 @@ impl Column {
         source: (&Self, usize),
         target: (&Self, usize),
         count: NonZeroUsize,
-    ) {
+    ) -> bool {
         debug_assert_eq!(source.0.meta().identifier(), target.0.meta().identifier());
-        let &Meta { copy, .. } = source.0.meta();
+        let &Meta { copy: Some(copy), .. } = source.0.meta() else { return false; };
         copy(
             (*source.0.data.data_ptr(), source.1),
             (*target.0.data.data_ptr(), target.1),
             count,
         );
+        true
     }
 
     /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the column.
@@ -97,8 +98,12 @@ impl Column {
     ) {
         let &Meta { copy, drop, .. } = self.meta();
         let data = unsafe { *self.data.data_ptr() };
-        drop.1(data, target_index, count);
-        copy((data, source_index), (data, target_index), count);
+        if let Some(drop) = drop {
+            drop(data, target_index, count);
+        }
+        if let Some(copy) = copy {
+            copy((data, source_index), (data, target_index), count);
+        }
     }
 
     /// SAFETY: Both the 'source' and 'target' indices must be within the bounds of the column.
@@ -109,17 +114,19 @@ impl Column {
         source_index: usize,
         target_index: usize,
         count: NonZeroUsize,
-    ) {
-        let &Meta { copy, .. } = self.meta();
+    ) -> bool {
+        let &Meta { copy: Some(copy), .. } = self.meta() else { return false; };
         let data = *self.data.data_ptr();
         copy((data, source_index), (data, target_index), count);
+        true
     }
 
     #[inline]
-    pub(crate) unsafe fn drop(&self, index: usize, count: NonZeroUsize) {
-        let &Meta { drop, .. } = self.meta();
+    pub(crate) unsafe fn drop(&self, index: usize, count: NonZeroUsize) -> bool {
+        let &Meta { drop: Some(drop), .. } = self.meta() else { return false; };
         let data = unsafe { *self.data.data_ptr() };
-        drop.1(data, index, count);
+        drop(data, index, count);
+        true
     }
 
     #[inline]
@@ -295,7 +302,7 @@ impl Table {
                     let old: (Layout, usize) = layouts.0.extend(layout(capacities.0)?)?;
                     let new: (Layout, usize) = layouts.1.extend(layout(capacities.1)?)?;
                     let (target, layout) = next(columns, capacities, (old.0, new.0))?;
-                    let guard = column.data().write();
+                    let mut guard = column.data().write();
                     unsafe {
                         copy_nonoverlapping(
                             guard.as_ptr(),
@@ -307,7 +314,7 @@ impl Table {
                     drop(guard);
                     Ok((target, layout))
                 }
-                None => Ok((alloc(layouts.1), layouts.0)),
+                None => Ok((unsafe { alloc(layouts.1) }, layouts.0)),
             }
         }
 
@@ -324,8 +331,8 @@ impl Table {
             return (start, keys);
         }
 
-        let mut old_layout = Layout::array::<Key>(old_capacity).unwrap();
-        let mut new_layout = Layout::array::<Key>(new_capacity).unwrap();
+        let old_layout = Layout::array::<Key>(old_capacity).unwrap();
+        let new_layout = Layout::array::<Key>(new_capacity).unwrap();
         let (target, layout) = next(
             &self.columns,
             (old_capacity, new_capacity),
@@ -368,11 +375,9 @@ impl Drop for Table {
         debug_assert!(count <= capacity);
         let mut total = Layout::array::<Key>(capacity).unwrap();
         for column in self.columns.iter_mut() {
-            let Meta { drop, layout, .. } = column.meta();
+            let Meta { layout, .. } = column.meta();
             if let Some(count) = NonZeroUsize::new(count) {
-                if drop.0 {
-                    drop.1(*column.data.get_mut(), 0, count);
-                }
+                unsafe { column.drop(0, count) };
             }
             (total, _) = total.extend(layout(capacity).unwrap()).unwrap();
         }

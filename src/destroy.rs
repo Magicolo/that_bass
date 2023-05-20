@@ -321,7 +321,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         // `query.has` does not do the additionnal validation.
         keys.release_all(&table_keys[head..head + count.get()]);
         for column in table.columns() {
-            if column.meta().drop.0 {
+            if column.meta().drop.is_some() {
                 for &(index, count) in drops.iter() {
                     // Since the `table.count` has been decremented under the `keys` write lock was held, these indices are only observable
                     // by this thread (assuming the indices are `> head`).
@@ -464,7 +464,7 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
             return 0;
         };
         for column in table.columns() {
-            if column.meta().drop.0 {
+            if column.meta().drop.is_some() {
                 let write = column.data().write();
                 unsafe { column.drop(0, count) };
                 // No need to accumulate locks since new queries will observe the `table.count` to be 0 and old ones that are still

@@ -814,7 +814,7 @@ fn resolve_copy_move(
     let mut index = 0;
     for source_column in source_table.columns() {
         let copy = source_column.meta().size() > 0;
-        let mut drop = source_column.meta().drop.0;
+        let mut drop = source_column.meta().drop.is_some();
         while let Some(target_column) = target_table.columns().get(index) {
             if source_column.meta().identifier() == target_column.meta().identifier() {
                 index += 1;
@@ -839,7 +839,7 @@ fn resolve_copy_move(
         }
         if drop {
             for &(index, _, count) in copies {
-                unsafe { source_column.drop(index, count) }
+                unsafe { source_column.drop(index, count) };
             }
         }
         if copy {

@@ -18,10 +18,12 @@ pub mod table;
 pub mod template;
 
 use key::Key;
+use parking_lot::Mutex;
 use resources::Resources;
 use std::{
     alloc::{Layout, LayoutError},
     any::{type_name, TypeId},
+    collections::BTreeMap,
     error, fmt,
     mem::{needs_drop, size_of},
     num::NonZeroUsize,
@@ -263,34 +265,44 @@ pub struct Meta {
     name: &'static str,
     size: usize,
     layout: fn(usize) -> Result<Layout, LayoutError>,
-    copy: unsafe fn((NonNull<u8>, usize), (NonNull<u8>, usize), NonZeroUsize),
-    drop: (bool, unsafe fn(NonNull<u8>, usize, NonZeroUsize)),
+    copy: Option<unsafe fn((NonNull<u8>, usize), (NonNull<u8>, usize), NonZeroUsize)>,
+    drop: Option<unsafe fn(NonNull<u8>, usize, NonZeroUsize)>,
 }
 
 pub trait Datum: Sized + 'static {}
 
 impl Meta {
     #[inline]
-    pub const fn get<T: Sized + 'static>() -> &'static Meta {
-        &Meta {
-            identifier: TypeId::of::<T>(),
-            name: type_name::<T>(),
-            size: size_of::<T>(),
-            layout: Layout::array::<T>,
-            copy: |source, target, count| unsafe {
-                if size_of::<T>() > 0 {
-                    let source = source.0.as_ptr().cast::<T>().add(source.1);
-                    let target = target.0.as_ptr().cast::<T>().add(target.1);
-                    copy(source, target, count.get());
-                }
-            },
-            drop: (needs_drop::<T>(), |data, index, count| unsafe {
-                if needs_drop::<T>() {
-                    let data = data.as_ptr().cast::<T>().add(index);
-                    drop_in_place(slice_from_raw_parts_mut(data, count.get()));
-                }
-            }),
-        }
+    pub fn get<T: Sized + 'static>() -> &'static Meta {
+        static METAS: Mutex<BTreeMap<TypeId, &'static Meta>> = Mutex::new(BTreeMap::new());
+        *METAS
+            .lock()
+            .entry(TypeId::of::<T>())
+            .or_insert_with_key(|&key| {
+                Box::leak(Box::new(Meta {
+                    identifier: key,
+                    name: type_name::<T>(),
+                    size: size_of::<T>(),
+                    layout: Layout::array::<T>,
+                    copy: if size_of::<T>() > 0 {
+                        Some(|source, target, count| unsafe {
+                            let source = source.0.as_ptr().cast::<T>().add(source.1);
+                            let target = target.0.as_ptr().cast::<T>().add(target.1);
+                            copy(source, target, count.get());
+                        })
+                    } else {
+                        None
+                    },
+                    drop: if needs_drop::<T>() {
+                        Some(|data, index, count| unsafe {
+                            let data = data.as_ptr().cast::<T>().add(index);
+                            drop_in_place(slice_from_raw_parts_mut(data, count.get()));
+                        })
+                    } else {
+                        None
+                    },
+                }))
+            })
     }
 
     #[inline]
