@@ -1,8 +1,4 @@
-#![feature(alloc_layout_extra)]
-#![feature(type_alias_impl_trait)]
 #![feature(impl_trait_in_assoc_type)]
-#![feature(const_type_id)]
-#![feature(const_type_name)]
 
 pub mod core;
 pub mod create;
