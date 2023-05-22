@@ -255,7 +255,7 @@ impl Table {
     }
 
     #[inline]
-    pub fn columns(&self) -> &[Column] {
+    pub const fn columns(&self) -> &[Column] {
         &self.columns
     }
 
@@ -373,13 +373,16 @@ impl Drop for Table {
         let count = *self.count.get_mut();
         let Keys { data, capacity } = *self.keys.get_mut();
         debug_assert!(count <= capacity);
-        let mut total = Layout::array::<Key>(capacity).unwrap();
+        let Some(capacity) = NonZeroUsize::new(capacity) else { return; };
+        debug_assert_ne!(data, NonNull::dangling());
+
+        let mut total = Layout::array::<Key>(capacity.get()).unwrap();
         for column in self.columns.iter_mut() {
             let Meta { layout, .. } = column.meta();
             if let Some(count) = NonZeroUsize::new(count) {
                 unsafe { column.drop(0, count) };
             }
-            (total, _) = total.extend(layout(capacity).unwrap()).unwrap();
+            (total, _) = total.extend(layout(capacity.get()).unwrap()).unwrap();
         }
         unsafe { dealloc(data.cast().as_ptr(), total) };
     }
@@ -406,4 +409,37 @@ impl Default for Keys {
             capacity: 0,
         }
     }
+}
+
+#[test]
+fn table_reserve_grows_when_empty() {
+    let table = Table {
+        index: 0,
+        count: 0.into(),
+        keys: Keys::default().into(),
+        columns: [].into(),
+    };
+    let keys = table.keys.upgradable_read();
+    assert_eq!(keys.data, NonNull::dangling());
+    assert_eq!(keys.len(), 0);
+    let (index, keys) = table.reserve(keys, NonZeroUsize::MIN);
+    assert_eq!(index, 0);
+    assert_eq!(keys.len(), 1);
+    assert_ne!(keys.data, NonNull::dangling());
+    assert_eq!(table.count(), 0);
+}
+
+#[test]
+fn table_reserve_grows_in_powers_of_2() {
+    let table = Table {
+        index: 0,
+        count: 0.into(),
+        keys: Keys::default().into(),
+        columns: [].into(),
+    };
+    let keys = table.keys.upgradable_read();
+    let (_, keys) = table.reserve(keys, NonZeroUsize::MIN.saturating_add(2));
+    assert_eq!(keys.len(), 4);
+    let (_, keys) = table.reserve(keys, NonZeroUsize::MIN.saturating_add(4));
+    assert_eq!(keys.len(), 8);
 }

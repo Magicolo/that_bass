@@ -154,14 +154,12 @@ impl<T: Template> Create<'_, T> {
             keys[start..start + count.get()].copy_from_slice(&self.reserved);
         }
 
-        /*
-            Initialize table keys.
-            - Calling `initialize` first means that another thread may try to use a `Query::find` and access a `row >= count`. Although
-            this is an uncomfortable state of affairs (because it is easy to forget), queries can detect this state and report an
-            appropriate error.
-            - Calling `fetch_add` first means that another thread may query the created rows and observe that their key in invalid through
-            `Database::keys().get()`. This is not acceptable and there doesn't seem to be a good fix.
-        */
+        // Initialize table keys.
+        // - Calling `initialize` first means that another thread may try to use a `Query::find` and access a `row >= count`. Although
+        // this is an uncomfortable state of affairs (because it is easy to forget), queries can detect this state and report an
+        // appropriate error.
+        // - Calling `fetch_add` first means that another thread may query the created rows and observe that their key in invalid through
+        // `Database::keys().get()`. This is not acceptable and there doesn't seem to be a good fix.
         self.keys
             .initialize_all(&keys, self.table.index(), start..start + count.get());
         self.table
