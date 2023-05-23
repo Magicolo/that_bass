@@ -57,6 +57,7 @@ fn removed_column_is_no_longer_queried() -> Result<(), Box<dyn error::Error + Se
     let mut remove = database.remove::<B>()?;
     let mut query = database.query::<()>()?.filter::<Has<B>>();
     let key = create.one((A, B(0)));
+    assert!(query.find(key, |_| ()).is_err());
     create.resolve();
     assert!(query.find(key, |_| ()).is_ok());
     remove.one(key);

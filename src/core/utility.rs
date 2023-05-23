@@ -158,7 +158,8 @@ pub fn sorted_contains<T: Ord + 'static>(
 ) -> bool {
     let mut left = left.into_iter();
     for right in right {
-        while let Some(left) = left.next() {
+        loop {
+            let Some(left) = left.next() else { return false; };
             match left.cmp(&right) {
                 Ordering::Equal => break,
                 Ordering::Less => continue,
@@ -234,4 +235,10 @@ pub fn sorted_symmetric_difference_by<T>(
             None => break Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()),
         }
     })
+}
+
+#[test]
+fn sorted_contains_all() {
+    assert!(sorted_contains([0, 1, 2, 3, 4], [1, 3]));
+    assert!(!sorted_contains([0], [1]));
 }
