@@ -2,7 +2,7 @@ pub mod common;
 use common::*;
 
 #[derive(Debug, Clone, Copy)]
-enum Type {
+pub enum Type {
     Unit,
     A,
     B,
@@ -14,7 +14,7 @@ enum Type {
 }
 
 #[derive(Debug, Clone)]
-enum Action {
+pub enum Action {
     Create(usize, Type, bool),
     Add(usize, Type, bool),
     Remove(usize, Type, bool),
@@ -79,6 +79,11 @@ fn does_not_resolve_when_no_apply_and_no_move() -> Result<(), Box<dyn error::Err
     let resolved = add.resolve();
     assert_eq!(resolved, 0);
     Ok(())
+}
+
+#[test]
+fn run_empty() -> Result<(), Box<dyn error::Error + Send + Sync>> {
+    run([])
 }
 
 fn run(
