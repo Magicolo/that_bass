@@ -47,7 +47,7 @@ fn check() -> Result<(), Box<dyn error::Error>> {
         .any()
         .map(Unify::unify)
         .collect_with::<_, Vec<Action>>(..256usize)
-        .check(10, |actions| run(actions.into_iter().cloned()))?;
+        .check(1000, |actions| run(actions.into_iter().cloned()))?;
     Ok(())
 }
 
