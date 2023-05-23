@@ -22,6 +22,7 @@ enum Action {
 }
 
 #[test]
+#[cfg(not(miri))]
 fn check() -> Result<(), Box<dyn error::Error>> {
     let count = ..256usize;
     let r#type = (
