@@ -15,7 +15,7 @@ parking_lot = "0.12.1"
 
 [dev-dependencies]
 checkito = "1.3"
-criterion = "0.4"
+criterion = "0.5"
 skeptic = "0.13"
 
 [build-dependencies]
