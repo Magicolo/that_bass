@@ -39,7 +39,7 @@ pub struct DestroyAll<'d, F = ()> {
 
 struct State {
     table: Arc<Table>,
-    rows: Vec<(Key, u32)>,
+    rows: Vec<(Key, usize)>,
 }
 
 impl Database {
@@ -232,12 +232,12 @@ impl<'d, F: Filter> Destroy<'d, F> {
 
     fn resolve_rows(
         table: &Table,
-        rows: &mut Vec<(Key, u32)>,
+        rows: &mut Vec<(Key, usize)>,
         set: &HashSet<Key>,
         moves: &mut Vec<(usize, usize, NonZeroUsize)>,
         drops: &mut Vec<(usize, NonZeroUsize)>,
         table_keys: RwLockUpgradableReadGuard<table::Keys>,
-        (low, high, count): (u32, u32, NonZeroUsize),
+        (low, high, count): (usize, usize, NonZeroUsize),
         keys: &Keys,
         events: &Events,
     ) {
@@ -373,7 +373,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             if state.rows.len() == 0 {
                 indices.push(index);
             }
-            state.rows.push((key, u32::MAX));
+            state.rows.push((key, usize::MAX));
         }
     }
 
@@ -381,10 +381,10 @@ impl<'d, F: Filter> Destroy<'d, F> {
     fn retain<'a>(
         keys: &Keys,
         table: &'a Table,
-        rows: &mut Vec<(Key, u32)>,
+        rows: &mut Vec<(Key, usize)>,
         pending: &mut Vec<(Key, u32)>,
-    ) -> (u32, u32) {
-        let mut low = u32::MAX;
+    ) -> (usize, usize) {
+        let mut low = usize::MAX;
         let mut high = 0;
         for i in (0..rows.len()).rev() {
             let (key, row) = unsafe { get_unchecked_mut(rows, i) };

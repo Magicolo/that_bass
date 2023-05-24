@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use std::{
     ops::Range,
     sync::{
-        atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering::*},
+        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::*},
         Arc,
     },
 };
@@ -22,7 +22,7 @@ pub struct Key {
 
 pub struct Slot {
     indices: AtomicU64,
-    row: AtomicU32,
+    row: AtomicUsize,
 }
 
 pub(crate) struct State {
@@ -185,7 +185,7 @@ impl<'d> Keys<'d> {
 
     #[inline]
     pub(crate) fn initialize_all(&self, keys: &[Key], table: u32, range: Range<usize>) {
-        let mut row = range.start as u32;
+        let mut row = range.start;
         for (key, slot) in unsafe { self.get_all_unchecked(keys[range].iter().copied()) } {
             slot.initialize(key.generation(), table, row);
             row += 1;
@@ -194,7 +194,7 @@ impl<'d> Keys<'d> {
 
     #[inline]
     pub(crate) fn update_all(&self, keys: &[Key], range: Range<usize>) {
-        let mut row = range.start as u32;
+        let mut row = range.start;
         for (_, slot) in unsafe { self.get_all_unchecked(keys[range].iter().copied()) } {
             slot.update(row);
             row += 1;
@@ -246,7 +246,7 @@ impl Slot {
     }
 
     #[inline]
-    pub fn new(table: u32, row: u32) -> Self {
+    pub fn new(table: u32, row: usize) -> Self {
         Self {
             indices: Self::recompose_indices(0, table).into(),
             row: row.into(),
@@ -254,7 +254,7 @@ impl Slot {
     }
 
     #[inline]
-    pub fn initialize(&self, generation: u32, table: u32, row: u32) {
+    pub fn initialize(&self, generation: u32, table: u32, row: usize) {
         debug_assert!(generation < u32::MAX);
         debug_assert!(table < u32::MAX);
         let indices = Self::recompose_indices(generation, table);
@@ -263,15 +263,15 @@ impl Slot {
     }
 
     #[inline]
-    pub fn update(&self, row: u32) {
-        debug_assert!(row < u32::MAX);
+    pub fn update(&self, row: usize) {
+        debug_assert!(row < usize::MAX);
         self.row.store(row, Release);
     }
 
     #[inline]
     pub fn release(&self) {
         self.indices.store(u64::MAX, Release);
-        self.row.store(u32::MAX, Release);
+        self.row.store(usize::MAX, Release);
     }
 
     #[inline]
@@ -285,13 +285,13 @@ impl Slot {
     }
 
     #[inline]
-    pub fn row(&self) -> u32 {
+    pub fn row(&self) -> usize {
         self.row.load(Acquire)
     }
 }
 
 impl Default for Slot {
     fn default() -> Self {
-        Self::new(u32::MAX, u32::MAX)
+        Self::new(u32::MAX, usize::MAX)
     }
 }

@@ -490,7 +490,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                     drop(keys);
                     break find(Err(Error::InvalidKey(key)));
                 };
-                let row = slot.row() as usize;
+                let row = slot.row();
                 if row < count.get() && keys.get(row) == Some(&key) {
                     break lock(locks, table, |table| {
                         let context = ItemContext::new(table, &keys).with(row);
@@ -564,7 +564,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                     // The key is allowed to move within its table (such as with a swap as part of a remove).
                     match slot.table(key) {
                         Ok(table_index) if table.index() == table_index => {
-                            let row = slot.row() as usize;
+                            let row = slot.row();
                             if row < count.get() && keys.get(row) == Some(&key) {
                                 let item = unsafe { R::item(row_state, context.with(row)) };
                                 state = fold(state, value, Ok(item));
@@ -639,7 +639,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                     // The key is allowed to move within its table (such as with a swap as part of a remove).
                     match slot.table(key) {
                         Ok(table_index) if table.index() == table_index => {
-                            let row = slot.row() as usize;
+                            let row = slot.row();
                             if row < count.get() && keys.get(row) == Some(&key) {
                                 let item = unsafe { R::item(row_state, context.with(row)) };
                                 state = fold(state, value, Ok(item))?;
@@ -868,7 +868,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
             drop(keys);
             return find(Err(Error::InvalidKey(key)))
         };
-        let row = slot.row() as usize;
+        let row = slot.row();
         if row < count.get() && keys.get(row) == Some(&key) {
             lock(locks, table, |table| {
                 let context = ItemContext::new(table, &keys).with(row);

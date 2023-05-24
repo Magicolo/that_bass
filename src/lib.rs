@@ -59,8 +59,8 @@ pub use that_base_derive::{Datum, Filter, Template};
             - Very cache friendly.
         - Chunks
             - Storage grows in 'chunks' of 256.
-            - Keys can be held in an array RwLock<[Key; 256]>.
-            - Slots need 64 bits to hold the location of keys (32 bits: generation, 24 bits: table, 8 bits: row).
+            - Keys can be held in an array RwLock<[Key; 256]>; thus one less indirection.
+            - Slots need 64 bits to hold the location of keys (32 bits: generation, 24 bits: table/chunk, 8 bits: row).
             - Allows for more parallelism since there are more locks.
             - May allow for more optimization around locking especially when moving a row. After taking the source lock,
             if none of the target locks can be taken, a new chunk can be created.

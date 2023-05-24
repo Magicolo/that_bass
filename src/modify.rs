@@ -53,7 +53,7 @@ struct State<T: Template> {
     source: Arc<Table>,
     target: Arc<Table>,
     inner: Arc<Inner<T>>,
-    rows: Vec<(Key, u32)>,
+    rows: Vec<(Key, usize)>,
     templates: Vec<T>,
 }
 
@@ -379,7 +379,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
         table: &Table,
         table_keys: RwLockReadGuard<table::Keys>,
         state: &A::State,
-        rows: &mut Vec<(Key, u32)>,
+        rows: &mut Vec<(Key, usize)>,
         templates: &mut Vec<A>,
         pending: &mut Vec<(Key, A, u32)>,
         apply: &[usize],
@@ -392,7 +392,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
         lock(apply, table, |table| {
             let context = ApplyContext::new(table, &table_keys);
             for ((.., row), template) in rows.drain(..).zip(templates.drain(..)) {
-                debug_assert!(row < u32::MAX);
+                debug_assert!(row < usize::MAX);
                 unsafe { template.apply(state, context.with(row as _)) };
             }
         });
@@ -435,7 +435,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
             if state.rows.len() == 0 {
                 indices.push(index);
             }
-            state.rows.push((key, u32::MAX));
+            state.rows.push((key, usize::MAX));
             state.templates.push(template);
         }
     }
@@ -444,11 +444,11 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
     fn retain(
         keys: &Keys,
         table: &Table,
-        rows: &mut Vec<(Key, u32)>,
+        rows: &mut Vec<(Key, usize)>,
         templates: &mut Vec<A>,
         pending: &mut Vec<(Key, A, u32)>,
-    ) -> (u32, u32) {
-        let mut low = u32::MAX;
+    ) -> (usize, usize) {
+        let mut low = usize::MAX;
         let mut high = 0;
         for i in (0..rows.len()).rev() {
             let (key, row) = unsafe { get_unchecked_mut(rows, i) };
@@ -710,15 +710,15 @@ fn move_to<'d, 'a, V, A: Template>(
     copies: &mut Vec<(usize, usize, NonZeroUsize)>,
     (source_table, source_keys): (&Table, RwLockUpgradableReadGuard<'a, table::Keys>),
     (target_table, target_keys): (&Table, RwLockUpgradableReadGuard<'a, table::Keys>),
-    (low, high, count): (u32, u32, NonZeroUsize),
-    rows: &mut Vec<(Key, u32)>,
+    (low, high, count): (usize, usize, NonZeroUsize),
+    rows: &mut Vec<(Key, usize)>,
     inner: &Inner<A>,
 ) {
     let (start, target_keys) = target_table.reserve(target_keys, count);
     // Move data from source to target.
     let range = low..high + 1;
     let head = source_table.count.load(Ordering::Acquire) - count.get();
-    let (low, high) = (range.start as usize, range.end as usize);
+    let (low, high) = (range.start, range.end);
 
     if range.len() == count.get() {
         // Fast path. The move range is contiguous. Copy everything from source to target at once.
