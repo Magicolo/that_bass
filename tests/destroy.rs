@@ -44,7 +44,7 @@ fn destroy_all_n_with_create_all_n_resolves_n() -> Result<(), Error> {
     let keys = create_n(&database, [(); COUNT])?;
     let mut destroy = database.destroy();
     assert_eq!(count(&keys), COUNT);
-    destroy.all(keys.clone());
+    destroy.all(keys);
     assert_eq!(count(&keys), COUNT);
     assert_eq!(destroy.resolve(), COUNT);
     assert_eq!(count(&keys), 0);

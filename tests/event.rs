@@ -16,7 +16,7 @@ fn broadcast_on_add() -> Result<(), Error> {
     let mut keys2 = Vec::new();
     let mut keys3 = Vec::new();
 
-    for i in 0..0 {
+    for i in 0..COUNT {
         assert!(on_add1.next().is_none());
         let keys = create.defaults(i).to_vec();
         keys2.extend(keys.iter().copied());

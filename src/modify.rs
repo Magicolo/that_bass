@@ -190,6 +190,11 @@ impl<'d, A: Template, R: Template, F> Modify<'d, A, R, F> {
         self.pairs.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (Key, &A)> {
         self.pairs
             .iter()
@@ -235,7 +240,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
         loop {
             sum += self.resolve_sorted();
             self.indices.clear();
-            if self.pending.len() == 0 {
+            if self.pending.is_empty() {
                 break;
             }
 
@@ -273,7 +278,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
             |sum, (states, pending, moves, copies), index| {
                 let result = unsafe { get_unchecked_mut(states, *index) };
                 let state = unsafe { result.as_mut().unwrap_unchecked() };
-                debug_assert!(state.rows.len() > 0);
+                debug_assert!(!state.rows.is_empty());
                 if state.source.index() == state.target.index() {
                     let keys = state.source.keys.try_read().ok_or(sum)?;
                     let count = Self::resolve_set(
@@ -319,7 +324,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
             |sum, (states, pending, moves, copies), index| {
                 let result = unsafe { get_unchecked_mut(states, *index) };
                 let state = unsafe { result.as_mut().unwrap_unchecked() };
-                debug_assert!(state.rows.len() > 0);
+                debug_assert!(!state.rows.is_empty());
                 if state.source.index() == state.target.index() {
                     let keys = state.source.keys.read();
                     let count = Self::resolve_set(
@@ -432,7 +437,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
             }
         };
         if let Ok(state) = unsafe { get_unchecked_mut(states, index) } {
-            if state.rows.len() == 0 {
+            if state.rows.is_empty() {
                 indices.push(index);
             }
             state.rows.push((key, usize::MAX));
@@ -470,7 +475,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                 }
             }
         }
-        debug_assert_eq!(low <= high, rows.len() > 0);
+        debug_assert_eq!(low > high, rows.is_empty());
         (low, high)
     }
 }
@@ -645,11 +650,9 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
     }
 }
 
+type ShareOk<A> = (Arc<Table>, Arc<Table>, Arc<Inner<A>>);
 impl<A: Template, R: Template> ShareTable<A, R> {
-    pub fn from(
-        table: u32,
-        database: &Database,
-    ) -> Result<(Arc<Table>, Arc<Table>, Arc<Inner<A>>), Error> {
+    pub fn from(table: u32, database: &Database) -> Result<ShareOk<A>, Error> {
         let adds = ShareMeta::<A>::from(database)?;
         let removes = ShareMeta::<R>::from(database)?;
         let share = database.resources().try_global_with(table, || {
@@ -679,7 +682,7 @@ impl<A: Template, R: Template> ShareTable<A, R> {
                 }
             }
 
-            if apply.len() == 0 && source.index() == target.index() {
+            if apply.is_empty() && source.index() == target.index() {
                 return Err(Error::TablesMustDiffer(source.index() as _));
             }
 
@@ -732,7 +735,6 @@ fn move_to<'d, 'a, V, A: Template>(
         // Range is not contiguous; use the slow path.
         let mut cursor = head;
         for (i, &(.., row)) in rows.iter().enumerate() {
-            let row = row as usize;
             copies.push((row, start + i, ONE));
 
             if row < head {
@@ -808,7 +810,7 @@ fn resolve_copy_move(
 ) {
     for &(source, target, count) in moves {
         source_keys.copy_within(source..source + count.get(), target);
-        keys.update_all(&source_keys, target..target + count.get());
+        keys.update_all(source_keys, target..target + count.get());
     }
 
     let mut index = 0;
@@ -816,25 +818,28 @@ fn resolve_copy_move(
         let copy = source_column.meta().size() > 0;
         let mut drop = source_column.meta().drop.is_some();
         while let Some(target_column) = target_table.columns().get(index) {
-            if source_column.meta().identifier() == target_column.meta().identifier() {
-                index += 1;
-                drop = false;
-                if copy {
-                    for &(source, target, count) in copies {
-                        unsafe {
-                            Column::copy_to(
-                                (&source_column, source),
-                                (&target_column, target),
-                                count,
-                            )
-                        };
+            match (
+                source_column.meta().identifier(),
+                target_column.meta().identifier(),
+            ) {
+                (source, target) if source == target => {
+                    index += 1;
+                    drop = false;
+                    if copy {
+                        for &(source, target, count) in copies {
+                            unsafe {
+                                Column::copy_to(
+                                    (source_column, source),
+                                    (target_column, target),
+                                    count,
+                                )
+                            };
+                        }
                     }
+                    break;
                 }
-                break;
-            } else if source_column.meta().identifier() < target_column.meta().identifier() {
-                break;
-            } else {
-                index += 1;
+                (source, target) if source < target => break,
+                _ => index += 1,
             }
         }
         if drop {

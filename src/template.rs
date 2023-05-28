@@ -41,7 +41,10 @@ impl DeclareContext<'_> {
             .binary_search_by_key(&meta.identifier(), |meta| meta.identifier())
         {
             Ok(_) => Err(Error::DuplicateMeta),
-            Err(index) => Ok(self.0.insert(index, meta)),
+            Err(index) => {
+                self.0.insert(index, meta);
+                Ok(())
+            }
         }
     }
 

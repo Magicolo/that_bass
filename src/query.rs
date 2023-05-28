@@ -298,7 +298,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         by.pairs
             .iter()
             .filter(|&&(key, ..)| match self.keys.get(key) {
-                Ok((_, table)) => find_state(&mut self.states, table).is_some(),
+                Ok((_, table)) => find_state(&self.states, table).is_some(),
                 Err(_) => false,
             })
             .count()
@@ -356,7 +356,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                     break state;
                 }
             };
-            if by.pending.len() == 0 {
+            if by.pending.is_empty() {
                 break state;
             }
         }
@@ -394,7 +394,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         loop {
             state = self.fold_by_sorted(by, state, &mut fold);
             by.indices.clear();
-            if by.pending.len() == 0 {
+            if by.pending.is_empty() {
                 break state;
             }
         }
@@ -448,7 +448,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     pub fn has(&mut self, key: Key) -> bool {
         self.update();
         match self.keys.get(key) {
-            Ok((_, table)) => find_state(&mut self.states, table).is_some(),
+            Ok((_, table)) => find_state(&self.states, table).is_some(),
             Err(_) => false,
         }
     }
@@ -539,7 +539,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         for (key, value, table) in by.pending.drain(..) {
-            match Self::sort(
+            if let Some((value, error)) = Self::sort(
                 &self.states,
                 &mut by.sorted,
                 &mut by.indices,
@@ -547,8 +547,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 value,
                 table,
             ) {
-                Some((value, error)) => state = fold(state, value, Err(error)),
-                None => {}
+                state = fold(state, value, Err(error))
             }
         }
 
@@ -614,7 +613,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         }
 
         for (key, value, table) in by.pending.drain(..) {
-            match Self::sort(
+            if let Some((value, error)) = Self::sort(
                 &self.states,
                 &mut by.sorted,
                 &mut by.indices,
@@ -622,8 +621,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 value,
                 table,
             ) {
-                Some((value, error)) => state = fold(state, value, Err(error))?,
-                None => {}
+                state = fold(state, value, Err(error))?
             }
         }
 
@@ -667,7 +665,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
     #[inline]
     fn sort<V>(
         states: &[State<R>],
-        slots: &mut Vec<Vec<(Key, V)>>,
+        slots: &mut [Vec<(Key, V)>],
         indices: &mut Vec<u32>,
         key: Key,
         value: V,
@@ -676,7 +674,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         match find_state(states, table) {
             Some((index, _)) => {
                 let slots = unsafe { get_unchecked_mut(slots, index) };
-                if slots.len() == 0 {
+                if slots.is_empty() {
                     indices.push(index as _);
                 }
                 slots.push((key, value));
@@ -960,6 +958,11 @@ impl<V> By<V> {
     }
 
     #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
     pub fn iter(&self) -> impl FullIterator<Item = (Key, &V)> {
         self.pairs.iter().map(|(key, value)| (*key, value))
     }
@@ -988,7 +991,7 @@ impl<V> Default for By<V> {
 }
 
 #[inline]
-fn find_state<'a, R: Row>(states: &'a [State<R>], table: u32) -> Option<(usize, &'a State<R>)> {
+fn find_state<R: Row>(states: &[State<R>], table: u32) -> Option<(usize, &State<R>)> {
     match states.binary_search_by_key(&table, |state| state.table.index()) {
         Ok(index) => Some((index, unsafe { get_unchecked(states, index) })),
         Err(_) => None,
@@ -1009,12 +1012,12 @@ fn try_lock<T, S, F: FnOnce(S, &Table) -> T>(
             debug_assert!(column.meta().size() > 0);
             match access {
                 Access::Read(_) => match column.data().try_read() {
-                    Some(_guard) => return try_lock(state, rest, table, with),
-                    None => return Err(state),
+                    Some(_guard) => try_lock(state, rest, table, with),
+                    None => Err(state),
                 },
                 Access::Write(_) => match column.data().try_write() {
-                    Some(_guard) => return try_lock(state, rest, table, with),
-                    None => return Err(state),
+                    Some(_guard) => try_lock(state, rest, table, with),
+                    None => Err(state),
                 },
             }
         }
@@ -1033,11 +1036,11 @@ fn lock<T, F: FnOnce(&Table) -> T>(locks: &[(usize, Access)], table: &Table, wit
             match access {
                 Access::Read(_) => {
                     let _guard = column.data().read();
-                    return lock(rest, table, with);
+                    lock(rest, table, with)
                 }
                 Access::Write(_) => {
                     let _guard = column.data().write();
-                    return lock(rest, table, with);
+                    lock(rest, table, with)
                 }
             }
         }

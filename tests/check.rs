@@ -47,7 +47,7 @@ fn check() -> Result<(), Box<dyn error::Error>> {
         .any()
         .map(Unify::unify)
         .collect_with::<_, Vec<Action>>(..256usize)
-        .check(1000, |actions| run(actions.into_iter().cloned()))?;
+        .check(1000, |actions| run(actions.iter().cloned()))?;
     Ok(())
 }
 
@@ -154,7 +154,7 @@ fn run(
         create: &mut Create<T>,
         database: &Database,
     ) -> Result<(), Box<dyn error::Error + Sync + Send>> {
-        let keys: Vec<_> = create.defaults(count).iter().copied().collect();
+        let keys: Vec<_> = create.defaults(count).to_vec();
         let mut query = database.query::<()>()?.filter::<Has<T>>();
         let mut by = By::new();
         by.keys(keys.iter().copied());

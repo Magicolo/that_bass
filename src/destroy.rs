@@ -116,6 +116,11 @@ impl<'d, F> Destroy<'d, F> {
         self.set.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn iter(&self) -> impl ExactSizeIterator<Item = Key> + '_ {
         self.set.iter().copied()
     }
@@ -152,7 +157,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         loop {
             sum += self.resolve_sorted();
             self.indices.clear();
-            if self.pending.len() == 0 {
+            if self.pending.is_empty() {
                 break;
             }
 
@@ -247,7 +252,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
 
         let range = low..high + 1;
         let head = table.count.load(Ordering::Acquire) - count.get();
-        let (low, high) = (range.start as usize, range.end as usize);
+        let (low, high) = (range.start, range.end);
         if range.len() == count.get() {
             // The destroy range is contiguous.
             let over = high.saturating_sub(head);
@@ -262,7 +267,6 @@ impl<'d, F: Filter> Destroy<'d, F> {
             let mut index = 0;
             let mut cursor = head;
             while let Some(&(.., row)) = rows.get(index) {
-                let row = row as usize;
                 let mut previous = row;
                 let start = index;
                 index += 1;
@@ -278,7 +282,6 @@ impl<'d, F: Filter> Destroy<'d, F> {
                 } else {
                     // Try to batch contiguous drops.
                     while let Some(&(.., current)) = rows.get(index) {
-                        let current = current as usize;
                         if previous + 1 == current {
                             previous = current;
                             index += 1;
@@ -370,7 +373,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             }
         };
         if let Ok(state) = unsafe { get_unchecked_mut(states, index) } {
-            if state.rows.len() == 0 {
+            if state.rows.is_empty() {
                 indices.push(index);
             }
             state.rows.push((key, usize::MAX));
@@ -378,9 +381,9 @@ impl<'d, F: Filter> Destroy<'d, F> {
     }
 
     /// Call this while holding a lock on `table`.
-    fn retain<'a>(
+    fn retain(
         keys: &Keys,
-        table: &'a Table,
+        table: &Table,
         rows: &mut Vec<(Key, usize)>,
         pending: &mut Vec<(Key, u32)>,
     ) -> (usize, usize) {
@@ -404,7 +407,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
                 }
             }
         }
-        debug_assert_eq!(low <= high, rows.len() > 0);
+        debug_assert_eq!(low > high, rows.is_empty());
         (low, high)
     }
 }
@@ -477,6 +480,6 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
         keys.release_all(&table_keys[..count.get()]);
         events.emit_destroy(&table_keys[..count.get()], table);
         keys.recycle_all(table_keys[..count.get()].iter().copied());
-        return count.get();
+        count.get()
     }
 }

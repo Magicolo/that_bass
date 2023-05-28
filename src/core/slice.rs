@@ -27,7 +27,7 @@ unsafe impl<T: Sync> Sync for Guard<'_, T> {}
 
 static STASH: Mutex<BTreeMap<Key, usize>> = Mutex::new(BTreeMap::new());
 
-impl<T: Clone + Send + Sync> Slice<T> {
+impl<T: Clone> Slice<T> {
     pub fn new(items: &[T]) -> Self {
         let (data, offset) = unsafe { allocate_with(items, &[]) };
         Slice {
@@ -42,7 +42,7 @@ impl<T: Clone + Send + Sync> Slice<T> {
         let mut seen = self.seen.lock();
         *seen += 1;
         // Load pointer under the lock to ensure that it is not modified at the same time.
-        let guard = Guard(self, self.data.load(Ordering::Relaxed).into());
+        let guard = Guard(self, self.data.load(Ordering::Relaxed));
         drop(seen);
         guard
     }
@@ -191,7 +191,7 @@ impl<T: Clone> Guard<'_, T> {
             self.update_locked(Some(seen));
         }
 
-        if items.len() > 0 {
+        if !items.is_empty() {
             let (new, offset) = unsafe { allocate_with(self.get_weak(), items) };
             let old = self.0.data.swap(new, Ordering::Relaxed);
             debug_assert_eq!(offset, self.0.offset);

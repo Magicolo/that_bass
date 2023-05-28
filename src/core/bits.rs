@@ -3,7 +3,6 @@ use std::{
     convert::TryInto,
     hash::Hash,
     iter::{self, FromIterator},
-    mem::size_of,
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not},
 };
 
@@ -23,7 +22,7 @@ pub struct Iterator<'a> {
 impl Bits {
     pub const EMPTY: Self = Self::new();
 
-    const SIZE: usize = size_of::<Bucket>() * 8;
+    const SIZE: usize = Bucket::BITS as usize;
 
     #[inline]
     pub const fn new() -> Self {
@@ -287,7 +286,7 @@ impl Not for Bits {
 
     #[inline]
     fn not(mut self) -> Self::Output {
-        (&mut self).not();
+        Bits::not(&mut self);
         self
     }
 }

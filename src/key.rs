@@ -49,7 +49,7 @@ impl Key {
     #[inline]
     pub(crate) const fn new(index: u32) -> Self {
         Self {
-            index: index,
+            index,
             generation: 0,
         }
     }

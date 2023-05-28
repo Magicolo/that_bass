@@ -130,6 +130,7 @@ impl Column {
     }
 
     #[inline]
+    #[allow(clippy::mut_from_ref)]
     pub(crate) unsafe fn get<T: 'static>(&self, index: usize) -> &mut T {
         debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
         let data = *self.data.data_ptr();
@@ -137,6 +138,7 @@ impl Column {
     }
 
     #[inline]
+    #[allow(clippy::mut_from_ref)]
     pub(crate) unsafe fn get_all<T: 'static>(&self, count: usize) -> &mut [T] {
         debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
         let data = *self.data.data_ptr();
@@ -160,6 +162,11 @@ impl Tables<'_> {
     #[inline]
     pub fn len(&mut self) -> usize {
         self.0.get().len()
+    }
+
+    #[inline]
+    pub fn is_empty(&mut self) -> bool {
+        self.len() == 0
     }
 
     #[inline]
@@ -218,7 +225,7 @@ impl Tables<'_> {
                 keys: RwLock::new(Keys::default()),
                 columns,
             });
-            if let Some(_) = self.0.push_if_same(table.clone()) {
+            if self.0.push_if_same(table.clone()).is_some() {
                 break table;
             }
         }

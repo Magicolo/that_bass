@@ -209,15 +209,15 @@ impl<F: Filter> Filter for Not<F> {
 }
 
 impl Filter for Dynamic {
-    fn filter(&self, table: &Table, database: &Database) -> bool {
+    fn filter(&self, table: &Table, _database: &Database) -> bool {
         match &self.0 {
             Inner::Is(types) => table.is_all(types.iter().copied()),
             Inner::Has(types) => table.has_all(types.iter().copied()),
-            Inner::Not(filter) => !filter.filter(table, database),
-            Inner::Any(filters) => filters.iter().any(|filter| filter.filter(table, database)),
-            Inner::All(filters) => filters.iter().all(|filter| filter.filter(table, database)),
+            Inner::Not(filter) => !filter.filter(table, _database),
+            Inner::Any(filters) => filters.iter().any(|filter| filter.filter(table, _database)),
+            Inner::All(filters) => filters.iter().all(|filter| filter.filter(table, _database)),
             Inner::Same(filters) => {
-                utility::same(filters.iter().map(|filter| filter.filter(table, database)))
+                utility::same(filters.iter().map(|filter| filter.filter(table, _database)))
                     .unwrap_or(true)
             }
         }

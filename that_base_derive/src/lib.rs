@@ -192,7 +192,7 @@ pub fn row(input: TokenStream) -> TokenStream {
     }
     let (impl_generics, _, where_clauses) = generics.split_for_impl();
     let mut static_generics = generics.clone();
-    LifetimeVisitor("static".into()).visit_generics_mut(&mut static_generics);
+    LifetimeVisitor("static").visit_generics_mut(&mut static_generics);
     let (_, type_generics, _) = static_generics.split_for_impl();
 
     let row_path = path(ident.span(), ["that_bass", "row", "Row"]);

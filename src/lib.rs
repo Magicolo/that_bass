@@ -256,13 +256,15 @@ pub struct Database {
     resources: Resources,
 }
 
+type MetaCopy = unsafe fn((NonNull<u8>, usize), (NonNull<u8>, usize), NonZeroUsize);
+type MetaDrop = unsafe fn(NonNull<u8>, usize, NonZeroUsize);
 pub struct Meta {
     identifier: TypeId,
     name: &'static str,
     size: usize,
     layout: fn(usize) -> Result<Layout, LayoutError>,
-    copy: Option<unsafe fn((NonNull<u8>, usize), (NonNull<u8>, usize), NonZeroUsize)>,
-    drop: Option<unsafe fn(NonNull<u8>, usize, NonZeroUsize)>,
+    copy: Option<MetaCopy>,
+    drop: Option<MetaDrop>,
 }
 
 pub trait Datum: Sized + 'static {}
@@ -271,7 +273,7 @@ impl Meta {
     #[inline]
     pub fn get<T: Sized + 'static>() -> &'static Meta {
         static METAS: Mutex<BTreeMap<TypeId, &'static Meta>> = Mutex::new(BTreeMap::new());
-        *METAS
+        METAS
             .lock()
             .entry(TypeId::of::<T>())
             .or_insert_with_key(|&key| {
@@ -319,12 +321,18 @@ impl Meta {
 
 impl Database {
     pub fn new() -> Self {
-        Database {
+        Self {
             keys: key::State::new(),
             tables: table::State::new(),
             resources: Resources::new(),
             events: event::State::new(),
         }
+    }
+}
+
+impl Default for Database {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

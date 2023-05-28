@@ -315,7 +315,7 @@ impl<'a, E: Event> Listen<'a, E> {
             // that hold database locks. The trade-off here is that the `ready` write lock may be taken in vain when `pending`
             // has no new events.
             let mut pending = self.events.0.pending.lock();
-            if pending.events.len() == 0 {
+            if pending.events.is_empty() {
                 ready.last = Some(chunk);
                 return false;
             }
@@ -566,24 +566,24 @@ macro_rules! event {
             $on_key_types
         );
 
-        impl Into<Key> for $on_key {
+        impl From<$on_key> for Key {
             #[inline]
-            fn into(self) -> Key {
-                self.key
+            fn from(value: $on_key) -> Key {
+                value.key
             }
         }
 
-        impl<T> Into<Key> for $on_key_type<T> {
+        impl<T> From<$on_key_type<T>> for Key {
             #[inline]
-            fn into(self) -> Key {
-                self.key
+            fn from(value: $on_key_type<T>) -> Key {
+                value.key
             }
         }
 
-        impl Into<Key> for $on_key_types {
+        impl From<$on_key_types> for Key {
             #[inline]
-            fn into(self) -> Key {
-                self.key
+            fn from(value: $on_key_types) -> Key {
+                value.key
             }
         }
 
@@ -600,7 +600,7 @@ macro_rules! event {
                     let types = $count(&context, $table_f);
                     Some(Self {
                         keys: keys.count as _,
-                        types: types,
+                        types,
                         $table_f,
                     })
                 })
@@ -993,14 +993,14 @@ macro_rules! body {
     };
 }
 
-macro_rules! into {
-    () => {
+macro_rules! from {
+    ($t:ty, $i:ident) => {
         #[inline]
-        fn into(self) -> Key {
-            match self {
-                Self::Create(event) => event.into(),
-                Self::Modify(event) => event.into(),
-                Self::Destroy(event) => event.into(),
+        fn from(value: $t) -> Key {
+            match value {
+                $i::Create(event) => event.into(),
+                $i::Modify(event) => event.into(),
+                $i::Destroy(event) => event.into(),
             }
         }
     };
@@ -1030,14 +1030,14 @@ impl Event for OnAnyKeyTypes {
     body!(true);
 }
 
-impl Into<Key> for OnAnyKey {
-    into!();
+impl From<OnAnyKey> for Key {
+    from!(OnAnyKey, OnAnyKey);
 }
 
-impl<T> Into<Key> for OnAnyKeyType<T> {
-    into!();
+impl<T> From<OnAnyKeyType<T>> for Key {
+    from!(OnAnyKeyType<T>, OnAnyKeyType);
 }
 
-impl Into<Key> for OnAnyKeyTypes {
-    into!();
+impl From<OnAnyKeyTypes> for Key {
+    from!(OnAnyKeyTypes, OnAnyKeyTypes);
 }

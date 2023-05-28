@@ -7,31 +7,39 @@ on:
     branches: ["master"]
 
 jobs:
-  test-debug:
+  debug:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
     - name: Install
-      run: rustup install nightly && rustup default nightly
+      run: rustup install nightly && rustup default nightly && cargo install cargo-audit
     - name: Build
-      run: cargo clean && cargo build --verbose
+      run: cargo build --verbose
     - name: Test
-      run: cargo clean && cargo test --verbose
-  test-release:
+      run: cargo test --verbose
+    - name: Clippy
+      run: cargo clippy --verbose -- -D warnings
+    - name: Audit
+      run: cargo audit
+  release:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
     - name: Install
-      run: rustup install nightly && rustup default nightly
+      run: rustup install nightly && rustup default nightly && cargo install cargo-audit
     - name: Build
-      run: cargo clean && cargo build --release --verbose
+      run: cargo build --release --verbose
     - name: Test
-      run: cargo clean && cargo test --release --verbose
-  test-miri:
+      run: cargo test --release --verbose
+    - name: Clippy
+      run: cargo clippy --release --verbose -- -D warnings
+    - name: Audit
+      run: cargo audit
+  miri:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
     - name: Install
       run: rustup install nightly && rustup default nightly && rustup component add miri
     - name: Test
-      run: cargo clean && cargo miri test --verbose
+      run: cargo miri test --verbose

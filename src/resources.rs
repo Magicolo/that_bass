@@ -36,13 +36,12 @@ impl<K: Eq + Hash> Globals<K> {
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
     ) -> Result<Arc<T>, Error> {
-        Ok(self
-            .0
+        self.0
             .entry(key)
             .or_insert_with(|| Ok(Arc::new(default()?)))
             .clone()?
             .downcast()
-            .map_err(|_| Error::InvalidType(TypeId::of::<T>()))?)
+            .map_err(|_| Error::InvalidType(TypeId::of::<T>()))
     }
 
     pub fn get<T: Send + Sync + 'static>(&mut self, key: K, default: impl FnOnce() -> T) -> Arc<T> {
@@ -76,13 +75,12 @@ impl<K: Eq + Hash> Locals<K> {
         key: K,
         default: impl FnOnce() -> Result<T, Error>,
     ) -> Result<Rc<T>, Error> {
-        Ok(self
-            .0
+        self.0
             .entry(key)
             .or_insert_with(|| Ok(Rc::new(default()?)))
             .clone()?
             .downcast()
-            .map_err(|_| Error::InvalidType(TypeId::of::<T>()))?)
+            .map_err(|_| Error::InvalidType(TypeId::of::<T>()))
     }
 
     pub fn get<T: 'static>(&mut self, key: K, default: impl FnOnce() -> T) -> Rc<T> {
@@ -178,6 +176,12 @@ impl Resources {
         self.local(|| RefCell::new(Locals::new()))
             .borrow_mut()
             .try_get((key, TypeId::of::<T>()), default)
+    }
+}
+
+impl Default for Resources {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

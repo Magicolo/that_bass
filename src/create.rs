@@ -106,6 +106,11 @@ impl<'d, T: Template> Create<'d, T> {
         self.reserved.len()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (Key, &T)> {
         self.reserved.iter().copied().zip(self.templates.iter())
     }
