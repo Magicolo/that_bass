@@ -29,7 +29,7 @@ static STASH: Mutex<BTreeMap<Key, usize>> = Mutex::new(BTreeMap::new());
 
 impl<T: Clone> Slice<T> {
     pub fn new(items: &[T]) -> Self {
-        let (data, offset) = unsafe { allocate_with(items, &[]) };
+        let (data, offset) = unsafe { allocate_with(items.iter().cloned(), [].into_iter()) };
         Slice {
             data: AtomicPtr::new(data),
             offset,
@@ -76,7 +76,9 @@ impl<'a, T> Guard<'a, T> {
     }
 
     fn update_locked(&mut self, seen: Option<&mut usize>) -> bool {
-        let Some(data) = self.load() else { return false; };
+        let Some(data) = self.load() else {
+            return false;
+        };
         let data = match seen {
             Some(seen) => {
                 *seen += 1;
@@ -140,36 +142,44 @@ impl<T: Clone> Guard<'_, T> {
         self.truncate_locked(len, &mut seen)
     }
 
-    pub fn extend<I: IntoIterator<Item = T>>(&mut self, items: I) -> &[T] {
-        let items: Box<[T]> = items.into_iter().collect();
-        self.extend_with(|_| items)
+    pub fn extend<I: IntoIterator<IntoIter = impl ExactSizeIterator<Item = T>>>(
+        &mut self,
+        items: I,
+    ) -> &[T] {
+        self.extend_locked(items, true, &mut self.0.seen.lock())
     }
 
-    pub fn extend_with<F: FnOnce(&[T]) -> Box<[T]>>(&mut self, with: F) -> &[T] {
-        self.extend_locked(&with(self.get_weak()), true, &mut self.0.seen.lock())
+    pub fn extend_with<
+        I: IntoIterator<IntoIter = impl ExactSizeIterator<Item = T>>,
+        F: FnOnce(&[T]) -> I,
+    >(
+        &mut self,
+        with: F,
+    ) -> &[T] {
+        self.extend_locked(with(self.get_weak()), true, &mut self.0.seen.lock())
     }
 
-    pub fn extend_filter<F: FnOnce(&[T]) -> Option<Box<[T]>>>(&mut self, with: F) -> Option<&[T]> {
-        Some(self.extend_locked(&with(self.get_weak())?, true, &mut self.0.seen.lock()))
+    pub fn push(&mut self, item: T) -> &[T] {
+        self.extend_locked([item], true, &mut self.0.seen.lock())
     }
 
     pub fn push_with<F: FnOnce(&[T]) -> T>(&mut self, with: F) -> &[T] {
-        self.extend_locked(&[with(self.get_weak())], true, &mut self.0.seen.lock())
+        self.extend_locked([with(self.get_weak())], true, &mut self.0.seen.lock())
     }
 
     /// Pushes the `item` only if the slice wasn't modified since the last `update` of this `Guard`.
-    /// Note that almosts all operations on this `Guard` will cause an `update`.
+    /// Note that almost all operations on this `Guard` will cause an `update`.
     pub fn push_if_same(&mut self, item: T) -> Option<&[T]> {
         let mut seen = self.0.seen.lock();
         if self.update_locked(Some(&mut seen)) {
             None
         } else {
-            Some(self.extend_locked(&[item], false, &mut seen))
+            Some(self.extend_locked([item], false, &mut seen))
         }
     }
 
     pub fn push_filter<F: FnOnce(&[T]) -> Option<T>>(&mut self, with: F) -> Option<&[T]> {
-        Some(self.extend_locked(&[with(self.get_weak())?], true, &mut self.0.seen.lock()))
+        Some(self.extend_locked([with(self.get_weak())?], true, &mut self.0.seen.lock()))
     }
 
     fn truncate_locked(&mut self, len: usize, seen: &mut usize) -> &[T] {
@@ -178,7 +188,8 @@ impl<T: Clone> Guard<'_, T> {
         // Call `self.get_weak` under the lock such that the data pointer is not modified while truncating.
         let slice = self.get_weak();
         if slice.len() > len {
-            let (new, offset) = unsafe { allocate_with(&slice[..len], &[]) };
+            let (new, offset) =
+                unsafe { allocate_with(slice[..len].iter().cloned(), [].into_iter()) };
             let old = self.0.data.swap(new, Ordering::Relaxed);
             debug_assert_eq!(offset, self.0.offset);
             self.set_locked(old, new, seen);
@@ -186,17 +197,24 @@ impl<T: Clone> Guard<'_, T> {
         self.get_weak()
     }
 
-    fn extend_locked(&mut self, items: &[T], update: bool, seen: &mut usize) -> &[T] {
+    fn extend_locked<I: IntoIterator<IntoIter = impl ExactSizeIterator<Item = T>>>(
+        &mut self,
+        items: I,
+        update: bool,
+        seen: &mut usize,
+    ) -> &[T] {
         if update {
             self.update_locked(Some(seen));
         }
 
-        if !items.is_empty() {
-            let (new, offset) = unsafe { allocate_with(self.get_weak(), items) };
+        let items = items.into_iter();
+        if items.len() > 0 {
+            let (new, offset) = unsafe { allocate_with(self.get_weak().iter().cloned(), items) };
             let old = self.0.data.swap(new, Ordering::Relaxed);
             debug_assert_eq!(offset, self.0.offset);
             self.set_locked(old, new, seen);
         }
+
         self.get_weak()
     }
 }
@@ -242,14 +260,20 @@ unsafe fn allocate<T>(len: usize, initialize: impl FnOnce(*mut T)) -> (*mut u8, 
     (data, offset)
 }
 
-unsafe fn allocate_with<T: Clone>(left: &[T], right: &[T]) -> (*mut u8, usize) {
-    // TODO: Deal with `panic` in a `Clone` implementation. Will need to wrap these operations in a `impl Drop` structure.
-    allocate::<T>(left.len() + right.len(), |data| {
-        for (i, item) in left.iter().enumerate() {
-            data.add(i).write(item.clone());
+unsafe fn allocate_with<L: ExactSizeIterator, R: ExactSizeIterator<Item = L::Item>>(
+    left: L,
+    right: R,
+) -> (*mut u8, usize) {
+    let left = left.into_iter();
+    let right = right.into_iter();
+    let counts = (left.len(), right.len());
+    // TODO: Deal with `panic` in a `Iterator` implementation. Will need to wrap these operations in a `impl Drop` structure.
+    allocate::<L::Item>(counts.0 + counts.1, |data| {
+        for (i, item) in left.enumerate() {
+            data.add(i).write(item);
         }
-        for (i, item) in right.iter().enumerate() {
-            data.add(left.len() + i).write(item.clone());
+        for (i, item) in right.enumerate() {
+            data.add(counts.0 + i).write(item);
         }
     })
 }

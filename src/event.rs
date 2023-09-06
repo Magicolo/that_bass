@@ -35,14 +35,13 @@ pub(crate) struct State {
 
 pub struct Listen<'d, E: Event> {
     events: Events<'d>,
-    cursor: Cursor<E>,
+    cursor: Cursor,
     buffer: Buffer<E>,
 }
 
-pub struct Cursor<E: Event> {
+pub struct Cursor {
     head: usize,
     version: usize,
-    _marker: PhantomData<E>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -87,6 +86,11 @@ struct Buffer<T>(VecDeque<T>, Keep);
 #[derive(Default)]
 struct Ready {
     chunks: VecDeque<Chunk>,
+    // TODO: Use something like this for messages.
+    // - Listen could provide direct references into raw which could be processed in place into another message type.
+    // - When a chunk has been seen by all, it becomes available for writes (i.e. reimplementing a queue).
+    // - Only on resize will the indices need to be adjusted. This can be observed by readers with a 'version'?
+    // c: Slice<Arc<UnsafeCell<[MaybeUninit<Raw>]>>>,
     last: Option<Chunk>,
     version: usize,
     head: usize,
@@ -284,7 +288,6 @@ impl<'a, E: Event> Listen<'a, E> {
             cursor: Cursor {
                 head: self.cursor.head,
                 version: self.cursor.version,
-                _marker: PhantomData,
             },
             buffer: Buffer(VecDeque::new(), Keep::All),
         }
@@ -374,7 +377,6 @@ impl<'a, E: Event> Listen<'a, E> {
             cursor: Cursor {
                 head: ready.chunks.len(),
                 version: ready.version,
-                _marker: PhantomData,
             },
             buffer: Buffer(VecDeque::new(), Keep::All),
         }
@@ -596,7 +598,9 @@ macro_rules! event {
 
             fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
                 events.iter().filter_map(move |event| {
-                    let &Raw::$raw { keys, $table_f } = event else { return None; };
+                    let &Raw::$raw { keys, $table_f } = event else {
+                        return None;
+                    };
                     let types = $count(&context, $table_f);
                     Some(Self {
                         keys: keys.count as _,
@@ -618,7 +622,9 @@ macro_rules! event {
                 events
                     .iter()
                     .filter_map(move |event| {
-                        let &Raw::$raw { keys, $table_f } = event else { return None; };
+                        let &Raw::$raw { keys, $table_f } = event else {
+                            return None;
+                        };
                         let keys = context.keys(keys);
                         let types = $count(&context, $table_f);
                         Some(keys.iter().map(move |&key| Self {
@@ -642,7 +648,9 @@ macro_rules! event {
                 events
                     .iter()
                     .filter_map(move |event| {
-                        let &Raw::$raw { keys, $table_f } = event else { return None; };
+                        let &Raw::$raw { keys, $table_f } = event else {
+                            return None;
+                        };
                         Some($types(&context, $table_f).map(move |r#type| Self {
                             keys: keys.count as _,
                             r#type,
@@ -664,7 +672,9 @@ macro_rules! event {
                 events
                     .iter()
                     .filter_map(move |event| {
-                        let &Raw::$raw { keys, $table_f } = event else { return None; };
+                        let &Raw::$raw { keys, $table_f } = event else {
+                            return None;
+                        };
                         let keys = context.keys(keys);
                         Some($types(&context, $table_f).flat_map(move |r#type| {
                             keys.iter().map(move |&key| Self {
@@ -687,7 +697,9 @@ macro_rules! event {
 
             fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
                 events.iter().filter_map(move |event| {
-                    let &Raw::$raw { keys, $table_f } = event else { return None; };
+                    let &Raw::$raw { keys, $table_f } = event else {
+                        return None;
+                    };
                     if $has::<D>(&context, $table_f) {
                         Some(Self {
                             keys: keys.count as _,
@@ -712,7 +724,9 @@ macro_rules! event {
                 events
                     .iter()
                     .filter_map(move |event| {
-                        let &Raw::$raw { keys, $table_f } = event else { return None; };
+                        let &Raw::$raw { keys, $table_f } = event else {
+                            return None;
+                        };
                         let keys = context.keys(keys);
                         if $has::<D>(&context, $table_f) {
                             Some(keys.iter().map(move |&key| Self {
