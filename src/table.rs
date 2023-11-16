@@ -1,8 +1,8 @@
 use crate::{
     core::{
         iterate::FullIterator,
-        slice::{self, Slice},
         utility::{get_unchecked, sorted_contains},
+        view_vec::{self, ViewVec},
     },
     key::Key,
     Database, Datum, Error, Meta,
@@ -35,7 +35,7 @@ pub struct Column {
 }
 
 pub(crate) struct State {
-    tables: Slice<Arc<Table>>,
+    tables: ViewVec<Arc<Table>>,
 }
 
 pub(crate) struct Keys {
@@ -44,12 +44,12 @@ pub(crate) struct Keys {
 }
 
 #[derive(Clone)]
-pub struct Tables<'a>(slice::Guard<'a, Arc<Table>>);
+pub struct Tables<'a>(view_vec::View<'a, Arc<Table>>);
 
 impl Database {
     #[inline]
     pub fn tables(&self) -> Tables {
-        Tables(self.tables.tables.guard())
+        Tables(self.tables.tables.view())
     }
 }
 
@@ -78,7 +78,12 @@ impl Column {
         count: NonZeroUsize,
     ) -> bool {
         debug_assert_eq!(source.0.meta().identifier(), target.0.meta().identifier());
-        let &Meta { copy: Some(copy), .. } = source.0.meta() else { return false; };
+        let &Meta {
+            copy: Some(copy), ..
+        } = source.0.meta()
+        else {
+            return false;
+        };
         copy(
             (*source.0.data.data_ptr(), source.1),
             (*target.0.data.data_ptr(), target.1),
@@ -115,7 +120,12 @@ impl Column {
         target_index: usize,
         count: NonZeroUsize,
     ) -> bool {
-        let &Meta { copy: Some(copy), .. } = self.meta() else { return false; };
+        let &Meta {
+            copy: Some(copy), ..
+        } = self.meta()
+        else {
+            return false;
+        };
         let data = *self.data.data_ptr();
         copy((data, source_index), (data, target_index), count);
         true
@@ -123,7 +133,12 @@ impl Column {
 
     #[inline]
     pub(crate) unsafe fn drop(&self, index: usize, count: NonZeroUsize) -> bool {
-        let &Meta { drop: Some(drop), .. } = self.meta() else { return false; };
+        let &Meta {
+            drop: Some(drop), ..
+        } = self.meta()
+        else {
+            return false;
+        };
         let data = unsafe { *self.data.data_ptr() };
         drop(data, index, count);
         true
@@ -161,7 +176,7 @@ impl Tables<'_> {
 
     #[inline]
     pub fn len(&mut self) -> usize {
-        self.0.get().len()
+        self.0.get_updated().len()
     }
 
     #[inline]
@@ -171,12 +186,12 @@ impl Tables<'_> {
 
     #[inline]
     pub fn iter(&mut self) -> impl FullIterator<Item = &Table> {
-        self.0.get().iter().map(|table| &**table)
+        self.0.get_updated().iter().map(|table| &**table)
     }
 
     #[inline]
     pub fn get(&mut self, index: usize) -> Result<&Table, Error> {
-        match self.0.get().get(index) {
+        match self.0.get_updated().get(index) {
             Some(table) => Ok(&**table),
             None => Err(Error::MissingTable(index)),
         }
@@ -184,12 +199,12 @@ impl Tables<'_> {
 
     #[inline]
     pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
-        get_unchecked(self.0.get_weak(), index)
+        get_unchecked(self.0.get(), index)
     }
 
     #[inline]
     pub fn get_shared(&mut self, index: usize) -> Result<Arc<Table>, Error> {
-        match self.0.get().get(index) {
+        match self.0.get_updated().get(index) {
             Some(table) => Ok(table.clone()),
             None => Err(Error::MissingTable(index)),
         }
@@ -197,7 +212,7 @@ impl Tables<'_> {
 
     #[inline]
     pub unsafe fn get_shared_unchecked(&self, index: usize) -> Arc<Table> {
-        get_unchecked(self.0.get_weak(), index).clone()
+        get_unchecked(self.0.get(), index).clone()
     }
 
     /// `metas` must be sorted by `meta.identifier()` and must be deduplicated.
@@ -210,7 +225,7 @@ impl Tables<'_> {
 
         let mut index = 0;
         loop {
-            let tables = self.0.get();
+            let tables = self.0.get_updated();
             for table in &tables[index..] {
                 if table.is_all(metas.iter().map(|meta| meta.identifier())) {
                     return table.clone();
@@ -235,7 +250,7 @@ impl Tables<'_> {
 impl State {
     pub fn new() -> Self {
         Self {
-            tables: Slice::new(&[]),
+            tables: ViewVec::new(&[]),
         }
     }
 }
@@ -380,7 +395,9 @@ impl Drop for Table {
         let count = *self.count.get_mut();
         let Keys { data, capacity } = *self.keys.get_mut();
         debug_assert!(count <= capacity);
-        let Some(capacity) = NonZeroUsize::new(capacity) else { return; };
+        let Some(capacity) = NonZeroUsize::new(capacity) else {
+            return;
+        };
         debug_assert_ne!(data, NonNull::dangling());
 
         let mut total = Layout::array::<Key>(capacity.get()).unwrap();

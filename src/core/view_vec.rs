@@ -9,28 +9,35 @@ use std::{
     sync::atomic::{AtomicPtr, Ordering},
 };
 
-pub struct Slice<T> {
+/// A concurrent contiguous collection designed for frequent reads and rare writes.
+///
+/// Access to the vector in done through [`View`]s which allow for concurrent read and write operations at the cost of consistency.
+/// [`View`]s must manually call [`View::update`] when they want to synchronize with recent writes.
+///
+/// Write operations require the type `T` to be [`Clone`] and will reallocate the backing storage every time.
+/// A typical usage pattern is to use [`ViewVec<Arc<T>>`] in place of a [`Mutex<Vec<Arc<T>>>`] to remove the requirement for locking.
+pub struct ViewVec<T> {
     data: AtomicPtr<u8>,
-    offset: usize,
+    offset: usize, // TODO: This field is likely not required since the offset should be constant.
     seen: Mutex<usize>,
     _marker: PhantomData<[T]>,
 }
-
-pub struct Guard<'a, T>(&'a Slice<T>, *mut u8);
+lice
+pub struct View<'a, T>(&'a ViewVec<T>, *mut u8);
 
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Key(*mut u8);
 unsafe impl Send for Key {}
-unsafe impl<T: Send> Send for Guard<'_, T> {}
-unsafe impl<T: Sync> Sync for Guard<'_, T> {}
+unsafe impl<T: Send> Send for View<'_, T> {}
+unsafe impl<T: Sync> Sync for View<'_, T> {}
 
 static STASH: Mutex<BTreeMap<Key, usize>> = Mutex::new(BTreeMap::new());
 
-impl<T: Clone> Slice<T> {
+impl<T: Clone> ViewVec<T> {
     pub fn new(items: &[T]) -> Self {
         let (data, offset) = unsafe { allocate_with(items.iter().cloned(), [].into_iter()) };
-        Slice {
+        ViewVec {
             data: AtomicPtr::new(data),
             offset,
             seen: 0.into(),
@@ -38,26 +45,21 @@ impl<T: Clone> Slice<T> {
         }
     }
 
-    pub fn guard(&self) -> Guard<T> {
+    pub fn view(&self) -> View<T> {
         let mut seen = self.seen.lock();
         *seen += 1;
         // Load pointer under the lock to ensure that it is not modified at the same time.
-        let guard = Guard(self, self.data.load(Ordering::Relaxed));
+        let guard = View(self, self.data.load(Ordering::Relaxed));
         drop(seen);
         guard
     }
 }
 
-impl<'a, T> Guard<'a, T> {
+impl<'a, T> View<'a, T> {
+    /// Returns the locally cached version of the slice at 0 cost (no indirection, locking or atomic operations).
+    /// The returned slice may not be up to date with recent changes. Use [`Self::update`] to catch up on recent changes.
     #[inline]
-    pub fn get(&mut self) -> &[T] {
-        self.update();
-        self.get_weak()
-    }
-
-    /// May return a version of the slice that is not up to date with recent changes. Use `update` to catch up on recent changes.
-    #[inline]
-    pub fn get_weak(&self) -> &[T] {
+    pub const fn get(&self) -> &[T] {
         // SAFETY:
         // The pointer held in `self.1` is guaranteed to be always valid for as long as this guard is alive. This is ensured
         // through the `seen` and `STASH` mechanisms.
@@ -70,9 +72,20 @@ impl<'a, T> Guard<'a, T> {
         }
     }
 
+    /// Updates the locally cached version of the slice at a synchronization cost.
+    /// - If there are no changes to the slice, the cost is a single atomic load.
+    /// - If there are changes to the slice, the cost is much larger.
     #[inline]
     pub fn update(&mut self) -> bool {
         self.update_locked(None)
+    }
+
+    /// Returns an updated version of the slice.
+    /// This is equivalent to calling [`Self::update`] then [`Self::get`].
+    #[inline]
+    pub fn get_updated(&mut self) -> &[T] {
+        self.update();
+        self.get()
     }
 
     fn update_locked(&mut self, seen: Option<&mut usize>) -> bool {
@@ -136,7 +149,7 @@ impl<'a, T> Guard<'a, T> {
     }
 }
 
-impl<T: Clone> Guard<'_, T> {
+impl<T: Clone> View<'_, T> {
     pub fn truncate(&mut self, len: usize) -> &[T] {
         let mut seen = self.0.seen.lock();
         self.truncate_locked(len, &mut seen)
@@ -156,7 +169,7 @@ impl<T: Clone> Guard<'_, T> {
         &mut self,
         with: F,
     ) -> &[T] {
-        self.extend_locked(with(self.get_weak()), true, &mut self.0.seen.lock())
+        self.extend_locked(with(self.get()), true, &mut self.0.seen.lock())
     }
 
     pub fn push(&mut self, item: T) -> &[T] {
@@ -164,11 +177,11 @@ impl<T: Clone> Guard<'_, T> {
     }
 
     pub fn push_with<F: FnOnce(&[T]) -> T>(&mut self, with: F) -> &[T] {
-        self.extend_locked([with(self.get_weak())], true, &mut self.0.seen.lock())
+        self.extend_locked([with(self.get())], true, &mut self.0.seen.lock())
     }
 
     /// Pushes the `item` only if the slice wasn't modified since the last `update` of this `Guard`.
-    /// Note that almost all operations on this `Guard` will cause an `update`.
+    /// Note that almost all operations on this `Guard` (including this one) will cause an `update`.
     pub fn push_if_same(&mut self, item: T) -> Option<&[T]> {
         let mut seen = self.0.seen.lock();
         if self.update_locked(Some(&mut seen)) {
@@ -179,14 +192,14 @@ impl<T: Clone> Guard<'_, T> {
     }
 
     pub fn push_filter<F: FnOnce(&[T]) -> Option<T>>(&mut self, with: F) -> Option<&[T]> {
-        Some(self.extend_locked([with(self.get_weak())?], true, &mut self.0.seen.lock()))
+        Some(self.extend_locked([with(self.get())?], true, &mut self.0.seen.lock()))
     }
 
     fn truncate_locked(&mut self, len: usize, seen: &mut usize) -> &[T] {
         self.update_locked(Some(seen));
 
         // Call `self.get_weak` under the lock such that the data pointer is not modified while truncating.
-        let slice = self.get_weak();
+        let slice = self.get();
         if slice.len() > len {
             let (new, offset) =
                 unsafe { allocate_with(slice[..len].iter().cloned(), [].into_iter()) };
@@ -194,7 +207,7 @@ impl<T: Clone> Guard<'_, T> {
             debug_assert_eq!(offset, self.0.offset);
             self.set_locked(old, new, seen);
         }
-        self.get_weak()
+        self.get()
     }
 
     fn extend_locked<I: IntoIterator<IntoIter = impl ExactSizeIterator<Item = T>>>(
@@ -209,23 +222,23 @@ impl<T: Clone> Guard<'_, T> {
 
         let items = items.into_iter();
         if items.len() > 0 {
-            let (new, offset) = unsafe { allocate_with(self.get_weak().iter().cloned(), items) };
+            let (new, offset) = unsafe { allocate_with(self.get().iter().cloned(), items) };
             let old = self.0.data.swap(new, Ordering::Relaxed);
             debug_assert_eq!(offset, self.0.offset);
             self.set_locked(old, new, seen);
         }
 
-        self.get_weak()
+        self.get()
     }
 }
 
-impl<T: Clone + Send + Sync> Clone for Guard<'_, T> {
+impl<T: Clone + Send + Sync> Clone for View<'_, T> {
     fn clone(&self) -> Self {
-        self.0.guard()
+        self.0.view()
     }
 }
 
-impl<T> Drop for Slice<T> {
+impl<T> Drop for ViewVec<T> {
     fn drop(&mut self) {
         debug_assert_eq!(*self.seen.get_mut(), 0);
         // This guard is the last one. Free the pointer.
@@ -233,7 +246,7 @@ impl<T> Drop for Slice<T> {
     }
 }
 
-impl<T> Drop for Guard<'_, T> {
+impl<T> Drop for View<'_, T> {
     fn drop(&mut self) {
         let mut seen = self.0.seen.lock();
         let data = self.0.data.load(Ordering::Relaxed);
@@ -300,8 +313,8 @@ mod tests {
     #[test]
     fn stash_stays_empty() {
         let _lock = LOCK.lock();
-        let slice = Slice::new(&[1]);
-        let mut a = slice.guard();
+        let slice = ViewVec::new(&[1]);
+        let mut a = slice.view();
         assert_eq!(STASH.lock().len(), 0);
         assert_eq!(a.push_with(|_| 2), &[1, 2]);
         assert_eq!(STASH.lock().len(), 0);
@@ -314,9 +327,9 @@ mod tests {
     #[test]
     fn stash_is_properly_emptied_with_2_guards() {
         let _lock = LOCK.lock();
-        let slice = Slice::new(&[1]);
-        let mut a = slice.guard();
-        let b = slice.guard();
+        let slice = ViewVec::new(&[1]);
+        let mut a = slice.view();
+        let b = slice.view();
         assert_eq!(STASH.lock().len(), 0);
         assert_eq!(a.push_with(|_| 2), &[1, 2]);
         assert_eq!(STASH.lock().len(), 1);
@@ -329,40 +342,40 @@ mod tests {
     #[test]
     fn get_updates_the_slice() {
         let _lock = LOCK.lock();
-        let slice = Slice::new(&[1]);
-        let mut a = slice.guard();
-        let mut b = slice.guard();
+        let slice = ViewVec::new(&[1]);
+        let mut a = slice.view();
+        let mut b = slice.view();
 
         assert_eq!(STASH.lock().len(), 0);
-        assert_eq!(a.get_weak(), &[1]);
-        assert_eq!(b.get_weak(), &[1]);
         assert_eq!(a.get(), &[1]);
         assert_eq!(b.get(), &[1]);
+        assert_eq!(a.get_updated(), &[1]);
+        assert_eq!(b.get_updated(), &[1]);
 
         assert_eq!(a.push_with(|_| 2), &[1, 2]);
         assert_eq!(STASH.lock().len(), 1);
-        assert_eq!(a.get_weak(), &[1, 2]);
-        assert_eq!(b.get_weak(), &[1]);
-        assert_eq!(STASH.lock().len(), 1);
         assert_eq!(a.get(), &[1, 2]);
-        assert_eq!(b.get(), &[1, 2]);
+        assert_eq!(b.get(), &[1]);
+        assert_eq!(STASH.lock().len(), 1);
+        assert_eq!(a.get_updated(), &[1, 2]);
+        assert_eq!(b.get_updated(), &[1, 2]);
         assert_eq!(STASH.lock().len(), 0);
     }
 
     #[test]
     fn stash_is_properly_emptied_with_3_guards() {
         let _lock = LOCK.lock();
-        let slice = Slice::new(&[1]);
-        let mut a = slice.guard();
-        let mut b = slice.guard();
-        let c = slice.guard();
+        let slice = ViewVec::new(&[1]);
+        let mut a = slice.view();
+        let mut b = slice.view();
+        let c = slice.view();
         assert_eq!(a.push_with(|_| 2), &[1, 2]);
-        assert_eq!(b.get(), &[1, 2]);
+        assert_eq!(b.get_updated(), &[1, 2]);
         assert_eq!(a.push_with(|_| 3), &[1, 2, 3]);
         assert_eq!(STASH.lock().len(), 2);
-        assert_eq!(a.get_weak(), &[1, 2, 3]);
-        assert_eq!(b.get_weak(), &[1, 2]);
-        assert_eq!(c.get_weak(), &[1]);
+        assert_eq!(a.get(), &[1, 2, 3]);
+        assert_eq!(b.get(), &[1, 2]);
+        assert_eq!(c.get(), &[1]);
 
         drop(a);
         assert_eq!(STASH.lock().len(), 2);

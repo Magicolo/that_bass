@@ -1,7 +1,7 @@
 use crate::{
     core::{
-        slice::{self, Slice},
         utility::get_unchecked,
+        view_vec::{self, ViewVec},
     },
     Database, Error,
 };
@@ -27,16 +27,16 @@ pub struct Slot {
 
 pub(crate) struct State {
     free: RwLock<(Vec<Key>, AtomicI64)>,
-    slots: Slice<Arc<Slot>>,
+    slots: ViewVec<Arc<Slot>>,
 }
 
 #[derive(Clone)]
-pub struct Keys<'d>(&'d State, slice::Guard<'d, Arc<Slot>>);
+pub struct Keys<'d>(&'d State, view_vec::View<'d, Arc<Slot>>);
 
 impl Database {
     #[inline]
     pub fn keys(&self) -> Keys {
-        Keys(&self.keys, self.keys.slots.guard())
+        Keys(&self.keys, self.keys.slots.view())
     }
 }
 
@@ -84,7 +84,7 @@ impl<'d> Keys<'d> {
 
     #[inline]
     pub fn get(&mut self, key: Key) -> Result<(&Slot, u32), Error> {
-        let slots = self.1.get();
+        let slots = self.1.get_updated();
         match slots.get(key.index() as usize) {
             Some(slot) => match slot.table(key) {
                 Ok(table) => Ok((&**slot, table)),
@@ -96,7 +96,7 @@ impl<'d> Keys<'d> {
 
     #[inline]
     pub unsafe fn get_semi_checked(&self, key: Key) -> Result<(&Slot, u32), Error> {
-        let slots = self.1.get_weak();
+        let slots = self.1.get();
         match slots.get(key.index() as usize) {
             Some(slot) => match slot.table(key) {
                 Ok(table) => Ok((&**slot, table)),
@@ -108,7 +108,7 @@ impl<'d> Keys<'d> {
 
     #[inline]
     pub unsafe fn get_unchecked(&self, key: Key) -> &Slot {
-        get_unchecked(self.1.get_weak(), key.index() as usize)
+        get_unchecked(self.1.get(), key.index() as usize)
     }
 
     #[inline]
@@ -116,7 +116,7 @@ impl<'d> Keys<'d> {
         &mut self,
         keys: I,
     ) -> impl Iterator<Item = (Key, Result<(&Slot, u32), Error>)> {
-        let slots = self.1.get();
+        let slots = self.1.get_updated();
         keys.into_iter()
             .map(|key| match slots.get(key.index() as usize) {
                 Some(slot) => match slot.table(key) {
@@ -132,7 +132,7 @@ impl<'d> Keys<'d> {
         &mut self,
         keys: I,
     ) -> impl Iterator<Item = (Key, T, Result<(&Slot, u32), Error>)> {
-        let slots = self.1.get();
+        let slots = self.1.get_updated();
         keys.into_iter()
             .map(|(key, value)| match slots.get(key.index() as usize) {
                 Some(slot) => match slot.table(key) {
@@ -148,7 +148,7 @@ impl<'d> Keys<'d> {
         &self,
         keys: I,
     ) -> impl Iterator<Item = (Key, &Slot)> {
-        let slots = self.1.get_weak();
+        let slots = self.1.get();
         keys.into_iter()
             .map(|key| (key, &**get_unchecked(slots, key.index() as usize)))
     }
@@ -229,7 +229,7 @@ impl State {
     pub fn new() -> Self {
         Self {
             free: RwLock::new((Vec::new(), AtomicI64::new(0))),
-            slots: Slice::new(&[]),
+            slots: ViewVec::new(&[]),
         }
     }
 }
