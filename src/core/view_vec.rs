@@ -11,7 +11,7 @@ use std::{
 
 /// A concurrent contiguous collection designed for frequent reads and rare writes.
 ///
-/// Access to the vector in done through [`View`]s which allow for concurrent read and write operations at the cost of consistency.
+/// Access to the vector is done through [`View`]s which allow for concurrent read and write operations at the cost of consistency.
 /// [`View`]s must manually call [`View::update`] when they want to synchronize with recent writes.
 ///
 /// Write operations require the type `T` to be [`Clone`] and will reallocate the backing storage every time.
@@ -22,7 +22,6 @@ pub struct ViewVec<T> {
     seen: Mutex<usize>,
     _marker: PhantomData<[T]>,
 }
-lice
 pub struct View<'a, T>(&'a ViewVec<T>, *mut u8);
 
 #[repr(transparent)]
@@ -49,9 +48,7 @@ impl<T: Clone> ViewVec<T> {
         let mut seen = self.seen.lock();
         *seen += 1;
         // Load pointer under the lock to ensure that it is not modified at the same time.
-        let guard = View(self, self.data.load(Ordering::Relaxed));
-        drop(seen);
-        guard
+        View(self, self.data.load(Ordering::Relaxed))
     }
 }
 
@@ -103,7 +100,6 @@ impl<'a, T> View<'a, T> {
                 // Load the pointer again in case it changed between the `load` and `lock` above.
                 let data = self.0.data.load(Ordering::Relaxed);
                 *seen += 1;
-                drop(seen);
                 data
             }
         };
@@ -143,6 +139,7 @@ impl<'a, T> View<'a, T> {
         } else {
             let count = replace(seen, 1) - 1;
             let value = STASH.lock().insert(Key(old), count);
+            debug_assert!(count > 0);
             debug_assert!(value.is_none());
         }
         self.1 = new;
