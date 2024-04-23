@@ -28,6 +28,16 @@ use std::{
 pub use that_base_derive::{Datum, Filter, Template};
 
 /*
+    TODO: Implement async versions of each operation?
+    TODO: Remove an indirection in table to the columns since tables are always kept in an 'Arc'. See 'slice-dst' crate.
+        struct Header {
+            index: u32,
+            pub(crate) count: AtomicUsize,
+            pub(crate) keys: RwLock<Keys>,
+        }
+        type Table = SliceWithHeader<Header, Column>;
+    TODO: Use the 'erasable' crate to represent a pointer in a column?
+    TODO: A parallel version of 'fold_swap' such that many query operations can be executed in parallel (ex: 'each' -> 'par_each').
     TODO: Dynamic disk/network save/load of data.
         - In `enum Data { Unloaded, Loaded(NonNull<()>) }` such that `Column::data` is of type `RwLock<Data>`.
         - Tables will be able to save/load their data to some target. Whenever the data is requested, the table will load it.
