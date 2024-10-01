@@ -1,12 +1,11 @@
 use proc_macro::TokenStream;
-use quote::{__private::Span, quote, ToTokens};
+use quote::{__private::Span, ToTokens, quote};
 use syn::{
-    parse_macro_input, parse_quote,
+    Data, DataEnum, DataStruct, DeriveInput, Field, Fields, GenericParam, Ident, Index, Lifetime,
+    Path, Type, Variant, Visibility, parse_macro_input, parse_quote,
     punctuated::Punctuated,
     spanned::Spanned,
-    visit_mut::{visit_lifetime_mut, VisitMut},
-    Data, DataEnum, DataStruct, DeriveInput, Field, Fields, GenericParam, Ident, Index, Lifetime,
-    Path, Type, Variant, Visibility,
+    visit_mut::{VisitMut, visit_lifetime_mut},
 };
 
 #[proc_macro_derive(Datum)]
@@ -30,7 +29,8 @@ pub fn template(input: TokenStream) -> TokenStream {
         generics,
         data: Data::Struct(DataStruct { fields, .. }),
         ..
-    } = parse_macro_input!(input as DeriveInput) else {
+    } = parse_macro_input!(input as DeriveInput)
+    else {
         return quote!(compile_error!("Enumeration and union types are not supported for this derive.");).into();
     };
     let (impl_generics, type_generics, where_clauses) = generics.split_for_impl();

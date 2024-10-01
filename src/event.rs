@@ -1,8 +1,8 @@
 use crate::{
+    Database, Datum,
     core::utility::{get_unchecked, sorted_difference, sorted_symmetric_difference_by},
     key::Key,
     table::{self, Table},
-    Database, Datum,
 };
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::{
@@ -87,9 +87,12 @@ struct Buffer<T>(VecDeque<T>, Keep);
 struct Ready {
     chunks: VecDeque<Chunk>,
     // TODO: Use something like this for messages.
-    // - Listen could provide direct references into raw which could be processed in place into another message type.
-    // - When a chunk has been seen by all, it becomes available for writes (i.e. reimplementing a queue).
-    // - Only on resize will the indices need to be adjusted. This can be observed by readers with a 'version'?
+    // - Listen could provide direct references into raw which could be processed in place into
+    //   another message type.
+    // - When a chunk has been seen by all, it becomes available for writes (i.e. reimplementing a
+    //   queue).
+    // - Only on resize will the indices need to be adjusted. This can be observed by readers with
+    //   a 'version'?
     // c: Slice<Arc<UnsafeCell<[MaybeUninit<Raw>]>>>,
     last: Option<Chunk>,
     version: usize,
@@ -307,16 +310,18 @@ impl<'a, E: Event> Listen<'a, E> {
             return true;
         }
 
-        // TODO: There should be some kind of version check with `self.pending` that would allow to return early without taking a
-        // write lock if there are no new events.
+        // TODO: There should be some kind of version check with `self.pending` that
+        // would allow to return early without taking a write lock if there are
+        // no new events.
         drop(ready);
 
         let mut ready = self.events.0.ready.write();
         let chunk = {
             let chunk = ready.last.take().unwrap_or_default();
-            // The time spent with the `pending` lock is minimized as much as possible since it may block other threads
-            // that hold database locks. The trade-off here is that the `ready` write lock may be taken in vain when `pending`
-            // has no new events.
+            // The time spent with the `pending` lock is minimized as much as possible since
+            // it may block other threads that hold database locks. The
+            // trade-off here is that the `ready` write lock may be taken in vain when
+            // `pending` has no new events.
             let mut pending = self.events.0.pending.lock();
             if pending.events.is_empty() {
                 ready.last = Some(chunk);
@@ -481,9 +486,11 @@ macro_rules! with {
             pub fn with_key(self) -> Listen<'a, $on_key> {
                 self.with()
             }
+
             pub fn with_type<D: Datum>(self) -> Listen<'a, $on_type<D>> {
                 self.with()
             }
+
             pub fn with_types(self) -> Listen<'a, $on_types> {
                 self.with()
             }
@@ -493,6 +500,7 @@ macro_rules! with {
             pub fn with_type<D: Datum>(self) -> Listen<'a, $on_key_type<D>> {
                 self.with()
             }
+
             pub fn with_types(self) -> Listen<'a, $on_key_types> {
                 self.with()
             }

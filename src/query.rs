@@ -1,4 +1,5 @@
 use crate::{
+    Database, Error,
     core::{
         iterate::FullIterator,
         utility::{fold_swap, get_unchecked, get_unchecked_mut, try_fold_swap},
@@ -7,7 +8,6 @@ use crate::{
     key::{Key, Keys},
     row::{Access, ChunkContext, InitializeContext, ItemContext, Row, ShareAccess},
     table::{Table, Tables},
-    Database, Error,
 };
 use std::{
     any::TypeId,
@@ -23,7 +23,8 @@ pub struct Query<'d, R: Row, F = (), I = Item> {
     tables: Tables<'d>,
     index: usize,
     indices: Vec<u32>,     // May be reordered (ex: by `fold_swap`).
-    states: Vec<State<R>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
+    states: Vec<State<R>>, /* Must remain sorted by `state.table.index()` for `binary_search` to
+                            * work. */
     filter: F,
     _marker: PhantomData<fn(I)>,
 }
@@ -153,9 +154,13 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
 
             if self.filter.filter(&table, self.database) {
                 // Initialize first to save some work if it fails.
-                let Ok(state) = R::initialize(InitializeContext::new(&table)) else { continue; };
+                let Ok(state) = R::initialize(InitializeContext::new(&table)) else {
+                    continue;
+                };
                 let mut locks = Vec::new();
-                let Ok(accesses) = ShareAccess::<R>::from(&self.database.resources) else { continue; };
+                let Ok(accesses) = ShareAccess::<R>::from(&self.database.resources) else {
+                    continue;
+                };
                 for &access in accesses.iter() {
                     if let Ok((index, column)) = table.column_with(access.identifier()) {
                         // No need to lock columns of size 0.
@@ -164,8 +169,9 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                         }
                     }
                 }
-                // The sorting of indices ensures that there cannot be a deadlock between `Rows` when locking multiple columns as long as this
-                // happens while holding at most 1 table lock.
+                // The sorting of indices ensures that there cannot be a deadlock between `Rows`
+                // when locking multiple columns as long as this happens while
+                // holding at most 1 table lock.
                 locks.sort_unstable_by_key(|&(index, _)| index);
 
                 let index = self.states.len() as u32;
@@ -474,7 +480,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
             };
 
             let keys = table.keys.read();
-            // The key must be checked again while holding the table lock to be sure is has not been moved/destroyed since last read.
+            // The key must be checked again while holding the table lock to be sure is has
+            // not been moved/destroyed since last read.
             let new_table = match slot.table(key) {
                 Ok(new_table) => new_table,
                 // The `key` has just been destroyed.
@@ -497,8 +504,10 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                         find(Ok(unsafe { R::item(state, context) }))
                     });
                 } else {
-                    // This is an edge case where a `Create::resolve` operation from another thread has initialized its slots but hasn't
-                    // yet commited the table count. This should be reported as if `Database::keys().get()` had failed.
+                    // This is an edge case where a `Create::resolve` operation from another thread
+                    // has initialized its slots but hasn't yet commited the
+                    // table count. This should be reported as if `Database::keys().get()` had
+                    // failed.
                     drop(keys);
                     break find(Err(Error::InvalidKey(key)));
                 }
@@ -560,7 +569,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 let pairs = unsafe { get_unchecked_mut(&mut by.sorted, index) };
                 for (key, value) in pairs.drain(..) {
                     let slot = unsafe { self.keys.get_unchecked(key) };
-                    // The key is allowed to move within its table (such as with a swap as part of a remove).
+                    // The key is allowed to move within its table (such as with a swap as part of a
+                    // remove).
                     match slot.table(key) {
                         Ok(table_index) if table.index() == table_index => {
                             let row = slot.row();
@@ -568,12 +578,15 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                                 let item = unsafe { R::item(row_state, context.with(row)) };
                                 state = fold(state, value, Ok(item));
                             } else {
-                                // This is an edge case where a `Create::resolve` operation from another thread has initialized its slots but hasn't
-                                // yet commited the table count. This should be reported as if `Database::keys().get()` had failed.
+                                // This is an edge case where a `Create::resolve` operation from
+                                // another thread has initialized its slots but hasn't
+                                // yet commited the table count. This should be reported as if
+                                // `Database::keys().get()` had failed.
                                 by.errors.push((value, Error::InvalidKey(key)));
                             }
                         }
-                        // The key has moved to another table between the last moment the slot indices were read and now.
+                        // The key has moved to another table between the last moment the slot
+                        // indices were read and now.
                         Ok(table_index) => by.pending.push((key, value, table_index)),
                         Err(error) => by.errors.push((value, error)),
                     }
@@ -634,7 +647,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 let slots = unsafe { get_unchecked_mut(&mut by.sorted, index) };
                 for (key, value) in slots.drain(..) {
                     let slot = unsafe { self.keys.get_unchecked(key) };
-                    // The key is allowed to move within its table (such as with a swap as part of a remove).
+                    // The key is allowed to move within its table (such as with a swap as part of a
+                    // remove).
                     match slot.table(key) {
                         Ok(table_index) if table.index() == table_index => {
                             let row = slot.row();
@@ -645,7 +659,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                                 by.errors.push((value, Error::InvalidKey(key)));
                             }
                         }
-                        // The key has moved to another table between the last moment the slot indices were read and now.
+                        // The key has moved to another table between the last moment the slot
+                        // indices were read and now.
                         Ok(table_index) => by.pending.push((key, value, table_index)),
                         Err(error) => by.errors.push((value, error)),
                     }
@@ -661,7 +676,8 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
         Continue(state)
     }
 
-    /// Sorts keys by state index such that table locks can be used for (hopefully) more than one key at a time.
+    /// Sorts keys by state index such that table locks can be used for
+    /// (hopefully) more than one key at a time.
     #[inline]
     fn sort<V>(
         states: &[State<R>],
@@ -864,7 +880,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
         };
         let Some(count) = NonZeroUsize::new(table.count()) else {
             drop(keys);
-            return find(Err(Error::InvalidKey(key)))
+            return find(Err(Error::InvalidKey(key)));
         };
         let row = slot.row();
         if row < count.get() && keys.get(row) == Some(&key) {

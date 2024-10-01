@@ -1,30 +1,32 @@
-use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
-
 use crate::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
+    Database, Error,
+    core::utility::{ONE, fold_swap, get_unchecked, get_unchecked_mut},
     event::Events,
     filter::Filter,
     key::{Key, Keys},
     table::{self, Column, Table, Tables},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
-    Database, Error,
 };
+use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
     collections::HashMap,
     marker::PhantomData,
     mem::MaybeUninit,
     num::NonZeroUsize,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 
-/// Adds template `A` and removes template `R` to accumulated keys that satisfy the filter `F`.
+/// Adds template `A` and removes template `R` to accumulated keys that satisfy
+/// the filter `F`.
 pub struct Modify<'d, A: Template, R: Template, F = ()> {
     database: &'d Database,
     keys: Keys<'d>,
     events: Events<'d>,
-    pairs: HashMap<Key, MaybeUninit<A>>, // A `HashMap` is used because the move algorithm assumes that rows will be unique.
-    indices: Vec<usize>,                 // May be reordered (ex: by `fold_swap`).
-    states: Vec<Result<State<A>, u32>>, // Must remain sorted by `state.source.index()` for `binary_search` to work.
+    pairs: HashMap<Key, MaybeUninit<A>>, /* A `HashMap` is used because the move algorithm
+                                          * assumes that rows will be unique. */
+    indices: Vec<usize>,                // May be reordered (ex: by `fold_swap`).
+    states: Vec<Result<State<A>, u32>>, /* Must remain sorted by `state.source.index()` for
+                                         * `binary_search` to work. */
     pending: Vec<(Key, A, u32)>,
     moves: Vec<(usize, usize, NonZeroUsize)>,
     copies: Vec<(usize, usize, NonZeroUsize)>,
@@ -32,7 +34,8 @@ pub struct Modify<'d, A: Template, R: Template, F = ()> {
     _marker: PhantomData<fn(R)>,
 }
 
-/// Adds template `A` and removes template `R` to all keys in tables that satisfy the filter `F`.
+/// Adds template `A` and removes template `R` to all keys in tables that
+/// satisfy the filter `F`.
 pub struct ModifyAll<'d, A: Template, R: Template, F = ()> {
     database: &'d Database,
     tables: Tables<'d>,
@@ -77,7 +80,8 @@ struct ShareTable<A: Template, R: Template> {
 
 impl Database {
     pub fn modify<A: Template, R: Template>(&self) -> Result<Modify<A, R>, Error> {
-        // Validate metas here (no duplicates allowed), but there is no need to store them.
+        // Validate metas here (no duplicates allowed), but there is no need to store
+        // them.
         ShareMeta::<(A, R)>::from(self).map(|_| Modify {
             database: self,
             keys: self.keys(),
@@ -94,7 +98,8 @@ impl Database {
     }
 
     pub fn modify_all<A: Template, R: Template>(&self) -> Result<ModifyAll<A, R>, Error> {
-        // Validate metas here (no duplicates allowed), but there is no need to store them.
+        // Validate metas here (no duplicates allowed), but there is no need to store
+        // them.
         ShareMeta::<(A, R)>::from(self).map(|_| ModifyAll {
             database: self,
             tables: self.tables(),
@@ -303,7 +308,8 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
                     pending,
                 );
                 let Some(count) = NonZeroUsize::new(state.rows.len()) else {
-                    // Happens if all keys from this table have been moved or destroyed between here and the sorting.
+                    // Happens if all keys from this table have been moved or destroyed between here
+                    // and the sorting.
                     return Ok(sum);
                 };
                 move_to(
@@ -605,7 +611,8 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
             keys,
         );
 
-        // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
+        // SAFETY: Since this row is not yet observable by any thread but this one,
+        // bypass locks.
         let context = ApplyContext::new(&state.target, &target);
         for i in 0..count.get() {
             unsafe { with().apply(&state.inner.state, context.with(start + i)) };
@@ -615,14 +622,16 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
             .target
             .count
             .fetch_add(count.get() as _, Ordering::Release);
-        // Slots must be updated after the table `fetch_add` to prevent a `query::find` to be able to observe a row which
-        // has an index greater than the `table.count()`. As long as the slots remain in the source table, all accesses
-        // to these keys will block at the table access and will correct their table index after they acquire the source
-        // table lock.
+        // Slots must be updated after the table `fetch_add` to prevent a `query::find`
+        // to be able to observe a row which has an index greater than the
+        // `table.count()`. As long as the slots remain in the source table, all
+        // accesses to these keys will block at the table access and will
+        // correct their table index after they acquire the source table lock.
         keys.initialize_all(&target, state.target.index(), start..start + count.get());
         drop(source);
-        // Although `source` has been dropped, coherence with be maintained since the `target` lock prevent the keys
-        // moving again before `on_remove` is done.
+        // Although `source` has been dropped, coherence with be maintained since the
+        // `target` lock prevent the keys moving again before `on_remove` is
+        // done.
         events.emit_modify(
             &target[start..start + count.get()],
             (&state.source, &state.target),
@@ -724,7 +733,8 @@ fn move_to<'d, 'a, V, A: Template>(
     let (low, high) = (range.start, range.end);
 
     if range.len() == count.get() {
-        // Fast path. The move range is contiguous. Copy everything from source to target at once.
+        // Fast path. The move range is contiguous. Copy everything from source to
+        // target at once.
         copies.push((low, start, count));
 
         let over = high.saturating_sub(head);
@@ -750,8 +760,8 @@ fn move_to<'d, 'a, V, A: Template>(
     }
 
     {
-        // Target keys can be copied over without requiring the `source_keys` write lock since the range `start..start + count` is
-        // reserved to this operation.
+        // Target keys can be copied over without requiring the `source_keys` write lock
+        // since the range `start..start + count` is reserved to this operation.
         let target_keys =
             unsafe { &mut *RwLockUpgradableReadGuard::rwlock(&target_keys).data_ptr() };
         for &(source, target, count) in copies.iter() {
@@ -770,25 +780,28 @@ fn move_to<'d, 'a, V, A: Template>(
     );
 
     // Initialize missing data `T` in target.
-    // SAFETY: Since this row is not yet observable by any thread but this one, bypass locks.
+    // SAFETY: Since this row is not yet observable by any thread but this one,
+    // bypass locks.
     let context = ApplyContext::new(target_table, &target_keys);
     for (i, template) in templates.drain(..).enumerate() {
         unsafe { template.apply(&inner.state, context.with(start + i)) };
     }
     source_table.count.fetch_sub(count.get(), Ordering::Release);
     target_table.count.fetch_add(count.get(), Ordering::Release);
-    // Slots must be updated after the table `fetch_add` to prevent a `query::find` to be able to observe a row which
-    // has an index greater than the `table.count()`. As long as the slots remain in the source table, all accesses
-    // to these keys will block at the table access and will correct their table index after they acquire the source
-    // table lock.
+    // Slots must be updated after the table `fetch_add` to prevent a `query::find`
+    // to be able to observe a row which has an index greater than the
+    // `table.count()`. As long as the slots remain in the source table, all
+    // accesses to these keys will block at the table access and will correct
+    // their table index after they acquire the source table lock.
     keys.initialize_all(
         &target_keys,
         target_table.index(),
         start..start + count.get(),
     );
     drop(source_keys);
-    // Although `source_keys` has been dropped, coherence will be maintained since the `target` lock prevents the keys from
-    // moving again before `emit` is done.
+    // Although `source_keys` has been dropped, coherence will be maintained since
+    // the `target` lock prevents the keys from moving again before `emit` is
+    // done.
     events.emit_modify(
         &target_keys[start..start + count.get()],
         (source_table, target_table),
@@ -799,8 +812,9 @@ fn move_to<'d, 'a, V, A: Template>(
     moves.clear();
 }
 
-/// SAFETY: Since a write lock is held over the `source_keys`, it is guaranteed that there is no reader/writer in
-/// the columns, so there is no need to take column locks.
+/// SAFETY: Since a write lock is held over the `source_keys`, it is guaranteed
+/// that there is no reader/writer in the columns, so there is no need to take
+/// column locks.
 fn resolve_copy_move(
     (source_keys, source_table): (&mut [Key], &Table),
     target_table: &Table,

@@ -1,8 +1,8 @@
 use crate::{
+    Database, Datum, Error, Meta,
     core::{tuple::tuples, utility::get_unchecked},
     key::Key,
     table::Table,
-    Database, Datum, Error, Meta,
 };
 use std::{marker::PhantomData, sync::Arc};
 
@@ -15,8 +15,9 @@ pub unsafe trait Template: 'static {
     type State: Send + Sync;
     fn declare(context: DeclareContext) -> Result<(), Error>;
     fn initialize(context: InitializeContext) -> Result<Self::State, Error>;
-    /// SAFETY: All proper column locks have to be held at the time of calling this method. Also, the index carried by
-    /// `ApplyContext` must be properly valid in every columns.
+    /// SAFETY: All proper column locks have to be held at the time of calling
+    /// this method. Also, the index carried by `ApplyContext` must be
+    /// properly valid in every columns.
     unsafe fn apply(self, state: &Self::State, context: ApplyContext);
 }
 
@@ -128,9 +129,11 @@ unsafe impl<T: 'static> Template for PhantomData<T> {
     fn declare(_: DeclareContext) -> Result<(), Error> {
         Ok(())
     }
+
     fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
         Ok(())
     }
+
     #[inline]
     unsafe fn apply(self, _: &Self::State, _: ApplyContext) {}
 }
@@ -171,9 +174,11 @@ unsafe impl<T: Template, F: FnOnce(Key) -> T + 'static> Template for With<T, F> 
     fn declare(context: DeclareContext) -> Result<(), Error> {
         T::declare(context)
     }
+
     fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
         T::initialize(context)
     }
+
     #[inline]
     unsafe fn apply(self, state: &Self::State, context: ApplyContext) {
         self.0(context.key()).apply(state, context)

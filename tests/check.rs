@@ -166,10 +166,12 @@ fn run(
         if resolve {
             let resolved = create.resolve();
             prove!(keys.len() <= resolved)?;
-            prove!(database
-                .keys()
-                .get_all(keys.iter().copied())
-                .all(|(_, slot)| slot.is_ok()))?;
+            prove!(
+                database
+                    .keys()
+                    .get_all(keys.iter().copied())
+                    .all(|(_, slot)| slot.is_ok())
+            )?;
             prove!(query.count_by(&by) == count)?;
             for &key in keys.iter() {
                 prove!(database.keys().get(key).is_ok())?;

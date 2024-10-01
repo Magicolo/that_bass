@@ -35,12 +35,16 @@ fn query_is_some_remain_destroy_all() -> Result<(), Error> {
     let keys = create_n(&database, [(); COUNT])?;
     destroy_all(&database, &keys[..COUNT / 2]);
     let mut query = database.query::<()>()?;
-    assert!(keys[..COUNT / 2]
-        .iter()
-        .all(|&key| query.find(key, |_| {}).is_err()));
-    assert!(keys[COUNT / 2..]
-        .iter()
-        .all(|&key| query.find(key, |_| {}).is_ok()));
+    assert!(
+        keys[..COUNT / 2]
+            .iter()
+            .all(|&key| query.find(key, |_| {}).is_err())
+    );
+    assert!(
+        keys[COUNT / 2..]
+            .iter()
+            .all(|&key| query.find(key, |_| {}).is_ok())
+    );
     Ok(())
 }
 
@@ -142,10 +146,12 @@ fn query_split_item_on_multiple_threads() -> Result<(), Error> {
     create_n(&database, [(A, B(0), C(0.0)); COUNT * 4])?;
     let mut query = database.query::<&mut C>()?;
     assert_eq!(query.split().len(), 4);
-    assert!(query
-        .split()
-        .enumerate()
-        .all(|(i, split)| split.count() == (i + 1) * COUNT));
+    assert!(
+        query
+            .split()
+            .enumerate()
+            .all(|(i, split)| split.count() == (i + 1) * COUNT)
+    );
 
     scope(|scope| {
         for (i, split) in query.split().enumerate() {

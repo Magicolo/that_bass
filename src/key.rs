@@ -1,16 +1,16 @@
 use crate::{
+    Database, Error,
     core::{
         utility::get_unchecked,
         view_vec::{self, ViewVec},
     },
-    Database, Error,
 };
 use parking_lot::RwLock;
 use std::{
     ops::Range,
     sync::{
-        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::*},
         Arc,
+        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::*},
     },
 };
 
@@ -170,15 +170,17 @@ impl<'d> Keys<'d> {
         if done < keys.len() {
             let keys = &mut keys[done..];
             let slots = self.1.extend(keys.iter().map(|_| Slot::default().into()));
-            // Since all indices use `u32` for compactness, this index must remain under `u32::MAX`.
-            // Note that 'u32::MAX' is used as a sentinel so it must be an invalid entity index.
+            // Since all indices use `u32` for compactness, this index must remain under
+            // `u32::MAX`. Note that 'u32::MAX' is used as a sentinel so it must
+            // be an invalid entity index.
             assert!(slots.len() < u32::MAX as _);
             let index = slots.len() - keys.len();
             for (i, key) in keys.iter_mut().enumerate() {
                 *key = Key::new((index + i) as u32);
             }
         } else {
-            // Other parts of the code want to be able to assume that calling `reserve` updates the guard held in `self`.
+            // Other parts of the code want to be able to assume that calling `reserve`
+            // updates the guard held in `self`.
             self.1.update();
         }
     }
@@ -208,14 +210,16 @@ impl<'d> Keys<'d> {
         }
     }
 
-    /// Assumes that the keys have had their `Slot` released and that keys are release only once.
+    /// Assumes that the keys have had their `Slot` released and that keys are
+    /// release only once.
     pub(crate) fn recycle_all(&self, keys: impl IntoIterator<Item = Key>) {
         let mut free_write = self.0.free.write();
         let (free_keys, free_count) = &mut *free_write;
         free_keys.truncate((*free_count.get_mut()).max(0) as _);
 
         for mut key in keys {
-            // If the key reached generation `u32::MAX`, its index is discarded which results in a dead `Slot`.
+            // If the key reached generation `u32::MAX`, its index is discarded which
+            // results in a dead `Slot`.
             if key.increment() {
                 free_keys.push(key);
             }

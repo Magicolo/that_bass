@@ -1,9 +1,9 @@
 use crate::{
+    Datum, Error,
     core::{tuple::tuples, utility::get_unchecked},
     key::Key,
     resources::Resources,
     table::Table,
-    Datum, Error,
 };
 use std::{any::TypeId, collections::HashSet, marker::PhantomData, num::NonZeroUsize, sync::Arc};
 
@@ -226,22 +226,26 @@ impl<R: Row> ShareAccess<R> {
 }
 
 unsafe impl Row for Key {
-    type State = ();
-    type Read = Self;
-    type Item<'a> = Key;
     type Chunk<'a> = &'a [Key];
+    type Item<'a> = Key;
+    type Read = Self;
+    type State = ();
 
     fn declare(_: DeclareContext) -> Result<(), Error> {
         Ok(())
     }
+
     fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
         Ok(())
     }
+
     fn read(_: &Self::State) -> <Self::Read as Row>::State {}
+
     #[inline]
     unsafe fn item<'a>(_: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         context.key()
     }
+
     #[inline]
     unsafe fn chunk<'a>(_: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         context.keys()
@@ -249,22 +253,26 @@ unsafe impl Row for Key {
 }
 
 unsafe impl Row for Table {
-    type State = ();
-    type Read = ();
-    type Item<'a> = &'a Self;
     type Chunk<'a> = &'a Self;
+    type Item<'a> = &'a Self;
+    type Read = ();
+    type State = ();
 
     fn declare(_: DeclareContext) -> Result<(), Error> {
         Ok(())
     }
+
     fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
         Ok(())
     }
+
     fn read(_: &Self::State) -> <Self::Read as Row>::State {}
+
     #[inline]
     unsafe fn item<'a>(_: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         context.table()
     }
+
     #[inline]
     unsafe fn chunk<'a>(_: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         context.table()
@@ -272,24 +280,28 @@ unsafe impl Row for Table {
 }
 
 unsafe impl<D: Datum> Row for &'static D {
-    type State = Read<D>;
-    type Read = Self;
-    type Item<'a> = &'a D;
     type Chunk<'a> = &'a [D];
+    type Item<'a> = &'a D;
+    type Read = Self;
+    type State = Read<D>;
 
     fn declare(mut context: DeclareContext) -> Result<(), Error> {
         context.read::<D>()
     }
+
     fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
         context.read::<D>()
     }
+
     fn read(state: &Self::State) -> <Self::Read as Row>::State {
         state.clone()
     }
+
     #[inline]
     unsafe fn item<'a>(state: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         context.read(state)
     }
+
     #[inline]
     unsafe fn chunk<'a>(state: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         context.read(state)
@@ -297,24 +309,28 @@ unsafe impl<D: Datum> Row for &'static D {
 }
 
 unsafe impl<D: Datum> Row for &'static mut D {
-    type State = Write<D>;
-    type Read = &'static D;
-    type Item<'a> = &'a mut D;
     type Chunk<'a> = &'a mut [D];
+    type Item<'a> = &'a mut D;
+    type Read = &'static D;
+    type State = Write<D>;
 
     fn declare(mut context: DeclareContext) -> Result<(), Error> {
         context.write::<D>()
     }
+
     fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
         context.write::<D>()
     }
+
     fn read(state: &Self::State) -> <Self::Read as Row>::State {
         state.read()
     }
+
     #[inline]
     unsafe fn item<'a>(state: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         context.write(state)
     }
+
     #[inline]
     unsafe fn chunk<'a>(state: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         context.write(state)
@@ -322,43 +338,51 @@ unsafe impl<D: Datum> Row for &'static mut D {
 }
 
 unsafe impl<T: 'static> Row for PhantomData<T> {
-    type State = ();
-    type Read = Self;
-    type Item<'a> = ();
     type Chunk<'a> = ();
+    type Item<'a> = ();
+    type Read = Self;
+    type State = ();
 
     fn declare(_: DeclareContext) -> Result<(), Error> {
         Ok(())
     }
+
     fn initialize(_: InitializeContext) -> Result<Self::State, Error> {
         Ok(())
     }
+
     fn read(_: &Self::State) -> <Self::Read as Row>::State {}
+
     #[inline]
     unsafe fn item<'a>(_: &'a Self::State, _: ItemContext<'a>) -> Self::Item<'a> {}
+
     #[inline]
     unsafe fn chunk<'a>(_: &'a Self::State, _: ChunkContext<'a>) -> Self::Chunk<'a> {}
 }
 
 unsafe impl<R: Row> Row for Option<R> {
-    type State = Option<R::State>;
-    type Read = Option<R::Read>;
-    type Item<'a> = Option<R::Item<'a>>;
     type Chunk<'a> = Option<R::Chunk<'a>>;
+    type Item<'a> = Option<R::Item<'a>>;
+    type Read = Option<R::Read>;
+    type State = Option<R::State>;
 
     fn declare(context: DeclareContext) -> Result<(), Error> {
         R::declare(context)
     }
+
     fn initialize(context: InitializeContext) -> Result<Self::State, Error> {
         Ok(R::initialize(context).ok())
     }
+
     fn read(state: &Self::State) -> <Self::Read as Row>::State {
         Some(R::read(state.as_ref()?))
     }
+
     #[inline]
     unsafe fn item<'a>(state: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a> {
         Some(R::item(state.as_ref()?, context))
     }
+
     #[inline]
     unsafe fn chunk<'a>(state: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a> {
         Some(R::chunk(state.as_ref()?, context))
@@ -367,6 +391,7 @@ unsafe impl<R: Row> Row for Option<R> {
 
 macro_rules! tuple {
     ($n:ident, $c:expr $(, $p:ident, $t:ident, $i:tt)*) => {
+        #[allow(clippy::unused_unit)]
         unsafe impl<$($t: Row,)*> Row for ($($t,)*) {
             type State = ($($t::State,)*);
             type Read = ($($t::Read,)*);

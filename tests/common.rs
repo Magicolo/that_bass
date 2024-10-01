@@ -1,17 +1,15 @@
-pub use checkito::{any::Unify, prove, same::Same, FullGenerate, Generate};
+pub use checkito::{FullGenerate, Generate, any::Unify, prove, same::Same};
 pub use std::{any::TypeId, collections::HashSet, error, marker::PhantomData, thread::scope};
 pub use that_bass::{
+    Database, Datum, Error, Filter, Template,
     create::Create,
     destroy::Destroy,
-    filter::has,
-    filter::{Any, Filter, Has, Is, Not},
+    filter::{Any, Filter, Has, Is, Not, has},
     key::Key,
     modify::{Add, Remove},
-    query::By,
-    query::Query,
+    query::{By, Query},
     row::Row,
     template::Template,
-    Database, Datum, Error, Filter, Template,
 };
 
 #[derive(Debug, Clone, Copy, Default, Datum)]

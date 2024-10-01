@@ -18,12 +18,12 @@ use parking_lot::Mutex;
 use resources::Resources;
 use std::{
     alloc::{Layout, LayoutError},
-    any::{type_name, TypeId},
+    any::{TypeId, type_name},
     collections::BTreeMap,
     error, fmt,
     mem::{needs_drop, size_of},
     num::NonZeroUsize,
-    ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
+    ptr::{NonNull, copy, drop_in_place, slice_from_raw_parts_mut},
 };
 pub use that_base_derive::{Datum, Filter, Template};
 
@@ -488,8 +488,8 @@ impl Default for Database {
 //                 pair("Mass", vec![Node::from(0.0)]),
 //             ]),
 //             destroy(Key::NULL),
-//             modify(Key::NULL, vec![pair("Position", pair("x", increment(5.0)))]),
-//         ]);
+//             modify(Key::NULL, vec![pair("Position", pair("x",
+// increment(5.0)))]),         ]);
 //     }
 
 //     fn position() -> &'static Meta {
@@ -509,8 +509,8 @@ impl Default for Database {
 //     struct Field {
 //         offset: usize,
 //         name: String,
-//         meta: LazyLock<&'static Meta, Box<dyn FnOnce() -> &'static Meta + Send + Sync + 'static>>,
-//     }
+//         meta: LazyLock<&'static Meta, Box<dyn FnOnce() -> &'static Meta +
+// Send + Sync + 'static>>,     }
 
 //     struct Meta {
 //         index: usize,
@@ -529,9 +529,9 @@ impl Default for Database {
 //             if self.layout.size() == 0 {
 //                 self.layout.dangling().cast()
 //             } else {
-//                 let (layout, _) = self.layout.repeat(capacity).unwrap_unchecked();
-//                 NonNull::new_unchecked(alloc(layout).cast())
-//             }
+//                 let (layout, _) =
+// self.layout.repeat(capacity).unwrap_unchecked();                 
+// NonNull::new_unchecked(alloc(layout).cast())             }
 //         }
 
 //         pub unsafe fn copy(
@@ -556,9 +556,9 @@ impl Default for Database {
 //         }
 
 //         pub unsafe fn free(&self, data: NonNull<u8>, capacity: usize) {
-//             let (layout, _) = self.layout.repeat(capacity).unwrap_unchecked();
-//             dealloc(data.as_ptr().cast(), layout)
-//         }
+//             let (layout, _) =
+// self.layout.repeat(capacity).unwrap_unchecked();             
+// dealloc(data.as_ptr().cast(), layout)         }
 //     }
 
 //     fn field(
@@ -572,7 +572,8 @@ impl Default for Database {
 //         }
 //     }
 
-//     static REGISTRY: RwLock<BTreeMap<String, &'static Meta>> = RwLock::new(BTreeMap::new());
+//     static REGISTRY: RwLock<BTreeMap<String, &'static Meta>> =
+// RwLock::new(BTreeMap::new());
 
 //     fn r#static<T: 'static>() -> &'static Meta {
 //         let name = type_name::<T>().to_string();
@@ -592,8 +593,8 @@ impl Default for Database {
 //         })
 //     }
 
-//     fn dynamic(name: impl Into<String>, fields: impl IntoIterator<Item = Field>) -> &'static Meta {
-//         let name = name.into();
+//     fn dynamic(name: impl Into<String>, fields: impl IntoIterator<Item =
+// Field>) -> &'static Meta {         let name = name.into();
 //         if let Some(meta) = REGISTRY.read().get(&name) {
 //             return meta;
 //         }
@@ -626,19 +627,30 @@ impl Default for Database {
 
 //     /*
 //         TODO: Have the events by stored by table.
-//         - Listeners would pull events from their eligible tables (ex: `OnAdd<T>` would only pull from tables where `table.has::<T>()`).
-//         - PRO: Allows using `Filter` to pull only events from filtered tables.
-//         - PRO: Much more granular `create/destroy/modify` counters to turn on/off event collection.
-//         - PRO: `fold_swap` can be used to pull events rather than blocking on a single mutex.
-//         - CON: Adds a fair amount of complexity and many atomic operations which may not be necessary if contention is not an issue in
+//         - Listeners would pull events from their eligible tables (ex:
+//           `OnAdd<T>` would only pull from tables where `table.has::<T>()`).
+//         - PRO: Allows using `Filter` to pull only events from filtered
+//           tables.
+//         - PRO: Much more granular `create/destroy/modify` counters to turn
+//           on/off event collection.
+//         - PRO: `fold_swap` can be used to pull events rather than blocking on
+//           a single mutex.
+//         - CON: Adds a fair amount of complexity and many atomic operations
+//           which may not be necessary if contention is not an issue in
 //         the first place.
-//         - Listen pulls will need to be very quick (probably a `swap`) such that they hold the lock for a very short time.
-//         - All table operations will not contend on the same mutex; in fact they will only contend on listeners since only one table
-//         operation can (currently) take place at a time (guaranteed by the upgradable lock held during these operations).
+//         - Listen pulls will need to be very quick (probably a `swap`) such
+//           that they hold the lock for a very short time.
+//         - All table operations will not contend on the same mutex; in fact
+//           they will only contend on listeners since only one table
+//         operation can (currently) take place at a time (guaranteed by the
+// upgradable lock held during these operations).
 //         - Events will be ordered within a table.
-//         - To get a global ordering of events, a global atomic counter will need to be used.
-//         - Tables will need to initialize their event collection counter with `Events` when created.
-//         - `Events` will need to maintain a `Vec<Box<dyn Fn(&Table)>>` which initialize a newly created table's event counters.
+//         - To get a global ordering of events, a global atomic counter will
+//           need to be used.
+//         - Tables will need to initialize their event collection counter with
+//           `Events` when created.
+//         - `Events` will need to maintain a `Vec<Box<dyn Fn(&Table)>>` which
+//           initialize a newly created table's event counters.
 //     */
 //     struct TableEvents {
 //         index: u32,
@@ -666,8 +678,8 @@ impl Default for Database {
 //             |_, collect, index| {
 //                 let index = *index as usize;
 //                 let table = unsafe { get_unchecked(tables, index) };
-//                 let Some(events) = table.events.try_read() else { return Err(()); };
-//                 Ok(extend(collect, &events))
+//                 let Some(events) = table.events.try_read() else { return
+// Err(()); };                 Ok(extend(collect, &events))
 //             },
 //             |_, collect, index| {
 //                 let index = *index as usize;
@@ -689,9 +701,10 @@ impl Default for Database {
 //         }
 
 //         #[inline]
-//         fn extend(collect: &mut (Vec<TableRaw>, Vec<Key>), events: &(Vec<TableRaw>, Vec<Key>)) {
-//             collect.0.extend(events.0.iter().map(|&(mut event)| {
-//                 event.1.index = event.1.index.saturating_add(collect.1.len() as _);
+//         fn extend(collect: &mut (Vec<TableRaw>, Vec<Key>), events:
+// &(Vec<TableRaw>, Vec<Key>)) {             
+// collect.0.extend(events.0.iter().map(|&(mut event)| {                 
+// event.1.index = event.1.index.saturating_add(collect.1.len() as _);
 //                 event
 //             }));
 //             collect.1.extend_from_slice(&events.1);
@@ -732,9 +745,9 @@ impl Default for Database {
 //             }
 //         }
 
-//         fn get_keys<'a>(event: &TableRaw, keys: &'a [Key]) -> Option<&'a [Key]> {
-//             keys.get(event.1.index as usize..(event.1.index + event.1.count) as usize)
-//         }
+//         fn get_keys<'a>(event: &TableRaw, keys: &'a [Key]) -> Option<&'a
+// [Key]> {             keys.get(event.1.index as usize..(event.1.index +
+// event.1.count) as usize)         }
 
 //         fn history<'a>(
 //             key: Key,
@@ -760,8 +773,8 @@ impl Default for Database {
 //     impl Item for () {}
 //     impl<I1: Item> Item for (I1,) {}
 //     impl<I1: Item, I2: Item + Allow<I1>> Item for (I1, I2) {}
-//     impl<I1: Item, I2: Item + Allow<I1>, I3: Item + Allow<I1> + Allow<I2>> Item for (I1, I2, I3) {}
-//     impl Datum for bool {}
+//     impl<I1: Item, I2: Item + Allow<I1>, I3: Item + Allow<I1> + Allow<I2>>
+// Item for (I1, I2, I3) {}     impl Datum for bool {}
 //     impl Datum for char {}
 
 //     pub auto trait Safe {}
@@ -776,7 +789,8 @@ impl Default for Database {
 //     impl<U> Allow<U> for () {}
 //     impl<T1, U: Allow<T1>> Allow<U> for (T1,) {}
 //     impl<T1, T2, U: Allow<T1> + Allow<T2>> Allow<U> for (T1, T2) {}
-//     impl<T1, T2, T3, U: Allow<T1> + Allow<T2> + Allow<T3>> Allow<U> for (T1, T2, T3) {}
+//     impl<T1, T2, T3, U: Allow<T1> + Allow<T2> + Allow<T3>> Allow<U> for (T1,
+// T2, T3) {}
 
 //     struct Query<I: Item>(PhantomData<I>);
 //     impl<I: Item, U: Allow<I>> Allow<U> for Query<I> {}
@@ -785,8 +799,8 @@ impl Default for Database {
 //             todo!()
 //         }
 //         pub fn each(&mut self, each: impl FnMut(I) + 'static) {}
-//         pub fn each_with<S: Allow<I>>(&mut self, state: S, each: impl FnMut(I, S) + 'static) {}
-//     }
+//         pub fn each_with<S: Allow<I>>(&mut self, state: S, each: impl
+// FnMut(I, S) + 'static) {}     }
 
 //     fn boba<T, U>(a: T, b: U)
 //     where
@@ -877,14 +891,14 @@ impl Default for Database {
 //             let chunks = self.chunks.load(Acquire);
 //             let chunk = unsafe { &**chunks.add(chunk as usize) };
 //             self.decrement_use(count - 1);
-//             Some(unsafe { get_unchecked(chunk, item as usize).assume_init_ref() })
-//         }
+//             Some(unsafe { get_unchecked(chunk, item as
+// usize).assume_init_ref() })         }
 
 //         pub fn push(&self, item: T) {
-//             let (mut count, ended, begun) = decompose_count(self.count.fetch_add(1, AcqRel));
-//             let index = count + ended as u32 + begun as u32;
-//             let (mut old_count, _) = decompose_index(count);
-//             let new_count = decompose_index(index);
+//             let (mut count, ended, begun) =
+// decompose_count(self.count.fetch_add(1, AcqRel));             let index =
+// count + ended as u32 + begun as u32;             let (mut old_count, _) =
+// decompose_index(count);             let new_count = decompose_index(index);
 //             self.increment_use(old_count);
 //             let mut old_chunks = self.chunks.load(Acquire);
 
@@ -892,43 +906,43 @@ impl Default for Database {
 //             if old_count < new_count.0 {
 //                 // TODO: Re-read the count here? In a loop?
 //                 let new_chunks = {
-//                     let mut chunks = Vec::with_capacity(new_count.0 as usize);
-//                     let new_chunks = chunks.as_mut_ptr();
-//                     unsafe { copy_nonoverlapping(old_chunks, new_chunks, old_count as usize) };
-//                     forget(chunks);
+//                     let mut chunks = Vec::with_capacity(new_count.0 as
+// usize);                     let new_chunks = chunks.as_mut_ptr();
+//                     unsafe { copy_nonoverlapping(old_chunks, new_chunks,
+// old_count as usize) };                     forget(chunks);
 //                     new_chunks
 //                 };
 
 //                 match self
 //                     .chunks
-//                     .compare_exchange(old_chunks, new_chunks, AcqRel, Acquire)
-//                 {
+//                     .compare_exchange(old_chunks, new_chunks, AcqRel,
+// Acquire)                 {
 //                     Ok(chunks) => {
-//                         let chunk = Box::new([(); CHUNK].map(|_| MaybeUninit::<T>::uninit()));
-//                         unsafe { new_chunks.add(old_count as usize).write(chunk) };
-//                         // It should be extremely unlikely that this call returns `true`.
-//                         self.try_free(old_count, old_chunks);
-//                         old_chunks = chunks;
-//                     }
+//                         let chunk = Box::new([(); CHUNK].map(|_|
+// MaybeUninit::<T>::uninit()));                         unsafe {
+// new_chunks.add(old_count as usize).write(chunk) };                         //
+// It should be extremely unlikely that this call returns `true`.               
+// self.try_free(old_count, old_chunks);                         old_chunks =
+// chunks;                     }
 //                     Err(chunks) => {
 //                         // Another thread won the race; free this allocation.
-//                         drop(unsafe { Vec::from_raw_parts(new_chunks, 0, new_count.0 as usize) });
-//                         old_chunks = chunks;
+//                         drop(unsafe { Vec::from_raw_parts(new_chunks, 0,
+// new_count.0 as usize) });                         old_chunks = chunks;
 //                     }
 //                 }
 //                 (count, _, _) = decompose_count(self.count.load(Acquire));
 //                 (old_count, _) = decompose_index(count);
 //             }
 
-//             let chunk = unsafe { &mut **old_chunks.add(new_count.0 as usize) };
-//             self.decrement_use(old_count - 1);
+//             let chunk = unsafe { &mut **old_chunks.add(new_count.0 as usize)
+// };             self.decrement_use(old_count - 1);
 //             let item = MaybeUninit::new(item);
-//             unsafe { chunk.as_mut_ptr().add(new_count.1 as usize).write(item) };
-//             let result = self.count.fetch_update(AcqRel, Acquire, |count| {
-//                 let (count, ended, begun) = decompose_count(count);
+//             unsafe { chunk.as_mut_ptr().add(new_count.1 as usize).write(item)
+// };             let result = self.count.fetch_update(AcqRel, Acquire, |count|
+// {                 let (count, ended, begun) = decompose_count(count);
 //                 Some(if begun == 1 {
-//                     recompose_count(count + ended as u32 + begun as u32, 0, 0)
-//                 } else {
+//                     recompose_count(count + ended as u32 + begun as u32, 0,
+// 0)                 } else {
 //                     debug_assert!(begun > 1);
 //                     recompose_count(count, ended + 1, begun - 1)
 //                 })
@@ -951,13 +965,13 @@ impl Default for Database {
 //         }
 
 //         #[inline]
-//         fn try_free(&self, count: u32, swap: *mut Box<[MaybeUninit<T>; CHUNK]>) -> bool {
-//             let pending = self.pending.swap(swap, AcqRel);
+//         fn try_free(&self, count: u32, swap: *mut Box<[MaybeUninit<T>;
+// CHUNK]>) -> bool {             let pending = self.pending.swap(swap, AcqRel);
 //             if pending.is_null() {
 //                 false
 //             } else {
-//                 drop(unsafe { Vec::from_raw_parts(pending, 0, count as usize) });
-//                 true
+//                 drop(unsafe { Vec::from_raw_parts(pending, 0, count as usize)
+// });                 true
 //             }
 //         }
 //     }

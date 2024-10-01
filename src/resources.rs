@@ -1,3 +1,4 @@
+use crate::{Database, Error};
 use parking_lot::Mutex;
 use std::{
     any::{Any, TypeId},
@@ -8,8 +9,6 @@ use std::{
     sync::Arc,
     thread::{self, ThreadId},
 };
-
-use crate::{Database, Error};
 
 pub struct Resources {
     locals: Mutex<Locals>,

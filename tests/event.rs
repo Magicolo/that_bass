@@ -29,13 +29,15 @@ fn broadcast_on_add() -> Result<(), Error> {
         assert_eq!(add.resolve(), i);
         assert!((&mut on_add1).map(|e| e.key).eq(keys.iter().copied()));
         assert!(on_add4.map(|e| e.key).eq(keys.iter().copied()));
-        assert!(database
-            .events()
-            .on_add()
-            .with_key()
-            .with_type::<A>()
-            .next()
-            .is_none());
+        assert!(
+            database
+                .events()
+                .on_add()
+                .with_key()
+                .with_type::<A>()
+                .next()
+                .is_none()
+        );
 
         if i % 13 == 0 {
             on_add3.clear();
