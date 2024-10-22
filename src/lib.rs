@@ -530,7 +530,7 @@ impl Default for Database {
 //                 self.layout.dangling().cast()
 //             } else {
 //                 let (layout, _) =
-// self.layout.repeat(capacity).unwrap_unchecked();                 
+// self.layout.repeat(capacity).unwrap_unchecked();
 // NonNull::new_unchecked(alloc(layout).cast())             }
 //         }
 
@@ -557,7 +557,7 @@ impl Default for Database {
 
 //         pub unsafe fn free(&self, data: NonNull<u8>, capacity: usize) {
 //             let (layout, _) =
-// self.layout.repeat(capacity).unwrap_unchecked();             
+// self.layout.repeat(capacity).unwrap_unchecked();
 // dealloc(data.as_ptr().cast(), layout)         }
 //     }
 
@@ -702,8 +702,8 @@ impl Default for Database {
 
 //         #[inline]
 //         fn extend(collect: &mut (Vec<TableRaw>, Vec<Key>), events:
-// &(Vec<TableRaw>, Vec<Key>)) {             
-// collect.0.extend(events.0.iter().map(|&(mut event)| {                 
+// &(Vec<TableRaw>, Vec<Key>)) {
+// collect.0.extend(events.0.iter().map(|&(mut event)| {
 // event.1.index = event.1.index.saturating_add(collect.1.len() as _);
 //                 event
 //             }));
@@ -921,7 +921,7 @@ impl Default for Database {
 //                         let chunk = Box::new([(); CHUNK].map(|_|
 // MaybeUninit::<T>::uninit()));                         unsafe {
 // new_chunks.add(old_count as usize).write(chunk) };                         //
-// It should be extremely unlikely that this call returns `true`.               
+// It should be extremely unlikely that this call returns `true`.
 // self.try_free(old_count, old_chunks);                         old_chunks =
 // chunks;                     }
 //                     Err(chunks) => {
@@ -942,13 +942,8 @@ impl Default for Database {
 // {                 let (count, ended, begun) = decompose_count(count);
 //                 Some(if begun == 1 {
 //                     recompose_count(count + ended as u32 + begun as u32, 0,
-// 0)                 } else {
-//                     debug_assert!(begun > 1);
-//                     recompose_count(count, ended + 1, begun - 1)
-//                 })
-//             });
-//             debug_assert!(result.is_ok());
-//         }
+// 0) } else { debug_assert!(begun > 1); recompose_count(count, ended + 1, begun
+//    - 1) }) }); debug_assert!(result.is_ok()); }
 
 //         #[inline]
 //         fn increment_use(&self, count: u32) {

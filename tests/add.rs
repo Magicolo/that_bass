@@ -75,3 +75,20 @@ fn add_composite_template() -> Result<(), Error> {
     assert!(database.query::<(&A, &B)>()?.has(key));
     Ok(())
 }
+
+#[check(..)]
+fn add_composite_template(b: usize) -> Result<(), Error> {
+    let database = Database::new();
+    let key = create_one(&database, ())?;
+    let mut add = database.add()?;
+    add.one_with(key, (A, B(b)));
+    assert!(!database.query::<&A>()?.has(key));
+    assert!(!database.query::<&B>()?.has(key));
+    assert!(!database.query::<(&A, &B)>()?.has(key));
+
+    assert_eq!(add.resolve(), 1);
+    assert!(database.query::<&A>()?.has(key));
+    assert!(database.query::<&B>()?.has(key));
+    assert!(database.query::<(&A, &B)>()?.has(key));
+    Ok(())
+}

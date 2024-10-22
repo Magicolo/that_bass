@@ -159,6 +159,9 @@ impl<'a> Events<'a> {
     fn emit(&self, guard: &AtomicU64, keys: &[Key], event: impl FnOnce(usize) -> Raw) {
         let values = decompose(guard.load(Relaxed));
         if values.0 == 0 {
+            // This means that there are no listeners at the time of `guard.load`. If new
+            // listeners would be created between `guard.load` and this check, it is
+            // considered ok for those listeners to miss this event.
             return;
         }
 
@@ -166,6 +169,8 @@ impl<'a> Events<'a> {
         let index = pending.keys.len();
         pending.events.push(event(index));
         if values.1 == 0 {
+            // This means that there are no listeners of _keys_ at the time of `guard.load`.
+            // Same assumption as above.
             return;
         }
         pending.keys.extend_from_slice(keys);

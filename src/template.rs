@@ -27,8 +27,7 @@ impl DeclareContext<'_> {
     /// Returned `metas` are ordered by `meta.identifier()` and deduplicated.
     pub fn metas<T: Template>() -> Result<Vec<&'static Meta>, Error> {
         let mut metas = Vec::new();
-        let context = DeclareContext(&mut metas);
-        T::declare(context)?;
+        T::declare(DeclareContext(&mut metas))?;
         Ok(metas)
     }
 
