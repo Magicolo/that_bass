@@ -346,6 +346,808 @@ impl Default for Database {
     }
 }
 
+mod next_table_based {
+    /*
+        DESIGN:
+        - Keys are static in the table. This implies that fragmentation will happen.
+        - Fragments of a table can be un/locked independently, similarly to a chunk.
+        - A fragment spans from the first valid row to the last invalid row.
+        - A list of fragments is maintained in each tables as pairs of (index: usize, count: usize).
+        - Tables try to defragment the data when possible.
+        - Query iterators iterate over fragments by default (giving out slices [T]), but a wrapper chunks iterator might
+        try to split/combine fragments to spread the load more evenly when parallelizing.
+    */
+
+    pub struct Table {
+        fragments: Vec<(usize, usize)>,
+    }
+}
+
+mod next_chunk_based {
+    /*
+        DESIGN:
+        - Make layouts maximally vertical. This means that every leaf/primitive (supported) type has
+        its own column and is addressable.
+            - A 'Chunk' is a big 2D matrix of bytes: (header, [rows x columns; u8]).
+            - Position { x: f64, y: f64, z: f64 } would be layed out as ([f64], [f64], [f64]).
+            - A macro could generate the individual queries:
+            impl Position {
+                pub const X: Query<f64> = ...;
+                pub const Y: Query<f64> = ...;
+                pub const Z: Query<f64> = ...;
+                pub const ALL: (Query<f64>, Query<f64>, Query<f64>) = (X, Y, Z);
+            }
+        - Records are static once created in the sense that they cannot change structure.
+            - This allows storing more direct information in the 'Key' structure such as the 'Chunk' index.
+            - There still needs to be an indirection in the 'Chunk' to defragment columns when records are deleted.
+            - Thus, 'Key' would have the following content: { generation: u32, chunk: u24, index: u8 }.
+            - The 'index' points to a row in the 'Chunk' where another u8 is stored that points to the actual row of the record.
+            - This setup can improve the performance of joins since the structure of a record can be checked very efficiently
+            using its 'Chunk' index against a set of valid 'Chunk' indices.
+        - Implement structure dynamism of data using 'Key' graph edges (such as '[#derive(Edge)] Parent(Key)').
+            - When a static structure in not dynamic enough, links between records can be created and broken using the graph.
+            - Given the query '(&mut Position, Parent<&Position>)':
+                - The set of valid 'Chunk' indices for the base query and the parent query are cached in the query state.
+                - Collect all parent 'Key' from its base 'Chunk's where their 'Chunk' index is in the parent set.
+                - Sort the collected keys by the base then parent 'Chunk' indices.
+                - Run the query for each group of (base, parent) indices by locking at most 2 'Chunk's at a time.
+                - If a `Parent` link has changed between the collection of `Key`s and the query execution, skip this item.
+            - The 'Child' query may exist for convenience, but they would be converted to its equivalent 'Parent' query.
+        - 'Key' may have configurable layouts to allow more smaller/larger 'Chunk's or allow smaller/larger 'Key's.
+            - Key<u32, u24, u8> is the default.
+            - Key<u16, u[8-12], u[4-8]> is a small 'Key'.
+            - Key<u32, u[16-24], u[u8-u16]> is a standard 'Key'.
+            - Key<u64, u[32-56], u[u8-u32]> is a large 'Key'.
+            - The chosen 'Key' layout needs to be consistent across the database.
+        - A 'Chunk' can be saved to disk and loaded from disk whenever memory pressure is too high.
+            - Memory constraints are configurable at the database level.
+            - Different dump policy may be chosen:
+                - Dump the oldest 'Chunk'.
+                - Dump the largest 'Chunk'.
+                - Dump the least frequently accessed 'Chunk'.
+                - Combine multiple policies.
+            - A dump policy would simply calculate a score for each 'Chunk' and dump 'Chunk's with the highest score
+            until memory pressure is within bounds.
+            - The dump process would run whenever the database needs to make a new allocation and realizes that memory
+            constraints would not be respected.
+            - In order to dump data that contains externally allocated data (such as with 'Box', 'Vec', 'Arc', 'String', etc.),
+            the dump would save the raw pointer address without running the 'drop' code, effectively 'leaking' that memory.
+                - When restoring the pointers, it would be assumed that their pointed-to memory is still there.
+                - This means that *any* 'Box<T>/etc.' is supported in the database.
+                - Note that this forces a difference between a dump and serialization of the data.
+                - Serialization stores the pointed-to memory and will need to store shared references links.
+                - When clearing or dropping a dumped chunk, it will need to be loaded from disk and then dropped.
+
+        QUESTIONS:
+        - How can 'Chunk' try to make the use of its 'generation' budget as uniform as possible?
+            - Maintain a list of free rows sorted by their 'generation'? Add to that list on deletion?
+        - How can 'Sibling', 'Ancestor' and 'Descendant' queries be implemented efficiently?
+            - The query would need to run for each sibling/ancestor/descendant with the base record.
+            - If the base record and all records for the descendants would be accessed in a single iteration
+            of the query, this could result in locking an arbitrary number of 'Chunk's (at words, one lock per descendant).
+        - What if a query has many family queries (ex: (Parent, Descendant, Child))?
+            - One `Chunk` lock per family query could be allowed (ex: (Parent, Descendant, Child) would lock at most 3 'Chunk's at once).
+        - Integrate asynchronicity in the database?
+            - Would likely add a cost to every operation.
+            - Most useful parallel operations can be accomplished outside of the database through iterators (ex: the 'Splits' iterator).
+        - How to make the dump to disk process efficient?
+        - Would the memory pressure calculation consider external allocations (such as Box<T> or Vec<T>)?
+            - Since external allocations are not dumped to disk and depend on their persistence in memory, I think the answer is no.
+        - Can this database be distributed?
+            - Since this database allows for arbitrary operations on its data by given direct access to its memory,
+            it is going to be very tricky to maintain a history of operations that would allow to replicate the
+            database's state on every node.
+            - When a write lock is taken on a column, it has to be assumed that every value has been set to anything,
+            thus when synchronizing, all values need to be sent to every node. Even with compression, this doesn't
+            scale nicely.
+            - The database may support SQL or GraphQL queries that would allow for easier synchronization by taking
+            advantage of the knowledge of the mutation embedded in those queries.
+                - Ex: { $add: { "position.x": 1 } } would add the value of 1 to each record's 'position.x' and would
+                only require synchronizing this operation rather than all the values.
+            - The generational index mechanism would not work well for distribution.
+            - Using 'uuid's would cause 'Key's to be 16 bytes in size and likely require an indirection that maps
+            a 'Key' to its 'Chunk' because it is going to be almost impossible to guarantee the same 'Chunk' ordering
+            between instances of the database, thus the same 'Key' must be allowed to point to different 'Chunk's
+            depending on the specific database instance it is running on.
+    */
+
+    use core::{
+        alloc::Layout,
+        marker::PhantomData,
+        mem::{ManuallyDrop, forget},
+        ops::Deref,
+        ptr::{NonNull, drop_in_place, null_mut},
+        slice::{from_raw_parts, from_ref},
+        sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering},
+    };
+    use parking_lot::RwLock;
+    use static_assertions::{const_assert, const_assert_eq};
+    use std::{
+        alloc::{alloc, dealloc},
+        sync::{Arc, Weak},
+    };
+
+    pub trait Keyed {
+        type Generation;
+        type Chunk;
+        type Index;
+        const NULL: Self;
+
+        fn generation(&self) -> Self::Generation;
+        fn chunk(&self) -> Self::Chunk;
+        fn index(&self) -> Self::Index;
+    }
+
+    #[repr(transparent)]
+    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    pub struct Key<T = u64, const G: usize = 64, const C: usize = 24, const I: usize = 8>(T) 
+        where T: Keyed<Generation = G, Chunk = C, Index = I>;
+
+    macro_rules! key {
+        ($type: ident <$gs: literal : $gt: ty, $cs: literal : $ct: ty, $is: literal : $it: ty>) => {
+            const_assert!(size_of::<usize>() * 8 >= $gs);
+            const_assert!(size_of::<usize>() * 8 >= $cs);
+            const_assert!(size_of::<usize>() * 8 >= $is);
+            const_assert_eq!(size_of::<$type>() * 8, { $gs + $cs + $is });
+
+            impl Keyed for Key<$type, $gs, $cs, $is> {
+                type Chunk = $ct;
+                type Generation = $gt;
+                type Index = $it;
+                const NULL: Self = Self($type::MAX);
+
+                #[inline]
+                fn generation(&self) -> Self::Generation {
+                    let shift = 0;
+                    let mask = 1 << $gs;
+                    (self.0 >> shift) as $gt & mask
+                }
+
+                #[inline]
+                fn chunk(&self) -> Self::Chunk {
+                    let shift = $gs + $is;
+                    let mask = 1 << $cs;
+                    (self.0 >> shift) as $ct & mask
+                }
+
+                #[inline]
+                fn index(&self) -> Self::Index {
+                    let shift = $gs;
+                    let mask = 1 << $is;
+                    (self.0 >> shift) as $it & mask
+                }
+            }
+        };
+    }
+
+    key!(u128<64: u64, 56: u64, 8: u8>);
+    key!(u128<64: u64, 55: u64, 9: u16>);
+    key!(u128<64: u64, 54: u64, 10: u16>);
+    key!(u128<64: u64, 53: u64, 11: u16>);
+    key!(u128<64: u64, 52: u64, 12: u16>);
+    key!(u128<64: u64, 51: u64, 13: u16>);
+    key!(u128<64: u64, 50: u64, 14: u16>);
+    key!(u128<64: u64, 49: u64, 15: u16>);
+    key!(u128<64: u64, 48: u64, 16: u16>);
+    key!(u128<64: u64, 47: u64, 17: u32>);
+    key!(u128<64: u64, 46: u64, 18: u32>);
+    key!(u128<64: u64, 45: u64, 19: u32>);
+    key!(u128<64: u64, 44: u64, 20: u32>);
+    key!(u128<64: u64, 43: u64, 21: u32>);
+    key!(u128<64: u64, 42: u64, 22: u32>);
+    key!(u128<64: u64, 41: u64, 23: u32>);
+    key!(u128<64: u64, 40: u64, 24: u32>);
+    key!(u128<64: u64, 39: u64, 25: u32>);
+    key!(u128<64: u64, 38: u64, 26: u32>);
+    key!(u128<64: u64, 37: u64, 27: u32>);
+    key!(u128<64: u64, 36: u64, 28: u32>);
+    key!(u128<64: u64, 35: u64, 29: u32>);
+    key!(u128<64: u64, 34: u64, 30: u32>);
+    key!(u128<64: u64, 33: u64, 31: u32>);
+    key!(u128<64: u64, 32: u32, 32: u32>);
+
+    key!(u64<32: u32, 24: u32, 8: u8>);
+    key!(u64<32: u32, 23: u32, 9: u16>);
+    key!(u64<32: u32, 22: u32, 10: u16>);
+    key!(u64<32: u32, 21: u32, 11: u16>);
+    key!(u64<32: u32, 20: u32, 12: u16>);
+    key!(u64<32: u32, 19: u32, 13: u16>);
+    key!(u64<32: u32, 18: u32, 14: u16>);
+    key!(u64<32: u32, 17: u32, 15: u16>);
+    key!(u64<32: u32, 16: u16, 16: u16>);
+
+    key!(u32<16: u16, 12: u16, 4: u8>);
+    key!(u32<16: u16, 11: u16, 5: u8>);
+    key!(u32<16: u16, 10: u16, 6: u8>);
+    key!(u32<16: u16, 9: u16, 7: u8>);
+    key!(u32<16: u16, 8: u8, 8: u8>);
+
+    key!(u16<8: u8, 6: u8, 2: u8>);
+    key!(u16<8: u8, 5: u8, 3: u8>);
+    key!(u16<8: u8, 4: u8, 4: u8>);
+
+    /// Store the state of the keys in the 'K::Chunk' bits.
+    struct Rows<K>(usize, RwLock<NonNull<K>>);
+    struct Columns(usize, NonNull<Column>);
+    struct Column(RwLock<NonNull<u8>>);
+
+    pub struct Chunk<K: Keyed> {
+        index: usize,
+        rows: Rows<K>,
+        columns: Columns,
+    }
+
+    pub struct Store<K: Keyed> {
+        chunks: RwLock<Vec<Arc<Chunk<K>>>>,
+    }
+
+    impl<K: Keyed> Chunk<K> {
+        pub fn new(index: usize) -> Box<Self> {
+            todo!()
+        }
+    }
+}
+
+// mod karl {
+
+//     use core::ptr::NonNull;
+
+//     #[derive(Debug, Clone, PartialEq, Eq)]
+//     enum Layout {
+//         Unit,
+//         U8,
+//         U16,
+//         U32,
+//         U64,
+//         U128,
+//         USize,
+//         I8,
+//         I16,
+//         I32,
+//         I64,
+//         I128,
+//         ISize,
+//         F32,
+//         F64,
+//         Bool,
+//         Char,
+//         Array(Box<Layout>, usize), // [item; count]
+//         All(Vec<Layout>),          // (items,*)
+//         Any(Vec<Layout>),          // (u8|u16|u32|u64|u128, max(items))
+//         Name(String, Box<Layout>), // item
+//     }
+
+//     trait Lay {
+//         fn layout() -> Layout;
+//     }
+
+//     struct Pointer(NonNull<u8>, Layout);
+
+//     impl Pointer {
+//         pub unsafe fn get<T: Lay>(&self, path: &str) -> Option<&T> {
+//             let pair = self.1.offset(path)?;
+//             if pair.1 == &T::layout() {
+//                 Some(&*self.0.as_ptr().add(pair.0).cast())
+//             } else {
+//                 None
+//             }
+//         }
+
+//         pub unsafe fn get_mut<T: Lay>(&mut self, path: &str) -> Option<&mut
+// T> {             let pair = self.1.offset(path)?;
+//             if pair.1 == &T::layout() {
+//                 Some(&mut *self.0.as_ptr().add(pair.0).cast())
+//             } else {
+//                 None
+//             }
+//         }
+//     }
+
+//     impl Layout {
+//         pub fn offset(&self, path: &str) -> Option<(usize, &Self)> {
+//             if path.is_empty() {
+//                 return Some((0, self));
+//             }
+
+//             let (part, path) = path.split_once('.').unwrap_or((path, ""));
+//             match self {
+//                 Layout::Array(item, count) => match path.parse::<usize>() {
+//                     Ok(index) if index < *count => {
+//                         let pair = item.offset(path)?;
+//                         Some((pair.0 + item.size() * index, pair.1))
+//                     }
+//                     _ => None,
+//                 },
+//                 Layout::All(items) => match path.parse::<usize>() {
+//                     Ok(mut index) => {
+//                         let mut offset = 0;
+//                         for item in items {
+//                             if index == 0 {
+//                                 let pair = item.offset(path)?;
+//                                 return Some((pair.0 + offset, pair.1));
+//                             }
+//                             offset += item.size();
+//                             index -= 1;
+//                         }
+//                         None
+//                     }
+//                     Err(_) => {
+//                         let mut offset = 0;
+//                         for item in items {
+//                             if let Layout::Name(name, item) = item {
+//                                 if part == name {
+//                                     let pair = item.offset(path)?;
+//                                     return Some((pair.0 + offset, pair.1));
+//                                 }
+//                             }
+//                             offset += item.size();
+//                         }
+//                         None
+//                     }
+//                 },
+//                 _ => None,
+//             }
+//         }
+
+//         fn size(&self) -> usize {
+//             match self {
+//                 Layout::Unit => size_of::<()>(),
+//                 Layout::U8 => size_of::<u8>(),
+//                 Layout::U16 => size_of::<u16>(),
+//                 Layout::U32 => size_of::<u32>(),
+//                 Layout::U64 => size_of::<u64>(),
+//                 Layout::U128 => size_of::<u128>(),
+//                 Layout::USize => size_of::<usize>(),
+//                 Layout::I8 => size_of::<i8>(),
+//                 Layout::I16 => size_of::<i16>(),
+//                 Layout::I32 => size_of::<i32>(),
+//                 Layout::I64 => size_of::<i64>(),
+//                 Layout::I128 => size_of::<i128>(),
+//                 Layout::ISize => size_of::<isize>(),
+//                 Layout::F32 => size_of::<f32>(),
+//                 Layout::F64 => size_of::<f64>(),
+//                 Layout::Bool => size_of::<bool>(),
+//                 Layout::Char => size_of::<char>(),
+//                 Layout::Array(item, count) => item.size() * *count,
+//                 // TODO: Think about padding.
+//                 Layout::All(items) => items.iter().map(|item|
+// item.size()).sum(),                 Layout::Any(items) if items.len() < (1 <<
+// 8) => {                     size_of::<u8>() + items.iter().map(|item|
+// item.size()).max().unwrap_or(0)                 }
+//                 Layout::Any(items) if items.len() < (1 << 16) => {
+//                     size_of::<u16>() + items.iter().map(|item|
+// item.size()).max().unwrap_or(0)                 }
+//                 Layout::Any(items) if items.len() < (1 << 32) => {
+//                     size_of::<u32>() + items.iter().map(|item|
+// item.size()).max().unwrap_or(0)                 }
+//                 Layout::Any(items) if items.len() < (1 << 64) => {
+//                     size_of::<u64>() + items.iter().map(|item|
+// item.size()).max().unwrap_or(0)                 }
+//                 Layout::Any(items) => {
+//                     size_of::<u128>() + items.iter().map(|item|
+// item.size()).max().unwrap_or(0)                 }
+//                 Layout::Name(_, item) => item.size(),
+//             }
+//         }
+//     }
+
+//     /*
+//         [repr(transparent)]
+//         struct Position([f64; 3]);
+
+//         impl Lay for Position {
+//             fn layout() -> Layout {
+//                 Layout::Array { item: Box::new(Layout::F64), count: 3 }
+//             }
+//         }
+
+//         impl Lay for () {
+//             fn layout() -> Layout {
+//                 Layout::Unit
+//             }
+//         }
+
+//         impl Lay for usize {
+//             fn layout() -> Layout {
+//                 Layout::USize
+//             }
+//         }
+
+//         impl<T: Lay> Lay for [T] {
+//             fn layout() -> Layout {
+//                 Layout::Slice { item: Box::new(T::layout()) }
+//             }
+//         }
+
+//         impl<T: Lay, const N: usize> for [T; N] {
+//             fn layout() -> Layout {
+//                 Layout::Array { item: Box::new(T::layout()), count: N }
+//             }
+//         }
+
+//         let store = Store::new();
+//         let key = store.insert([(1usize, 2usize), (3usize, 4usize)]);
+//         if let Ok(value) = store.get_mut<usize>(key, (0, 1)) {
+//             *value += 1;
+//         }
+
+//         for values in store.get_chunks_mut((0, 1)) {
+//             for value in values {
+//                 *value += 1;
+//             }
+//         }
+//     */
+// }
+
+mod store {
+    use core::{
+        alloc::{Layout, LayoutError},
+        any::{TypeId, type_name},
+        cell::OnceCell,
+        marker::PhantomData,
+        mem::{ManuallyDrop, needs_drop},
+        num::NonZeroUsize,
+        ops::{Deref, DerefMut},
+        ptr::{NonNull, copy, drop_in_place, slice_from_raw_parts_mut},
+        slice::{from_raw_parts, from_raw_parts_mut},
+        sync::atomic::{AtomicU8, AtomicU32},
+    };
+    use parking_lot::{Mutex, RwLock};
+    use std::{
+        alloc::{alloc, dealloc},
+        collections::BTreeMap,
+        sync::{Arc, OnceLock},
+    };
+
+    #[repr(transparent)]
+    struct U24([u8; 3]);
+
+    pub struct Schema {
+        identifier: Option<TypeId>,
+        name: &'static str,
+        path: &'static str,
+        layout: Layout,
+        drop: Option<unsafe fn(NonNull<u8>, usize, NonZeroUsize)>,
+        content: Content,
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum Content {
+        Unit,
+        U8,
+        U16,
+        U32,
+        U64,
+        U128,
+        USize,
+        I8,
+        I16,
+        I32,
+        I64,
+        I128,
+        ISize,
+        F32,
+        F64,
+        Bool,
+        Char,
+        String,
+        All(Vec<Content>),
+        Any(Vec<Content>),
+    }
+
+    #[repr(C)]
+    struct PositionI2D(i32, i32);
+
+    #[repr(C)]
+    enum Status {
+        Frozen(usize),
+        Dead(bool),
+        Shrunk(f64, f64),
+    }
+
+    impl PositionI2D {
+        pub fn schema() -> &'static Schema {
+            static SCHEMA: OnceLock<Schema> = OnceLock::new();
+            SCHEMA.get_or_init(|| Schema {
+                identifier: Some(TypeId::of::<Self>()),
+                name: "PositionI2D",
+                path: type_name::<Self>(),
+                layout: Layout::new::<Self>(),
+                drop: if needs_drop::<Self>() {
+                    Some(|data, index, count| unsafe {
+                        let data = data.as_ptr().cast::<Self>().add(index);
+                        drop_in_place(slice_from_raw_parts_mut(data, count.get()));
+                    })
+                } else {
+                    None
+                },
+                content: Content::All(vec![Content::I32, Content::I32]),
+            })
+        }
+    }
+
+    impl Status {
+        pub fn schema() -> &'static Schema {
+            static SCHEMA: OnceLock<Schema> = OnceLock::new();
+            SCHEMA.get_or_init(|| {
+                let content = Content::Any(vec![
+                    Content::USize,
+                    Content::Bool,
+                    Content::All(vec![Content::F64, Content::F64]),
+                ]);
+                Schema {
+                    identifier: None,
+                    name: "Status",
+                    path: "::that_bass::store::Status",
+                    layout: content.layout().unwrap(),
+                    drop: None,
+                    content,
+                }
+            })
+        }
+    }
+
+    impl Content {
+        pub fn layout(&self) -> Result<Layout, LayoutError> {
+            Ok(match self {
+                Content::Unit => Layout::new::<()>(),
+                Content::U8 => Layout::new::<u8>(),
+                Content::U16 => Layout::new::<u16>(),
+                Content::U32 => Layout::new::<u32>(),
+                Content::U64 => Layout::new::<u64>(),
+                Content::U128 => Layout::new::<u128>(),
+                Content::USize => Layout::new::<usize>(),
+                Content::I8 => Layout::new::<i8>(),
+                Content::I16 => Layout::new::<i16>(),
+                Content::I32 => Layout::new::<i32>(),
+                Content::I64 => Layout::new::<i64>(),
+                Content::I128 => Layout::new::<i128>(),
+                Content::ISize => Layout::new::<isize>(),
+                Content::F32 => Layout::new::<f32>(),
+                Content::F64 => Layout::new::<f64>(),
+                Content::Bool => Layout::new::<bool>(),
+                Content::Char => Layout::new::<char>(),
+                Content::String => Layout::new::<String>(),
+                Content::All(items) => {
+                    let mut layout = Layout::from_size_align(0, 1)?;
+                    for item in items {
+                        (layout, _) = layout.extend(item.layout()?)?;
+                    }
+                    layout.pad_to_align()
+                }
+                Content::Any(items) => {
+                    let layout = if items.len() <= u8::MAX as _ {
+                        Content::U8
+                    } else if items.len() <= u16::MAX as _ {
+                        Content::U16
+                    } else if items.len() <= u32::MAX as _ {
+                        Content::U32
+                    } else if items.len() <= u64::MAX as _ {
+                        Content::U64
+                    } else {
+                        Content::U128
+                    }
+                    .layout()?;
+
+                    let mut size = 0;
+                    let mut align = 0;
+                    for item in items {
+                        let layout = item.layout()?;
+                        size = size.max(layout.size());
+                        align = align.max(layout.align());
+                    }
+                    let (layout, _) = layout.extend(Layout::from_size_align(size, align)?)?;
+                    layout.pad_to_align()
+                }
+            })
+        }
+    }
+
+    struct GrowVec<T>(PhantomData<T>);
+
+    #[repr(C)]
+    struct Key {
+        generation: u32,
+        chunk: U24,
+        index: u8,
+    }
+
+    #[repr(C)]
+    struct Rows {
+        count: AtomicU8,
+        capacity: u8,
+        generations: NonNull<AtomicU32>,
+        indices: RwLock<NonNull<u8>>,
+    }
+
+    #[repr(C)]
+    struct Column {
+        schema: Schema,
+        data: RwLock<NonNull<u8>>,
+    }
+
+    #[repr(C)]
+    struct Columns {
+        count: usize,
+        items: NonNull<Column>,
+    }
+
+    #[repr(C)]
+    struct Chunk {
+        layout: Layout,
+        rows: Rows,
+        columns: Columns,
+    }
+
+    impl Schema {
+        #[inline]
+        pub fn get<T: Sized + 'static>() -> &'static Self {
+            static STATICS: Mutex<BTreeMap<TypeId, &'static Schema>> = Mutex::new(BTreeMap::new());
+            STATICS
+                .lock()
+                .entry(TypeId::of::<T>())
+                .or_insert_with_key(|&key| {
+                    Box::leak(Box::new(Schema {
+                        identifier: Some(key),
+                        name: type_name::<T>(),
+                        path: type_name::<T>(),
+                        layout: Layout::new::<T>(),
+                        drop: if needs_drop::<T>() {
+                            Some(|data, index, count| unsafe {
+                                let data = data.as_ptr().cast::<T>().add(index);
+                                drop_in_place(slice_from_raw_parts_mut(data, count.get()));
+                            })
+                        } else {
+                            None
+                        },
+                        content: Content::Unit,
+                    }))
+                })
+        }
+    }
+
+    impl Deref for Columns {
+        type Target = [Column];
+
+        fn deref(&self) -> &Self::Target {
+            unsafe { from_raw_parts(self.items.as_ptr(), self.count) }
+        }
+    }
+
+    impl DerefMut for Columns {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            unsafe { from_raw_parts_mut(self.items.as_ptr(), self.count) }
+        }
+    }
+
+    impl Chunk {
+        pub unsafe fn new<I: IntoIterator<Item = Schema>>(
+            rows: u8,
+            columns: I,
+        ) -> Result<Box<Self>, LayoutError> {
+            let schemas = columns.into_iter().collect::<Vec<_>>();
+            // schemas.sort_unstable_by_key(|meta| meta.identifier);
+            // schemas.dedup_by_key(|meta| meta.identifier);
+
+            let count = schemas.len();
+            let layout = Layout::new::<Chunk>();
+            let (layout, columns) = layout.extend(Layout::array::<Column>(count)?)?;
+            let (layout, generations) = layout.extend(Layout::array::<AtomicU32>(rows as _)?)?;
+            let (layout, indices) = layout.extend(Layout::array::<u8>(rows as _)?)?;
+            let mut layout = layout;
+            let mut pairs = Vec::with_capacity(count);
+            for schema in schemas {
+                let array = Layout::from_size_align(
+                    schema.layout.size() * rows as usize,
+                    schema.layout.align(),
+                )?;
+                let pair = layout.extend(array)?;
+                layout = pair.0;
+                pairs.push((schema, pair.1));
+            }
+            let layout = layout.pad_to_align();
+            let pointer = NonNull::new_unchecked(alloc(layout));
+            let chunk = pointer.cast::<Chunk>();
+            let generations = pointer.add(generations).cast();
+            let indices = pointer.add(indices);
+            let columns = pointer.add(columns).cast();
+            from_raw_parts_mut(generations.cast::<u32>().as_ptr(), rows as _).fill(0);
+            from_raw_parts_mut(indices.as_ptr(), rows as _).fill(0);
+            for (i, (meta, offset)) in pairs.into_iter().enumerate() {
+                columns.add(i).write(Column {
+                    schema: meta,
+                    data: pointer.add(offset).into(),
+                });
+            }
+            chunk.write(Chunk {
+                layout,
+                rows: Rows {
+                    count: AtomicU8::new(0),
+                    capacity: rows,
+                    generations,
+                    indices: indices.into(),
+                },
+                columns: Columns {
+                    count,
+                    items: columns,
+                },
+            });
+            Ok(Box::from_raw(chunk.as_ptr()))
+        }
+    }
+
+    impl Drop for Chunk {
+        fn drop(&mut self) {
+            // let count = *self.rows.count.get_mut();
+            // if let Some(count) = NonZeroUsize::new(count as _) {
+            //     for column in self.columns.iter_mut() {
+            //         if let Some(drop) = column.schema.drop {
+            //             let data = *column.data.get_mut();
+            //             unsafe { drop(data, 0, count) };
+            //         }
+            //     }
+            // }
+            // unsafe { dealloc(self as *mut _ as *mut _, self.layout) };
+        }
+    }
+
+    struct Store {
+        chunks: GrowVec<Arc<Chunk>>,
+    }
+
+    trait Datum {}
+    trait Template {}
+
+    struct Insert<'a, T: Template>(PhantomData<&'a T>);
+    struct Remove<'a>(PhantomData<&'a ()>);
+
+    impl Store {
+        pub fn insert<T: Template>(&self) -> Insert<T> {
+            todo!()
+        }
+
+        pub fn remove(&self) -> Remove {
+            todo!()
+        }
+    }
+
+    impl<T: Template> Insert<'_, T> {
+        pub fn one(&mut self, template: T) -> Key {
+            todo!()
+        }
+
+        pub fn all<I: IntoIterator<Item = T>, F: FromIterator<Key>>(&mut self, templates: I) -> F {
+            todo!()
+        }
+
+        pub fn all_in<I: IntoIterator<Item = T>, E: Extend<Key>>(
+            &mut self,
+            keys: &mut E,
+            templates: I,
+        ) -> usize {
+            todo!()
+        }
+
+        pub fn all_n<const N: usize>(&mut self, templates: [T; N]) -> [Key; N] {
+            todo!()
+        }
+    }
+
+    impl Remove<'_> {
+        pub fn one(&mut self, key: Key) -> bool {
+            todo!()
+        }
+
+        pub fn all_n<const N: usize>(&mut self, keys: [Key; N]) -> [bool; N] {
+            todo!()
+        }
+
+        pub fn all<I: IntoIterator<Item = Key>>(&mut self, keys: I) -> usize {
+            todo!()
+        }
+    }
+}
+
 // mod dynamic {
 //     use super::*;
 //     use parking_lot::RwLock;

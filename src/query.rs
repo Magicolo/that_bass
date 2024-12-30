@@ -22,9 +22,9 @@ pub struct Query<'d, R: Row, F = (), I = Item> {
     keys: Keys<'d>,
     tables: Tables<'d>,
     index: usize,
-    indices: Vec<u32>,     // May be reordered (ex: by `fold_swap`).
+    indices: Vec<u32>, // May be reordered (ex: by `fold_swap`).
     states: Vec<State<R>>, /* Must remain sorted by `state.table.index()` for `binary_search` to
-                            * work. */
+                        * work. */
     filter: F,
     _marker: PhantomData<fn(I)>,
 }
@@ -543,7 +543,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                         state = fold(state, value, Err(error))
                     }
                 }
-                Err(error) => state = fold(state, value, Err(dbg!(error))),
+                Err(error) => state = fold(state, value, Err(error)),
             }
         }
 
