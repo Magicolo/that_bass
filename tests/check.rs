@@ -22,21 +22,23 @@ pub enum Action {
 }
 
 #[test]
-#[cfg(not(miri))]
+// #[cfg(not(miri))]
 fn check() -> Result<(), Box<dyn error::Error>> {
+    use checkito::same;
+
     let count = ..256usize;
     let r#type = (
-        Same(Type::Unit),
-        Same(Type::A),
-        Same(Type::B),
-        Same(Type::C),
-        Same(Type::AB),
-        Same(Type::AC),
-        Same(Type::BC),
-        Same(Type::ABC),
+        same(Type::Unit),
+        same(Type::A),
+        same(Type::B),
+        same(Type::C),
+        same(Type::AB),
+        same(Type::AC),
+        same(Type::BC),
+        same(Type::ABC),
     )
         .any()
-        .map(Unify::unify);
+        .unify();
     let resolve = <bool>::generator();
     (
         (&count, &r#type, &resolve).map(|values| Action::Create(values.0, values.1, values.2)),
@@ -45,9 +47,10 @@ fn check() -> Result<(), Box<dyn error::Error>> {
         (&count, &r#type, &resolve).map(|values| Action::Destroy(values.0, values.1, values.2)),
     )
         .any()
-        .map(Unify::unify)
-        .collect_with::<_, Vec<Action>>(..256usize)
-        .check(1000, |actions| run(actions.iter().cloned()))?;
+        .unify()
+        .collect_with(..256usize)
+        .check(|actions: Vec<Action>| run(actions.iter().cloned()))
+        .map_or(Ok(()), Err)?;
     Ok(())
 }
 
@@ -159,28 +162,28 @@ fn run(
         let mut by = By::new();
         by.keys(keys.iter().copied());
 
-        prove!(keys.len() == count)?;
-        prove!(by.len() == count)?;
-        prove!(keys.iter().all(|&key| key != Key::NULL))?;
+        assert_eq!(keys.len(), count);
+        assert_eq!(by.len(), count);
+        assert!(keys.iter().all(|&key| key != Key::NULL));
 
         if resolve {
             let resolved = create.resolve();
-            prove!(keys.len() <= resolved)?;
-            prove!(
+            assert!(keys.len() <= resolved);
+            assert!(
                 database
                     .keys()
                     .get_all(keys.iter().copied())
                     .all(|(_, slot)| slot.is_ok())
-            )?;
-            prove!(query.count_by(&by) == count)?;
+            );
+            assert_eq!(query.count_by(&by), count);
             for &key in keys.iter() {
-                prove!(database.keys().get(key).is_ok())?;
-                prove!(query.find(key, |_| ()))??;
+                assert!(database.keys().get(key).is_ok());
+                assert!(query.find(key, |_| ()).is_ok());
             }
         } else {
             for &key in keys.iter() {
-                prove!(database.keys().get(key).is_err())?;
-                prove!(query.find(key, |_| ()).is_err())?;
+                assert!(database.keys().get(key).is_err());
+                assert!(query.find(key, |_| ()).is_err());
             }
         }
         Ok(())
@@ -199,8 +202,8 @@ fn run(
         if resolve {
             add.resolve();
             for &key in keys {
-                prove!(database.keys().get(key).is_ok())?;
-                prove!(query.find(key, |_| ()))??;
+                assert!(database.keys().get(key).is_ok());
+                assert!(query.find(key, |_| ()).is_ok());
             }
         }
         Ok(())
@@ -219,8 +222,8 @@ fn run(
         if resolve {
             remove.resolve();
             for &key in keys {
-                prove!(database.keys().get(key).is_ok())?;
-                prove!(query.find(key, |_| ()).is_err())?;
+                assert!(database.keys().get(key).is_ok());
+                assert!(query.find(key, |_| ()).is_err());
             }
         }
         Ok(())
@@ -238,15 +241,15 @@ fn run(
         destroy.all(keys.iter().copied());
         if resolve {
             let resolved = destroy.resolve();
-            prove!(keys.len() <= resolved)?;
+            assert!(keys.len() <= resolved);
             for &key in keys {
-                prove!(database.keys().get(key).is_err())?;
-                prove!(query.find(key, |_| ()).is_err())?;
+                assert!(database.keys().get(key).is_err());
+                assert!(query.find(key, |_| ()).is_err());
             }
         } else {
             for &key in keys {
-                prove!(database.keys().get(key).is_ok())?;
-                prove!(query.find(key, |_| ()))??;
+                assert!(database.keys().get(key).is_ok());
+                assert!(query.find(key, |_| ()).is_ok());
             }
         }
         Ok(())

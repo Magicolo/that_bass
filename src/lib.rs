@@ -1,5 +1,3 @@
-#![feature(impl_trait_in_assoc_type)]
-
 pub mod core;
 pub mod create;
 pub mod destroy;
@@ -478,93 +476,95 @@ mod next_chunk_based {
         fn index(&self) -> Self::Index;
     }
 
-    #[repr(transparent)]
-    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-    pub struct Key<T = u64, const G: usize = 64, const C: usize = 24, const I: usize = 8>(T) 
-        where T: Keyed<Generation = G, Chunk = C, Index = I>;
+    // #[repr(transparent)]
+    // #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    // pub struct Key<T = u64, const G: usize = 64, const C: usize = 24, const I:
+    // usize = 8>(T) where
+    //     T: Keyed<Generation = G, Chunk = C, Index = I>;
 
-    macro_rules! key {
-        ($type: ident <$gs: literal : $gt: ty, $cs: literal : $ct: ty, $is: literal : $it: ty>) => {
-            const_assert!(size_of::<usize>() * 8 >= $gs);
-            const_assert!(size_of::<usize>() * 8 >= $cs);
-            const_assert!(size_of::<usize>() * 8 >= $is);
-            const_assert_eq!(size_of::<$type>() * 8, { $gs + $cs + $is });
+    // macro_rules! key {
+    //     ($type: ident <$gs: literal : $gt: ty, $cs: literal : $ct: ty, $is:
+    // literal : $it: ty>) => {         const_assert!(size_of::<usize>() * 8 >=
+    // $gs);         const_assert!(size_of::<usize>() * 8 >= $cs);
+    //         const_assert!(size_of::<usize>() * 8 >= $is);
+    //         const_assert_eq!(size_of::<$type>() * 8, { $gs + $cs + $is });
 
-            impl Keyed for Key<$type, $gs, $cs, $is> {
-                type Chunk = $ct;
-                type Generation = $gt;
-                type Index = $it;
-                const NULL: Self = Self($type::MAX);
+    //         impl Keyed for Key<$type, $gs, $cs, $is> {
+    //             type Chunk = $ct;
+    //             type Generation = $gt;
+    //             type Index = $it;
 
-                #[inline]
-                fn generation(&self) -> Self::Generation {
-                    let shift = 0;
-                    let mask = 1 << $gs;
-                    (self.0 >> shift) as $gt & mask
-                }
+    //             const NULL: Self = Self($type::MAX);
 
-                #[inline]
-                fn chunk(&self) -> Self::Chunk {
-                    let shift = $gs + $is;
-                    let mask = 1 << $cs;
-                    (self.0 >> shift) as $ct & mask
-                }
+    //             #[inline]
+    //             fn generation(&self) -> Self::Generation {
+    //                 let shift = 0;
+    //                 let mask = 1 << $gs;
+    //                 (self.0 >> shift) as $gt & mask
+    //             }
 
-                #[inline]
-                fn index(&self) -> Self::Index {
-                    let shift = $gs;
-                    let mask = 1 << $is;
-                    (self.0 >> shift) as $it & mask
-                }
-            }
-        };
-    }
+    //             #[inline]
+    //             fn chunk(&self) -> Self::Chunk {
+    //                 let shift = $gs + $is;
+    //                 let mask = 1 << $cs;
+    //                 (self.0 >> shift) as $ct & mask
+    //             }
 
-    key!(u128<64: u64, 56: u64, 8: u8>);
-    key!(u128<64: u64, 55: u64, 9: u16>);
-    key!(u128<64: u64, 54: u64, 10: u16>);
-    key!(u128<64: u64, 53: u64, 11: u16>);
-    key!(u128<64: u64, 52: u64, 12: u16>);
-    key!(u128<64: u64, 51: u64, 13: u16>);
-    key!(u128<64: u64, 50: u64, 14: u16>);
-    key!(u128<64: u64, 49: u64, 15: u16>);
-    key!(u128<64: u64, 48: u64, 16: u16>);
-    key!(u128<64: u64, 47: u64, 17: u32>);
-    key!(u128<64: u64, 46: u64, 18: u32>);
-    key!(u128<64: u64, 45: u64, 19: u32>);
-    key!(u128<64: u64, 44: u64, 20: u32>);
-    key!(u128<64: u64, 43: u64, 21: u32>);
-    key!(u128<64: u64, 42: u64, 22: u32>);
-    key!(u128<64: u64, 41: u64, 23: u32>);
-    key!(u128<64: u64, 40: u64, 24: u32>);
-    key!(u128<64: u64, 39: u64, 25: u32>);
-    key!(u128<64: u64, 38: u64, 26: u32>);
-    key!(u128<64: u64, 37: u64, 27: u32>);
-    key!(u128<64: u64, 36: u64, 28: u32>);
-    key!(u128<64: u64, 35: u64, 29: u32>);
-    key!(u128<64: u64, 34: u64, 30: u32>);
-    key!(u128<64: u64, 33: u64, 31: u32>);
-    key!(u128<64: u64, 32: u32, 32: u32>);
+    //             #[inline]
+    //             fn index(&self) -> Self::Index {
+    //                 let shift = $gs;
+    //                 let mask = 1 << $is;
+    //                 (self.0 >> shift) as $it & mask
+    //             }
+    //         }
+    //     };
+    // }
 
-    key!(u64<32: u32, 24: u32, 8: u8>);
-    key!(u64<32: u32, 23: u32, 9: u16>);
-    key!(u64<32: u32, 22: u32, 10: u16>);
-    key!(u64<32: u32, 21: u32, 11: u16>);
-    key!(u64<32: u32, 20: u32, 12: u16>);
-    key!(u64<32: u32, 19: u32, 13: u16>);
-    key!(u64<32: u32, 18: u32, 14: u16>);
-    key!(u64<32: u32, 17: u32, 15: u16>);
-    key!(u64<32: u32, 16: u16, 16: u16>);
+    // key!(u128<64: u64, 56: u64, 8: u8>);
+    // key!(u128<64: u64, 55: u64, 9: u16>);
+    // key!(u128<64: u64, 54: u64, 10: u16>);
+    // key!(u128<64: u64, 53: u64, 11: u16>);
+    // key!(u128<64: u64, 52: u64, 12: u16>);
+    // key!(u128<64: u64, 51: u64, 13: u16>);
+    // key!(u128<64: u64, 50: u64, 14: u16>);
+    // key!(u128<64: u64, 49: u64, 15: u16>);
+    // key!(u128<64: u64, 48: u64, 16: u16>);
+    // key!(u128<64: u64, 47: u64, 17: u32>);
+    // key!(u128<64: u64, 46: u64, 18: u32>);
+    // key!(u128<64: u64, 45: u64, 19: u32>);
+    // key!(u128<64: u64, 44: u64, 20: u32>);
+    // key!(u128<64: u64, 43: u64, 21: u32>);
+    // key!(u128<64: u64, 42: u64, 22: u32>);
+    // key!(u128<64: u64, 41: u64, 23: u32>);
+    // key!(u128<64: u64, 40: u64, 24: u32>);
+    // key!(u128<64: u64, 39: u64, 25: u32>);
+    // key!(u128<64: u64, 38: u64, 26: u32>);
+    // key!(u128<64: u64, 37: u64, 27: u32>);
+    // key!(u128<64: u64, 36: u64, 28: u32>);
+    // key!(u128<64: u64, 35: u64, 29: u32>);
+    // key!(u128<64: u64, 34: u64, 30: u32>);
+    // key!(u128<64: u64, 33: u64, 31: u32>);
+    // key!(u128<64: u64, 32: u32, 32: u32>);
 
-    key!(u32<16: u16, 12: u16, 4: u8>);
-    key!(u32<16: u16, 11: u16, 5: u8>);
-    key!(u32<16: u16, 10: u16, 6: u8>);
-    key!(u32<16: u16, 9: u16, 7: u8>);
-    key!(u32<16: u16, 8: u8, 8: u8>);
+    // key!(u64<32: u32, 24: u32, 8: u8>);
+    // key!(u64<32: u32, 23: u32, 9: u16>);
+    // key!(u64<32: u32, 22: u32, 10: u16>);
+    // key!(u64<32: u32, 21: u32, 11: u16>);
+    // key!(u64<32: u32, 20: u32, 12: u16>);
+    // key!(u64<32: u32, 19: u32, 13: u16>);
+    // key!(u64<32: u32, 18: u32, 14: u16>);
+    // key!(u64<32: u32, 17: u32, 15: u16>);
+    // key!(u64<32: u32, 16: u16, 16: u16>);
 
-    key!(u16<8: u8, 6: u8, 2: u8>);
-    key!(u16<8: u8, 5: u8, 3: u8>);
-    key!(u16<8: u8, 4: u8, 4: u8>);
+    // key!(u32<16: u16, 12: u16, 4: u8>);
+    // key!(u32<16: u16, 11: u16, 5: u8>);
+    // key!(u32<16: u16, 10: u16, 6: u8>);
+    // key!(u32<16: u16, 9: u16, 7: u8>);
+    // key!(u32<16: u16, 8: u8, 8: u8>);
+
+    // key!(u16<8: u8, 6: u8, 2: u8>);
+    // key!(u16<8: u8, 5: u8, 3: u8>);
+    // key!(u16<8: u8, 4: u8, 4: u8>);
 
     /// Store the state of the keys in the 'K::Chunk' bits.
     struct Rows<K>(usize, RwLock<NonNull<K>>);

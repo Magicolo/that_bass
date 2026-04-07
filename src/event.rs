@@ -16,10 +16,11 @@ use std::{
 };
 
 pub trait Event: Sized {
-    type Events<'a>: Iterator<Item = Self> + 'a;
-
     fn declare(context: DeclareContext);
-    fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a>;
+    fn process<'a>(
+        events: &'a [Raw],
+        context: ProcessContext<'a>,
+    ) -> impl Iterator<Item = Self> + 'a;
 }
 
 #[derive(Clone)]
@@ -603,13 +604,14 @@ macro_rules! event {
         }
 
         impl Event for $on {
-            type Events<'a> = impl Iterator<Item = Self> + 'a;
-
             fn declare(mut context: DeclareContext) {
                 context.$d(false)
             }
 
-            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+            fn process<'a>(
+                events: &'a [Raw],
+                context: ProcessContext<'a>,
+            ) -> impl Iterator<Item = Self> + 'a {
                 events.iter().filter_map(move |event| {
                     let &Raw::$raw { keys, $table_f } = event else {
                         return None;
@@ -625,13 +627,14 @@ macro_rules! event {
         }
 
         impl Event for $on_key {
-            type Events<'a> = impl Iterator<Item = Self> + 'a;
-
             fn declare(mut context: DeclareContext) {
                 context.$d(true)
             }
 
-            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+            fn process<'a>(
+                events: &'a [Raw],
+                context: ProcessContext<'a>,
+            ) -> impl Iterator<Item = Self> + 'a {
                 events
                     .iter()
                     .filter_map(move |event| {
@@ -651,13 +654,14 @@ macro_rules! event {
         }
 
         impl Event for $on_types {
-            type Events<'a> = impl Iterator<Item = Self> + 'a;
-
             fn declare(mut context: DeclareContext) {
                 context.$d(false)
             }
 
-            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+            fn process<'a>(
+                events: &'a [Raw],
+                context: ProcessContext<'a>,
+            ) -> impl Iterator<Item = Self> + 'a {
                 events
                     .iter()
                     .filter_map(move |event| {
@@ -675,13 +679,14 @@ macro_rules! event {
         }
 
         impl Event for $on_key_types {
-            type Events<'a> = impl Iterator<Item = Self> + 'a;
-
             fn declare(mut context: DeclareContext) {
                 context.$d(true)
             }
 
-            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+            fn process<'a>(
+                events: &'a [Raw],
+                context: ProcessContext<'a>,
+            ) -> impl Iterator<Item = Self> + 'a {
                 events
                     .iter()
                     .filter_map(move |event| {
@@ -702,13 +707,14 @@ macro_rules! event {
         }
 
         impl<D: Datum> Event for $on_type<D> {
-            type Events<'a> = impl Iterator<Item = Self> + 'a;
-
             fn declare(mut context: DeclareContext) {
                 context.$d(false)
             }
 
-            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+            fn process<'a>(
+                events: &'a [Raw],
+                context: ProcessContext<'a>,
+            ) -> impl Iterator<Item = Self> + 'a {
                 events.iter().filter_map(move |event| {
                     let &Raw::$raw { keys, $table_f } = event else {
                         return None;
@@ -727,13 +733,14 @@ macro_rules! event {
         }
 
         impl<D: Datum> Event for $on_key_type<D> {
-            type Events<'a> = impl Iterator<Item = Self> + 'a;
-
             fn declare(mut context: DeclareContext) {
                 context.$d(true)
             }
 
-            fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+            fn process<'a>(
+                events: &'a [Raw],
+                context: ProcessContext<'a>,
+            ) -> impl Iterator<Item = Self> + 'a {
                 events
                     .iter()
                     .filter_map(move |event| {
@@ -1004,13 +1011,14 @@ impl<I1: Iterator, I2: Iterator<Item = I1::Item>, I3: Iterator<Item = I1::Item>>
 
 macro_rules! body {
     ($keys:expr) => {
-        type Events<'a> = impl Iterator<Item = Self> + 'a;
-
         fn declare(mut context: DeclareContext) {
             context.any($keys)
         }
 
-        fn process<'a>(events: &'a [Raw], context: ProcessContext<'a>) -> Self::Events<'a> {
+        fn process<'a>(
+            events: &'a [Raw],
+            context: ProcessContext<'a>,
+        ) -> impl Iterator<Item = Self> + 'a {
             events.iter().flat_map(move |event| match event {
                 Raw::Create { .. } => One::A(map(Self::Create, event, context.clone())),
                 Raw::Destroy { .. } => One::B(map(Self::Destroy, event, context.clone())),

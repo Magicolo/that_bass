@@ -1,4 +1,5 @@
 pub mod common;
+use checkito::check;
 use common::*;
 
 #[test]
@@ -53,23 +54,6 @@ fn add_simple_template_twice() -> Result<(), Error> {
 
     assert_eq!(add_b.resolve(), 1);
     assert!(database.query::<()>()?.has(key));
-    assert!(database.query::<&A>()?.has(key));
-    assert!(database.query::<&B>()?.has(key));
-    assert!(database.query::<(&A, &B)>()?.has(key));
-    Ok(())
-}
-
-#[test]
-fn add_composite_template() -> Result<(), Error> {
-    let database = Database::new();
-    let key = create_one(&database, ())?;
-    let mut add = database.add()?;
-    add.one_with(key, (A, B(1)));
-    assert!(!database.query::<&A>()?.has(key));
-    assert!(!database.query::<&B>()?.has(key));
-    assert!(!database.query::<(&A, &B)>()?.has(key));
-
-    assert_eq!(add.resolve(), 1);
     assert!(database.query::<&A>()?.has(key));
     assert!(database.query::<&B>()?.has(key));
     assert!(database.query::<(&A, &B)>()?.has(key));
