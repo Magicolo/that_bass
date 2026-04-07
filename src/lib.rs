@@ -27,13 +27,6 @@ pub use that_base_derive::{Datum, Filter, Template};
 
 /*
     TODO: Implement async versions of each operation?
-    TODO: Remove an indirection in table to the columns since tables are always kept in an 'Arc'. See 'slice-dst' crate.
-        struct Header {
-            index: u32,
-            pub(crate) count: AtomicUsize,
-            pub(crate) keys: RwLock<Keys>,
-        }
-        type Table = SliceWithHeader<Header, Column>;
     TODO: Use the 'erasable' crate to represent a pointer in a column?
     TODO: A parallel version of 'fold_swap' such that many query operations can be executed in parallel (ex: 'each' -> 'par_each').
     TODO: Dynamic disk/network save/load of data.
@@ -459,7 +452,6 @@ mod next_chunk_based {
         sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering},
     };
     use parking_lot::RwLock;
-    use static_assertions::{const_assert, const_assert_eq};
     use std::{
         alloc::{alloc, dealloc},
         sync::{Arc, Weak},

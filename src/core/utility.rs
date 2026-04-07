@@ -7,9 +7,12 @@ use std::{
     slice::SliceIndex,
 };
 
-pub const ONE: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(1) };
+pub const ONE: NonZeroUsize = NonZeroUsize::MIN;
 
 #[inline(always)]
+/// # Safety
+///
+/// `index` must be in bounds for `items`.
 pub unsafe fn get_unchecked<T, I: SliceIndex<[T]>>(items: &[T], index: I) -> &I::Output {
     if cfg!(debug_assertions) {
         items.get(index).unwrap()
@@ -19,6 +22,9 @@ pub unsafe fn get_unchecked<T, I: SliceIndex<[T]>>(items: &[T], index: I) -> &I:
 }
 
 #[inline(always)]
+/// # Safety
+///
+/// `index` must be in bounds for `items`.
 pub unsafe fn get_unchecked_mut<T, I: SliceIndex<[T]>>(
     items: &mut [T],
     index: I,
@@ -31,6 +37,9 @@ pub unsafe fn get_unchecked_mut<T, I: SliceIndex<[T]>>(
 }
 
 #[inline(always)]
+/// # Safety
+///
+/// `a` and `b` must both be valid indices into `items`.
 pub unsafe fn swap_unchecked<T>(items: &mut [T], a: usize, b: usize) {
     if cfg!(debug_assertions) {
         items.swap(a, b);
@@ -51,6 +60,9 @@ where
 }
 
 #[inline(always)]
+/// # Safety
+///
+/// Call this only when the current control-flow path is provably unreachable.
 pub unsafe fn unreachable() -> ! {
     if cfg!(debug_assertions) {
         unreachable!();
@@ -83,8 +95,10 @@ pub fn try_fold_swap<T, S, C>(
                 // Failure: Requeue the item at the end of `items`.
                 tail -= 1;
                 // SAFETY:
-                // - `tail` must be greater than 0 before the decrement because of the `while` condition.
-                // - `head` and `tail` are always valid indices because of the safety explanation above.
+                // - `tail` must be greater than 0 before the decrement because of the `while`
+                //   condition.
+                // - `head` and `tail` are always valid indices because of the safety
+                //   explanation above.
                 debug_assert!(head < items.len());
                 debug_assert!(tail < items.len());
                 unsafe { swap_unchecked(items, head, tail) };
@@ -129,8 +143,10 @@ pub fn fold_swap<T, S, C>(
                 // Failure: Requeue the item at the end of `items`.
                 tail -= 1;
                 // SAFETY:
-                // - `tail` must be greater than 0 before the decrement because of the `while` condition.
-                // - `head` and `tail` are always valid indices because of the safety explanation above.
+                // - `tail` must be greater than 0 before the decrement because of the `while`
+                //   condition.
+                // - `head` and `tail` are always valid indices because of the safety
+                //   explanation above.
                 debug_assert!(head < items.len());
                 debug_assert!(tail < items.len());
                 unsafe { swap_unchecked(items, head, tail) };
@@ -159,7 +175,9 @@ pub fn sorted_contains<T: Ord + 'static>(
     let mut left = left.into_iter();
     for right in right {
         loop {
-            let Some(left) = left.next() else { return false; };
+            let Some(left) = left.next() else {
+                return false;
+            };
             match left.cmp(&right) {
                 Ordering::Equal => break,
                 Ordering::Less => continue,
@@ -216,23 +234,26 @@ pub fn sorted_symmetric_difference_by<T>(
 ) -> impl Iterator<Item = T> {
     let mut left_pair = (None, left.into_iter());
     let mut right_pair = (None, right.into_iter());
-    from_fn(move || loop {
-        match Option::take(&mut left_pair.0).or_else(|| left_pair.1.next()) {
-            Some(left) => match Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()) {
-                Some(right) => match compare(&left, &right) {
-                    Ordering::Equal => continue,
-                    Ordering::Less => {
-                        right_pair.0 = Some(right);
-                        break Some(left);
-                    }
-                    Ordering::Greater => {
-                        left_pair.0 = Some(left);
-                        break Some(right);
-                    }
+    from_fn(move || {
+        loop {
+            match Option::take(&mut left_pair.0).or_else(|| left_pair.1.next()) {
+                Some(left) => match Option::take(&mut right_pair.0).or_else(|| right_pair.1.next())
+                {
+                    Some(right) => match compare(&left, &right) {
+                        Ordering::Equal => continue,
+                        Ordering::Less => {
+                            right_pair.0 = Some(right);
+                            break Some(left);
+                        }
+                        Ordering::Greater => {
+                            left_pair.0 = Some(left);
+                            break Some(right);
+                        }
+                    },
+                    None => break Some(left),
                 },
-                None => break Some(left),
-            },
-            None => break Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()),
+                None => break Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()),
+            }
         }
     })
 }

@@ -8,6 +8,18 @@ use syn::{
     visit_mut::{VisitMut, visit_lifetime_mut},
 };
 
+type FieldConstructor = fn(&[Ident]) -> Box<dyn ToTokens>;
+type FieldDefinition = fn(&[Visibility], &[Ident], &[Type]) -> Box<dyn ToTokens>;
+
+struct DeconstructedFields {
+    construct: FieldConstructor,
+    define: FieldDefinition,
+    names: Vec<Ident>,
+    types: Vec<Type>,
+    visibilities: Vec<Visibility>,
+    indices: Vec<Index>,
+}
+
 #[proc_macro_derive(Datum)]
 pub fn datum(input: TokenStream) -> TokenStream {
     let DeriveInput {
@@ -39,7 +51,13 @@ pub fn template(input: TokenStream) -> TokenStream {
     let declare_path = path(ident.span(), ["that_bass", "template", "DeclareContext"]);
     let initialize_path = path(ident.span(), ["that_bass", "template", "InitializeContext"]);
     let apply_path = path(ident.span(), ["that_bass", "template", "ApplyContext"]);
-    let (construct, _, names, types, _, indices) = deconstruct_fields(&fields);
+    let DeconstructedFields {
+        construct,
+        names,
+        types,
+        indices,
+        ..
+    } = deconstruct_fields(&fields);
     let construct = construct(&names);
     quote!(
         #[automatically_derived]
@@ -81,7 +99,9 @@ pub fn filter(input: TokenStream) -> TokenStream {
     let table_path = path(ident.span(), ["that_bass", "table", "Table"]);
     match data {
         Data::Struct(DataStruct { fields, .. }) => {
-            let (construct, _, names, ..) = deconstruct_fields(&fields);
+            let DeconstructedFields {
+                construct, names, ..
+            } = deconstruct_fields(&fields);
             let construct = construct(&names);
             quote!(
                 #[automatically_derived]
@@ -128,7 +148,9 @@ pub fn filter(input: TokenStream) -> TokenStream {
             let mut matches = Vec::new();
             let mut tuples = Vec::new();
             for Variant { ident:name, fields, .. } in variants {
-                let (construct, _, names, ..) = deconstruct_fields(&fields);
+                let DeconstructedFields {
+                    construct, names, ..
+                } = deconstruct_fields(&fields);
                 let construct = construct(&names);
                 matches.push(quote!(#ident::#name #construct));
                 tuples.push(quote!((#(#names,)*)));
@@ -204,7 +226,14 @@ pub fn row(input: TokenStream) -> TokenStream {
     match data {
         Data::Struct(DataStruct { mut fields, .. }) => {
             LifetimeVisitor("static").visit_fields_mut(&mut fields);
-            let (construct, define, names, types, visibilities, indices) = deconstruct_fields(&fields);
+            let DeconstructedFields {
+                construct,
+                define,
+                names,
+                types,
+                visibilities,
+                indices,
+            } = deconstruct_fields(&fields);
             let construct = construct(&names);
             let strip_generics: Vec<_> = generics.params.iter()
                 .filter_map(|generic| {
@@ -336,16 +365,7 @@ fn path<'a>(span: Span, segments: impl IntoIterator<Item = &'a str>) -> Path {
     }
 }
 
-fn deconstruct_fields(
-    fields: &Fields,
-) -> (
-    fn(&[Ident]) -> Box<dyn ToTokens>,
-    fn(&[Visibility], &[Ident], &[Type]) -> Box<dyn ToTokens>,
-    Vec<Ident>,
-    Vec<Type>,
-    Vec<Visibility>,
-    Vec<Index>,
-) {
+fn deconstruct_fields(fields: &Fields) -> DeconstructedFields {
     match fields {
         Fields::Named(fields) => {
             let mut names = Vec::new();
@@ -360,16 +380,16 @@ fn deconstruct_fields(
                     indices.push(Index::from(indices.len()));
                 }
             }
-            (
-                |names| Box::new(quote!({ #(#names,)* })),
-                |visibilities, names, types| {
+            DeconstructedFields {
+                construct: |names| Box::new(quote!({ #(#names,)* })),
+                define: |visibilities, names, types| {
                     Box::new(quote!({ #(#visibilities #names: #types,)* }))
                 },
                 names,
                 types,
                 visibilities,
                 indices,
-            )
+            }
         }
         Fields::Unnamed(fields) => {
             let mut names = Vec::new();
@@ -382,22 +402,22 @@ fn deconstruct_fields(
                 visibilities.push(vis.clone());
                 indices.push(Index::from(indices.len()));
             }
-            (
-                |names| Box::new(quote!((#(#names,)*))),
-                |visibilities, _, types| Box::new(quote!((#(#visibilities #types,)*))),
+            DeconstructedFields {
+                construct: |names| Box::new(quote!((#(#names,)*))),
+                define: |visibilities, _, types| Box::new(quote!((#(#visibilities #types,)*))),
                 names,
                 types,
                 visibilities,
                 indices,
-            )
+            }
         }
-        Fields::Unit => (
-            |_| Box::new(quote!()),
-            |_, _, _| Box::new(quote!()),
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-        ),
+        Fields::Unit => DeconstructedFields {
+            construct: |_| Box::new(quote!()),
+            define: |_, _, _| Box::new(quote!()),
+            names: vec![],
+            types: vec![],
+            visibilities: vec![],
+            indices: vec![],
+        },
     }
 }
