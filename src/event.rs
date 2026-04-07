@@ -111,7 +111,7 @@ struct Chunk {
 
 impl Database {
     #[inline]
-    pub fn events(&self) -> Events {
+    pub fn events(&self) -> Events<'_> {
         Events(&self.events, self.tables())
     }
 }
@@ -250,7 +250,7 @@ impl DeclareContext<'_> {
 
 impl<'a> DeclareContext<'a> {
     #[inline]
-    pub fn own(&mut self) -> DeclareContext {
+    pub fn own(&mut self) -> DeclareContext<'_> {
         DeclareContext {
             values: self.values,
         }

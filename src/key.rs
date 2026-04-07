@@ -35,7 +35,7 @@ pub struct Keys<'d>(&'d State, view_vec::View<'d, Arc<Slot>>);
 
 impl Database {
     #[inline]
-    pub fn keys(&self) -> Keys {
+    pub fn keys(&self) -> Keys<'_> {
         Keys(&self.keys, self.keys.slots.view())
     }
 }
@@ -95,6 +95,11 @@ impl<'d> Keys<'d> {
     }
 
     #[inline]
+    /// # Safety
+    ///
+    /// `self` must already hold an up-to-date view of the slots for the given
+    /// `key`, or the caller must otherwise guarantee that the returned slot
+    /// lookup is still valid enough for their use.
     pub unsafe fn get_semi_checked(&self, key: Key) -> Result<(&Slot, u32), Error> {
         let slots = self.1.get();
         match slots.get(key.index() as usize) {
@@ -107,6 +112,9 @@ impl<'d> Keys<'d> {
     }
 
     #[inline]
+    /// # Safety
+    ///
+    /// `key.index()` must be in bounds for the current slot view held by `self`.
     pub unsafe fn get_unchecked(&self, key: Key) -> &Slot {
         get_unchecked(self.1.get(), key.index() as usize)
     }
@@ -144,6 +152,10 @@ impl<'d> Keys<'d> {
     }
 
     #[inline]
+    /// # Safety
+    ///
+    /// Every key yielded by `keys` must have an in-bounds index for the current
+    /// slot view held by `self`.
     pub unsafe fn get_all_unchecked<I: IntoIterator<Item = Key>>(
         &self,
         keys: I,

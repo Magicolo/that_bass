@@ -2,6 +2,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use that_bass::*;
 
 #[derive(Datum, Clone, Copy, Default, Debug)]
+#[allow(dead_code)]
 struct A(u128);
 
 fn create(criterion: &mut Criterion) {

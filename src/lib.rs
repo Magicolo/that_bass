@@ -337,6 +337,7 @@ impl Default for Database {
     }
 }
 
+#[allow(dead_code)]
 mod next_table_based {
     /*
         DESIGN:
@@ -354,6 +355,7 @@ mod next_table_based {
     }
 }
 
+#[allow(dead_code, unused_imports, unused_variables)]
 mod next_chunk_based {
     /*
         DESIGN:
@@ -771,6 +773,7 @@ mod next_chunk_based {
 //     */
 // }
 
+#[allow(dead_code, unused_imports, unused_variables)]
 mod store {
     use core::{
         alloc::{Layout, LayoutError},
@@ -1094,11 +1097,11 @@ mod store {
     struct Remove<'a>(PhantomData<&'a ()>);
 
     impl Store {
-        pub fn insert<T: Template>(&self) -> Insert<T> {
+        pub fn insert<T: Template>(&self) -> Insert<'_, T> {
             todo!()
         }
 
-        pub fn remove(&self) -> Remove {
+        pub fn remove(&self) -> Remove<'_> {
             todo!()
         }
     }

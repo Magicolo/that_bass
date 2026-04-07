@@ -44,7 +44,7 @@ impl<T: Clone> ViewVec<T> {
         }
     }
 
-    pub fn view(&self) -> View<T> {
+    pub fn view(&self) -> View<'_, T> {
         let mut seen = self.seen.lock();
         *seen += 1;
         // Load pointer under the lock to ensure that it is not modified at the same time.

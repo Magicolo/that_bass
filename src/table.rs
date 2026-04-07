@@ -52,7 +52,7 @@ pub(crate) struct Header {
 
 impl Database {
     #[inline]
-    pub fn tables(&self) -> Tables {
+    pub fn tables(&self) -> Tables<'_> {
         Tables(self.tables.tables.view())
     }
 }
@@ -204,6 +204,9 @@ impl Tables<'_> {
     }
 
     #[inline]
+    /// # Safety
+    ///
+    /// `index` must be in bounds for the current table view held by `self`.
     pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
         get_unchecked(self.0.get(), index)
     }

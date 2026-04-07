@@ -10,7 +10,7 @@ use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
     collections::HashSet,
     num::NonZeroUsize,
-    sync::{Arc, atomic::Ordering},
+    sync::atomic::Ordering,
 };
 
 pub struct Destroy<'d, F = ()> {
@@ -237,6 +237,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_rows(
         table: &Table,
         rows: &mut Vec<(Key, usize)>,
@@ -371,7 +372,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             Ok(index) => index,
             Err(index) => {
                 let result = match database.tables().get(table as _) {
-                    Ok(table) if filter.filter(&table, database) => Ok(State {
+                    Ok(table) if filter.filter(table, database) => Ok(State {
                         table: table.clone(),
                         rows: Vec::new(),
                     }),

@@ -29,6 +29,11 @@ pub struct ChunkContext<'a> {
     count: NonZeroUsize,
 }
 
+/// # Safety
+///
+/// Implementors must describe their access pattern through [`Row::declare`]
+/// and only produce references from [`Row::item`] and [`Row::chunk`] that are
+/// valid for the locks and row bounds guaranteed by the caller.
 pub unsafe trait Row: 'static {
     type State;
     type Read: Row;
@@ -38,7 +43,15 @@ pub unsafe trait Row: 'static {
     fn declare(context: DeclareContext) -> Result<(), Error>;
     fn initialize(context: InitializeContext) -> Result<Self::State, Error>;
     fn read(state: &Self::State) -> <Self::Read as Row>::State;
+    /// # Safety
+    ///
+    /// The caller must hold the locks declared by [`Row::declare`] and provide
+    /// a context whose row index is valid for the current table snapshot.
     unsafe fn item<'a>(state: &'a Self::State, context: ItemContext<'a>) -> Self::Item<'a>;
+    /// # Safety
+    ///
+    /// The caller must hold the locks declared by [`Row::declare`] and provide
+    /// a context whose key slice and row count match the current table snapshot.
     unsafe fn chunk<'a>(state: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a>;
 }
 
@@ -165,12 +178,21 @@ impl<'a> ItemContext<'a> {
         self.row
     }
 
+    /// # Safety
+    ///
+    /// `state` must have been initialized from `self.table()`, and the caller
+    /// must uphold the access guarantees declared by the corresponding `Row`.
     #[inline]
     pub unsafe fn read<D: Datum>(&self, state: &Read<D>) -> &'a D {
         debug_assert!(self.table.has::<D>());
         get_unchecked(self.table.columns(), state.0).get(self.row)
     }
 
+    /// # Safety
+    ///
+    /// `state` must have been initialized from `self.table()`, and the caller
+    /// must uphold the exclusive access guarantees declared by the
+    /// corresponding `Row`.
     #[inline]
     pub unsafe fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut D {
         debug_assert!(self.table.has::<D>());
@@ -203,11 +225,20 @@ impl<'a> ChunkContext<'a> {
         self.keys
     }
 
+    /// # Safety
+    ///
+    /// `state` must have been initialized from `self.table()`, and the caller
+    /// must uphold the access guarantees declared by the corresponding `Row`.
     #[inline]
     pub unsafe fn read<D: Datum>(&self, state: &Read<D>) -> &'a [D] {
         get_unchecked(self.table.columns(), state.0).get_all(self.count.get())
     }
 
+    /// # Safety
+    ///
+    /// `state` must have been initialized from `self.table()`, and the caller
+    /// must uphold the exclusive access guarantees declared by the
+    /// corresponding `Row`.
     #[inline]
     pub unsafe fn write<D: Datum>(&self, state: &Write<D>) -> &'a mut [D] {
         get_unchecked(self.table.columns(), state.0).get_all(self.count.get())

@@ -79,7 +79,7 @@ struct ShareTable<A: Template, R: Template> {
 }
 
 impl Database {
-    pub fn modify<A: Template, R: Template>(&self) -> Result<Modify<A, R>, Error> {
+    pub fn modify<A: Template, R: Template>(&self) -> Result<Modify<'_, A, R>, Error> {
         // Validate metas here (no duplicates allowed), but there is no need to store
         // them.
         ShareMeta::<(A, R)>::from(self).map(|_| Modify {
@@ -97,7 +97,7 @@ impl Database {
         })
     }
 
-    pub fn modify_all<A: Template, R: Template>(&self) -> Result<ModifyAll<A, R>, Error> {
+    pub fn modify_all<A: Template, R: Template>(&self) -> Result<ModifyAll<'_, A, R>, Error> {
         // Validate metas here (no duplicates allowed), but there is no need to store
         // them.
         ShareMeta::<(A, R)>::from(self).map(|_| ModifyAll {
@@ -112,19 +112,19 @@ impl Database {
         })
     }
 
-    pub fn add<T: Template>(&self) -> Result<Add<T>, Error> {
+    pub fn add<T: Template>(&self) -> Result<Add<'_, T>, Error> {
         self.modify()
     }
 
-    pub fn add_all<T: Template>(&self) -> Result<AddAll<T>, Error> {
+    pub fn add_all<T: Template>(&self) -> Result<AddAll<'_, T>, Error> {
         self.modify_all()
     }
 
-    pub fn remove<T: Template>(&self) -> Result<Remove<T>, Error> {
+    pub fn remove<T: Template>(&self) -> Result<Remove<'_, T>, Error> {
         self.modify()
     }
 
-    pub fn remove_all<T: Template>(&self) -> Result<RemoveAll<T>, Error> {
+    pub fn remove_all<T: Template>(&self) -> Result<RemoveAll<'_, T>, Error> {
         self.modify_all()
     }
 }
@@ -397,6 +397,7 @@ impl<'d, A: Template, R: Template, F: Filter> Modify<'d, A, R, F> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_set(
         keys: &Keys,
         table: &Table,
@@ -665,7 +666,7 @@ impl<'d, A: Template, R: Template, F: Filter> ModifyAll<'d, A, R, F> {
         with: &mut impl FnMut() -> A,
     ) -> usize {
         debug_assert_eq!(state.source.index(), state.target.index());
-        debug_assert!(state.inner.apply.len() > 0); // `apply.len() == 0` should've been filtered by `ShareTable`
+        debug_assert!(!state.inner.apply.is_empty()); // `apply.is_empty()` should've been filtered by `ShareTable`
         let Some(count) = NonZeroUsize::new(state.source.count()) else {
             return 0;
         };
@@ -733,7 +734,8 @@ impl<A: Template, R: Template> ShareTable<A, R> {
     }
 }
 
-fn move_to<'d, 'a, V, A: Template>(
+#[allow(clippy::too_many_arguments)]
+fn move_to<'a, V, A: Template>(
     keys: &Keys,
     events: &Events,
     set: &HashMap<Key, V>,

@@ -11,6 +11,11 @@ pub struct DeclareContext<'a>(&'a mut Vec<&'static Meta>);
 pub struct InitializeContext<'a>(&'a Table);
 pub struct ApplyContext<'a>(&'a Table, &'a [Key], usize);
 
+/// # Safety
+///
+/// Implementors must declare every column they may write through
+/// [`Template::declare`] and only write within the row identified by the
+/// provided [`ApplyContext`].
 pub unsafe trait Template: 'static {
     type State: Send + Sync;
     fn declare(context: DeclareContext) -> Result<(), Error>;
@@ -18,6 +23,12 @@ pub unsafe trait Template: 'static {
     /// SAFETY: All proper column locks have to be held at the time of calling
     /// this method. Also, the index carried by `ApplyContext` must be
     /// properly valid in every columns.
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold the column locks declared by [`Template::declare`]
+    /// and ensure that `context` points at a valid row for the table used to
+    /// build `state`.
     unsafe fn apply(self, state: &Self::State, context: ApplyContext);
 }
 
@@ -48,7 +59,7 @@ impl DeclareContext<'_> {
         }
     }
 
-    pub fn own(&mut self) -> DeclareContext {
+    pub fn own(&mut self) -> DeclareContext<'_> {
         DeclareContext(self.0)
     }
 }

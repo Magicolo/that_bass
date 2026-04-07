@@ -14,7 +14,6 @@ use std::{
     marker::PhantomData,
     num::NonZeroUsize,
     ops::ControlFlow::{self, *},
-    sync::Arc,
 };
 
 pub struct Query<'d, R: Row, F = (), I = Item> {
@@ -76,7 +75,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
 
     pub fn keys_in<K: Extend<Key>>(&mut self, keys: &mut K) {
         self.update();
-        Self::try_guards(
+        let _ = Self::try_guards(
             keys,
             &mut self.indices,
             &self.states,
@@ -152,9 +151,9 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
         while let Ok(table) = self.tables.get(self.index) {
             self.index += 1;
 
-            if self.filter.filter(&table, self.database) {
+            if self.filter.filter(table, self.database) {
                 // Initialize first to save some work if it fails.
-                let Ok(state) = R::initialize(InitializeContext::new(&table)) else {
+                let Ok(state) = R::initialize(InitializeContext::new(table)) else {
                     continue;
                 };
                 let mut locks = Vec::new();
@@ -909,9 +908,7 @@ impl<'d, R: Row> Split<'d, '_, R, Chunk> {
             locks,
         } = self.state;
         let keys = table.0.header.keys.read();
-        let Some(count) = NonZeroUsize::new(table.count()) else {
-            return None;
-        };
+        let count = NonZeroUsize::new(table.count())?;
         Some(lock(locks, table, |table| {
             let context = ChunkContext::new(table, &keys, count);
             map(unsafe { R::chunk(row, context) })
