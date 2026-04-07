@@ -169,12 +169,10 @@ fn run(
         if resolve {
             let resolved = create.resolve();
             assert!(keys.len() <= resolved);
-            assert!(
-                database
-                    .keys()
-                    .get_all(keys.iter().copied())
-                    .all(|(_, slot)| slot.is_ok())
-            );
+            assert!(database
+                .keys()
+                .get_all(keys.iter().copied())
+                .all(|(_, slot)| slot.is_ok()));
             assert_eq!(query.count_by(&by), count);
             for &key in keys.iter() {
                 assert!(database.keys().get(key).is_ok());

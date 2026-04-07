@@ -1,5 +1,4 @@
 use crate::{
-    Database, Error,
     core::{
         iterate::FullIterator,
         utility::{fold_swap, get_unchecked, get_unchecked_mut, try_fold_swap},
@@ -8,6 +7,7 @@ use crate::{
     key::{Key, Keys},
     row::{Access, ChunkContext, InitializeContext, ItemContext, Row, ShareAccess},
     table::{Table, Tables},
+    Database, Error,
 };
 use std::{
     any::TypeId,

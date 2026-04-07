@@ -234,26 +234,23 @@ pub fn sorted_symmetric_difference_by<T>(
 ) -> impl Iterator<Item = T> {
     let mut left_pair = (None, left.into_iter());
     let mut right_pair = (None, right.into_iter());
-    from_fn(move || {
-        loop {
-            match Option::take(&mut left_pair.0).or_else(|| left_pair.1.next()) {
-                Some(left) => match Option::take(&mut right_pair.0).or_else(|| right_pair.1.next())
-                {
-                    Some(right) => match compare(&left, &right) {
-                        Ordering::Equal => continue,
-                        Ordering::Less => {
-                            right_pair.0 = Some(right);
-                            break Some(left);
-                        }
-                        Ordering::Greater => {
-                            left_pair.0 = Some(left);
-                            break Some(right);
-                        }
-                    },
-                    None => break Some(left),
+    from_fn(move || loop {
+        match Option::take(&mut left_pair.0).or_else(|| left_pair.1.next()) {
+            Some(left) => match Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()) {
+                Some(right) => match compare(&left, &right) {
+                    Ordering::Equal => continue,
+                    Ordering::Less => {
+                        right_pair.0 = Some(right);
+                        break Some(left);
+                    }
+                    Ordering::Greater => {
+                        left_pair.0 = Some(left);
+                        break Some(right);
+                    }
                 },
-                None => break Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()),
-            }
+                None => break Some(left),
+            },
+            None => break Option::take(&mut right_pair.0).or_else(|| right_pair.1.next()),
         }
     })
 }

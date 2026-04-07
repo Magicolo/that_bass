@@ -1,11 +1,12 @@
 use proc_macro::TokenStream;
-use quote::{__private::Span, ToTokens, quote};
+use quote::{ToTokens, __private::Span, quote};
 use syn::{
-    Data, DataEnum, DataStruct, DeriveInput, Field, Fields, GenericParam, Ident, Index, Lifetime,
-    Path, Type, Variant, Visibility, parse_macro_input, parse_quote,
+    parse_macro_input, parse_quote,
     punctuated::Punctuated,
     spanned::Spanned,
-    visit_mut::{VisitMut, visit_lifetime_mut},
+    visit_mut::{visit_lifetime_mut, VisitMut},
+    Data, DataEnum, DataStruct, DeriveInput, Field, Fields, GenericParam, Ident, Index, Lifetime,
+    Path, Type, Variant, Visibility,
 };
 
 type FieldConstructor = fn(&[Ident]) -> Box<dyn ToTokens>;

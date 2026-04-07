@@ -1,8 +1,8 @@
 use crate::{
-    Database, Datum,
     core::utility::{get_unchecked, sorted_difference, sorted_symmetric_difference_by},
     key::Key,
     table::{self, Table},
+    Database, Datum,
 };
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::{

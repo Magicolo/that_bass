@@ -1,9 +1,9 @@
 use crate::{
-    Datum, Error,
     core::{tuple::tuples, utility::get_unchecked},
     key::Key,
     resources::Resources,
     table::Table,
+    Datum, Error,
 };
 use std::{any::TypeId, collections::HashSet, marker::PhantomData, num::NonZeroUsize, sync::Arc};
 

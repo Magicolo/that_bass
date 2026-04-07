@@ -1,14 +1,14 @@
 use crate::{
-    Database, Error,
     event::Events,
     key::{Key, Keys},
     table::Table,
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
+    Database, Error,
 };
 use parking_lot::RwLockUpgradableReadGuard;
 use std::{
     num::NonZeroUsize,
-    sync::{Arc, atomic::Ordering},
+    sync::{atomic::Ordering, Arc},
 };
 
 pub struct Create<'d, T: Template> {

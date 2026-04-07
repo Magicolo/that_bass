@@ -1,16 +1,16 @@
 use crate::{
-    Database, Error,
     core::{
         utility::get_unchecked,
         view_vec::{self, ViewVec},
     },
+    Database, Error,
 };
 use parking_lot::RwLock;
 use std::{
     ops::Range,
     sync::{
-        Arc,
         atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::*},
+        Arc,
     },
 };
 

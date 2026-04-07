@@ -1,11 +1,11 @@
 use crate::{
-    Database, Error,
-    core::utility::{ONE, fold_swap, get_unchecked, get_unchecked_mut},
+    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
     event::Events,
     filter::Filter,
     key::{Key, Keys},
     table::{self, Column, Table, Tables},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
+    Database, Error,
 };
 use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
@@ -13,7 +13,7 @@ use std::{
     marker::PhantomData,
     mem::MaybeUninit,
     num::NonZeroUsize,
-    sync::{Arc, atomic::Ordering},
+    sync::{atomic::Ordering, Arc},
 };
 
 /// Adds template `A` and removes template `R` to accumulated keys that satisfy

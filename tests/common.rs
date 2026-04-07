@@ -1,15 +1,15 @@
 pub use checkito::*;
 pub use std::{any::TypeId, collections::HashSet, error, marker::PhantomData, thread::scope};
 pub use that_bass::{
-    Database, Datum, Error, Filter, Template,
     create::Create,
     destroy::Destroy,
-    filter::{Any, Filter, Has, Is, Not, has},
+    filter::{has, Any, Filter, Has, Is, Not},
     key::Key,
     modify::{Add, Remove},
     query::{By, Query},
     row::Row,
     template::Template,
+    Database, Datum, Error, Filter, Template,
 };
 
 #[derive(Debug, Clone, Copy, Default, Datum)]
