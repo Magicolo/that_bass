@@ -1,29 +1,29 @@
 use crate::{
+    Database, Error,
     event::Events,
     key::{Key, Keys},
     table::Table,
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
-    Database, Error,
 };
 use parking_lot::RwLockUpgradableReadGuard;
 use std::{
     num::NonZeroUsize,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 
 pub struct Create<'d, T: Template> {
     keys: Keys<'d>,
     events: Events<'d>,
     state: Arc<T::State>,
-    table: Arc<Table>,
+    table: Table,
     reserved: Vec<Key>,
     templates: Vec<T>,
 }
 
-struct Share<T: Template>(Arc<T::State>, Arc<Table>);
+struct Share<T: Template>(Arc<T::State>, Table);
 
 impl Database {
-    pub fn create<T: Template>(&self) -> Result<Create<T>, Error> {
+    pub fn create<T: Template>(&self) -> Result<Create<'_, T>, Error> {
         Share::<T>::from(self).map(|(inner, table)| Create {
             keys: self.keys(),
             events: self.events(),
@@ -129,8 +129,9 @@ impl<'d, T: Template> Create<'d, T> {
 impl<T: Template> Create<'_, T> {
     /// Resolves the accumulated create operations.
     ///
-    /// In order to prevent deadlocks, **do not call this method while using a `Query`** unless you can
-    /// guarantee that there are no overlaps in table usage between this `Create` and the `Query`.
+    /// In order to prevent deadlocks, **do not call this method while using a
+    /// `Query`** unless you can guarantee that there are no overlaps in
+    /// table usage between this `Create` and the `Query`.
     pub fn resolve(&mut self) -> usize {
         debug_assert_eq!(self.reserved.len(), self.templates.len());
         let Some(count) = NonZeroUsize::new(self.reserved.len()) else {
@@ -139,35 +140,42 @@ impl<T: Template> Create<'_, T> {
 
         // The upgradable lock serves 2 purposes:
         // 1- It can be upgraded to grow the columns if required.
-        // 2- It prevents this operation from overlapping with the end of `destroy/remove` operations, which is important since `create`
-        // writes to keys and columns without locking.
-        let keys = self.table.keys.upgradable_read();
+        // 2- It prevents this operation from overlapping with the end of
+        // `destroy/remove` operations, which is important since `create` writes
+        // to keys and columns without locking.
+        let keys = self.table.0.header.keys.upgradable_read();
         let (start, keys) = self.table.reserve(keys, count);
         let context = ApplyContext::new(&self.table, &keys);
         for (i, template) in self.templates.drain(..).enumerate() {
             debug_assert!(i < count.get());
-            // SAFETY: This is safe by the guarantees of `T::apply` and by the fact that only the rows in the range
-            // `start..start + count` are modified.
-            // SAFETY: No locks are required because of the guarantee above and the `start + i` row is guaranteed to hold no previous
-            // valid data.
+            // SAFETY: This is safe by the guarantees of `T::apply` and by the fact that
+            // only the rows in the range `start..start + count` are modified.
+            // SAFETY: No locks are required because of the guarantee above and the `start +
+            // i` row is guaranteed to hold no previous valid data.
             unsafe { template.apply(&self.state, context.with(start + i)) };
         }
         {
-            // SAFETY: The range `start..start + count` is reserved to this thread by `table::Inner::reserve` and will not be modified
+            // SAFETY: The range `start..start + count` is reserved to this thread by
+            // `table::Inner::reserve` and will not be modified
             // until `table::Inner::commit` is called and as long as a table lock is held.
             let keys = unsafe { &mut *RwLockUpgradableReadGuard::rwlock(&keys).data_ptr() };
             keys[start..start + count.get()].copy_from_slice(&self.reserved);
         }
 
         // Initialize table keys.
-        // - Calling `initialize` first means that another thread may try to use a `Query::find` and access a `row >= count`. Although
-        // this is an uncomfortable state of affairs (because it is easy to forget), queries can detect this state and report an
-        // appropriate error.
-        // - Calling `fetch_add` first means that another thread may query the created rows and observe that their key in invalid through
-        // `Database::keys().get()`. This is not acceptable and there doesn't seem to be a good fix.
+        // - Calling `initialize` first means that another thread may try to use a
+        //   `Query::find` and access a `row >= count`. Although
+        // this is an uncomfortable state of affairs (because it is easy to forget),
+        // queries can detect this state and report an appropriate error.
+        // - Calling `fetch_add` first means that another thread may query the created
+        //   rows and observe that their key in invalid through
+        // `Database::keys().get()`. This is not acceptable and there doesn't seem to be
+        // a good fix.
         self.keys
             .initialize_all(&keys, self.table.index(), start..start + count.get());
         self.table
+            .0
+            .header
             .count
             .fetch_add(count.get() as _, Ordering::Release);
         self.events
@@ -187,7 +195,7 @@ impl<T: Template> Drop for Create<'_, T> {
 }
 
 impl<T: Template> Share<T> {
-    pub fn from(database: &Database) -> Result<(Arc<T::State>, Arc<Table>), Error> {
+    pub fn from(database: &Database) -> Result<(Arc<T::State>, Table), Error> {
         let metas = ShareMeta::<T>::from(database)?;
         let share = database.resources().try_global(|| {
             let table = database.tables().find_or_add(&metas);

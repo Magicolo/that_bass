@@ -1,25 +1,27 @@
 use crate::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, ONE},
+    Database,
+    core::utility::{ONE, fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked},
     event::Events,
     filter::Filter,
     key::{Key, Keys},
     table::{self, Table, Tables},
-    Database,
 };
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
     collections::HashSet,
     num::NonZeroUsize,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 
 pub struct Destroy<'d, F = ()> {
     database: &'d Database,
     keys: Keys<'d>,
     events: Events<'d>,
-    set: HashSet<Key>, // A `HashSet` is used because the move algorithm assumes that rows will be unique.
+    set: HashSet<Key>, /* A `HashSet` is used because the move algorithm assumes that rows will
+                        * be unique. */
     indices: Vec<usize>, // May be reordered (ex: by `fold_swap`).
-    states: Vec<Result<State, u32>>, // Must remain sorted by `state.table.index()` for `binary_search` to work.
+    states: Vec<Result<State, u32>>, /* Must remain sorted by `state.table.index()` for
+                          * `binary_search` to work. */
     pending: Vec<(Key, u32)>,
     moves: Vec<(usize, usize, NonZeroUsize)>,
     drops: Vec<(usize, NonZeroUsize)>,
@@ -33,12 +35,12 @@ pub struct DestroyAll<'d, F = ()> {
     keys: Keys<'d>,
     events: Events<'d>,
     index: usize,
-    states: Vec<Arc<Table>>,
+    states: Vec<Table>,
     filter: F,
 }
 
 struct State {
-    table: Arc<Table>,
+    table: Table,
     rows: Vec<(Key, usize)>,
 }
 
@@ -193,7 +195,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             |sum, (states, pending, moves, drops), index| {
                 let result = unsafe { get_unchecked_mut(states, *index) };
                 let state = unsafe { result.as_mut().unwrap_unchecked() };
-                let keys = state.table.keys.try_upgradable_read().ok_or(sum)?;
+                let keys = state.table.0.header.keys.try_upgradable_read().ok_or(sum)?;
                 let (low, high) = Self::retain(&self.keys, &state.table, &mut state.rows, pending);
                 let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                     return Ok(sum);
@@ -214,7 +216,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
             |sum, (states, pending, moves, drops), index| {
                 let result = unsafe { get_unchecked_mut(states, *index) };
                 let state = unsafe { result.as_mut().unwrap_unchecked() };
-                let keys = state.table.keys.upgradable_read();
+                let keys = state.table.0.header.keys.upgradable_read();
                 let (low, high) = Self::retain(&self.keys, &state.table, &mut state.rows, pending);
                 let Some(count) = NonZeroUsize::new(state.rows.len()) else {
                     return sum;
@@ -251,7 +253,7 @@ impl<'d, F: Filter> Destroy<'d, F> {
         debug_assert!(low <= high);
 
         let range = low..high + 1;
-        let head = table.count.load(Ordering::Acquire) - count.get();
+        let head = table.0.header.count.load(Ordering::Acquire) - count.get();
         let (low, high) = (range.start, range.end);
         if range.len() == count.get() {
             // The destroy range is contiguous.
@@ -297,7 +299,8 @@ impl<'d, F: Filter> Destroy<'d, F> {
         let mut table_keys = RwLockUpgradableReadGuard::upgrade(table_keys);
         for &(source, target, count) in moves.iter() {
             for i in 0..count.get() {
-                // Swap is used such that destroyed keys are gathered at the end of the table when the operation is complete.
+                // Swap is used such that destroyed keys are gathered at the end of the table
+                // when the operation is complete.
                 // - This allows `on_destroy` to use this fact.
                 unsafe { swap_unchecked(&mut table_keys, source + i, target + i) };
             }
@@ -311,23 +314,32 @@ impl<'d, F: Filter> Destroy<'d, F> {
                 }
             }
         }
-        // Must be decremented under the write lock to ensure that no query can observe the `table.count` with the invalid rows
-        // at the end.
-        table.count.fetch_sub(count.get() as _, Ordering::Release);
+        // Must be decremented under the write lock to ensure that no query can observe
+        // the `table.0.header.count` with the invalid rows at the end.
+        table
+            .0
+            .header
+            .count
+            .fetch_sub(count.get() as _, Ordering::Release);
 
-        // Keep an upgradable lock to prevent `create/add` operations to resolve during these last steps.
+        // Keep an upgradable lock to prevent `create/add` operations to resolve during
+        // these last steps.
         let table_keys = RwLockWriteGuard::downgrade_to_upgradable(table_keys);
-        // It is ok to release the slots under the upgradable lock (rather than under the write lock) over `keys` because queries do an
-        // additionnal validation (`keys.get(row) == Some(&key)`) which prevents the case where a key would be thought to be in the
-        // query while going through `database.keys().get()` and yet its `slot.row` points to the wrong row.
-        // - Note that it is possible to observe an inconsistency between `query.has` and `query.find` for a short time since
+        // It is ok to release the slots under the upgradable lock (rather than under
+        // the write lock) over `keys` because queries do an additionnal
+        // validation (`keys.get(row) == Some(&key)`) which prevents the case where a
+        // key would be thought to be in the query while going through
+        // `database.keys().get()` and yet its `slot.row` points to the wrong row.
+        // - Note that it is possible to observe an inconsistency between `query.has`
+        //   and `query.find` for a short time since
         // `query.has` does not do the additionnal validation.
         keys.release_all(&table_keys[head..head + count.get()]);
         for column in table.columns() {
             if column.meta().drop.is_some() {
                 for &(index, count) in drops.iter() {
-                    // Since the `table.count` has been decremented under the `keys` write lock was held, these indices are only observable
-                    // by this thread (assuming the indices are `> head`).
+                    // Since the `table.0.header.count` has been decremented under the `keys` write
+                    // lock was held, these indices are only observable by this
+                    // thread (assuming the indices are `> head`).
                     debug_assert!(index >= head);
                     unsafe { column.drop(index, count) };
                 }
@@ -336,8 +348,9 @@ impl<'d, F: Filter> Destroy<'d, F> {
 
         events.emit_destroy(&table_keys[head..head + count.get()], table);
         drop(table_keys);
-        // The `recycle` step can be done outside of the lock. This means that the keys within `rows` may be very briefly
-        // non-reusable for other threads, which is fine.
+        // The `recycle` step can be done outside of the lock. This means that the keys
+        // within `rows` may be very briefly non-reusable for other threads,
+        // which is fine.
         keys.recycle_all(rows.drain(..).map(|(key, ..)| key));
         moves.clear();
         drops.clear();
@@ -357,9 +370,9 @@ impl<'d, F: Filter> Destroy<'d, F> {
         }) {
             Ok(index) => index,
             Err(index) => {
-                let result = match database.tables().get_shared(table as _) {
+                let result = match database.tables().get(table as _) {
                     Ok(table) if filter.filter(&table, database) => Ok(State {
-                        table,
+                        table: table.clone(),
                         rows: Vec::new(),
                     }),
                     Ok(table) => Err(table.index()),
@@ -434,10 +447,10 @@ impl<'d, F> DestroyAll<'d, F> {
 
 impl<'d, F: Filter> DestroyAll<'d, F> {
     pub fn resolve(&mut self) -> usize {
-        while let Ok(table) = self.tables.get_shared(self.index) {
+        while let Ok(table) = self.tables.get(self.index) {
             self.index += 1;
-            if self.filter.filter(&table, self.database) {
-                self.states.push(table);
+            if self.filter.filter(table, self.database) {
+                self.states.push(table.clone());
             }
         }
 
@@ -446,11 +459,11 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
             0,
             (&mut self.keys, &self.events),
             |sum, (keys, events), table| {
-                let table_keys = table.keys.try_upgradable_read().ok_or(sum)?;
+                let table_keys = table.0.header.keys.try_upgradable_read().ok_or(sum)?;
                 Ok(sum + Self::resolve_table(table_keys, table, keys, events))
             },
             |sum, (keys, events), table| {
-                let table_keys = table.keys.upgradable_read();
+                let table_keys = table.0.header.keys.upgradable_read();
                 sum + Self::resolve_table(table_keys, table, keys, events)
             },
         )
@@ -462,7 +475,7 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
         keys: &mut Keys,
         events: &Events,
     ) -> usize {
-        let count = table.count.swap(0, Ordering::AcqRel);
+        let count = table.0.header.count.swap(0, Ordering::AcqRel);
         let Some(count) = NonZeroUsize::new(count) else {
             return 0;
         };
@@ -470,9 +483,11 @@ impl<'d, F: Filter> DestroyAll<'d, F> {
             if column.meta().drop.is_some() {
                 let write = column.data().write();
                 unsafe { column.drop(0, count) };
-                // No need to accumulate locks since new queries will observe the `table.count` to be 0 and old ones that are still
-                // iterating the table will not be able to access this column. Note that the `table.count` only changes while a
-                // `table.keys` upgradable lock is held.
+                // No need to accumulate locks since new queries will observe the
+                // `table.0.header.count` to be 0 and old ones that are still
+                // iterating the table will not be able to access this column.
+                // Note that the `table.0.header.count` only changes
+                // while a `table.0.header.keys` upgradable lock is held.
                 drop(write);
             }
         }

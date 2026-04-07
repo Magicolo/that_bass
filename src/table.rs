@@ -8,6 +8,7 @@ use crate::{
     key::Key,
 };
 use parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
+use slice_dst::SliceWithHeader;
 use std::{
     alloc::{Layout, LayoutError, alloc, dealloc},
     any::TypeId,
@@ -21,13 +22,9 @@ use std::{
     },
 };
 
-pub struct Table {
-    index: u32,
-    pub(crate) count: AtomicUsize,
-    pub(crate) keys: RwLock<Keys>,
-    /// Columns are ordered consistently between tables.
-    pub(crate) columns: Box<[Column]>,
-}
+/// Columns are ordered consistently between tables.
+#[derive(Clone)]
+pub struct Table(pub(crate) Arc<SliceWithHeader<Header, Column>>);
 
 pub struct Column {
     meta: &'static Meta,
@@ -35,7 +32,7 @@ pub struct Column {
 }
 
 pub(crate) struct State {
-    tables: ViewVec<Arc<Table>>,
+    tables: ViewVec<Table>,
 }
 
 pub(crate) struct Keys {
@@ -44,7 +41,14 @@ pub(crate) struct Keys {
 }
 
 #[derive(Clone)]
-pub struct Tables<'a>(view_vec::View<'a, Arc<Table>>);
+pub struct Tables<'a>(view_vec::View<'a, Table>);
+
+#[derive(Default)]
+pub(crate) struct Header {
+    index: u32,
+    pub(crate) count: AtomicUsize,
+    pub(crate) keys: RwLock<Keys>,
+}
 
 impl Database {
     #[inline]
@@ -188,13 +192,13 @@ impl Tables<'_> {
 
     #[inline]
     pub fn iter(&mut self) -> impl FullIterator<Item = &Table> {
-        self.0.get_updated().iter().map(|table| &**table)
+        self.0.get_updated().iter()
     }
 
     #[inline]
     pub fn get(&mut self, index: usize) -> Result<&Table, Error> {
         match self.0.get_updated().get(index) {
-            Some(table) => Ok(&**table),
+            Some(table) => Ok(table),
             None => Err(Error::MissingTable(index)),
         }
     }
@@ -204,22 +208,9 @@ impl Tables<'_> {
         get_unchecked(self.0.get(), index)
     }
 
-    #[inline]
-    pub fn get_shared(&mut self, index: usize) -> Result<Arc<Table>, Error> {
-        match self.0.get_updated().get(index) {
-            Some(table) => Ok(table.clone()),
-            None => Err(Error::MissingTable(index)),
-        }
-    }
-
-    #[inline]
-    pub unsafe fn get_shared_unchecked(&self, index: usize) -> Arc<Table> {
-        get_unchecked(self.0.get(), index).clone()
-    }
-
     /// `metas` must be sorted by `meta.identifier()` and must be deduplicated.
     #[inline]
-    pub(crate) fn find_or_add(&mut self, metas: &[&'static Meta]) -> Arc<Table> {
+    pub(crate) fn find_or_add(&mut self, metas: &[&'static Meta]) -> Table {
         // Verifies that `metas` is sorted and deduplicated.
         debug_assert!(
             metas
@@ -237,13 +228,15 @@ impl Tables<'_> {
             }
             index = tables.len();
 
-            let columns = metas.iter().map(|&meta| Column::new(meta)).collect();
-            let table = Arc::new(Table {
-                index: index as _,
-                count: 0.into(),
-                keys: RwLock::new(Keys::default()),
-                columns,
-            });
+            let table = Table(SliceWithHeader::new(
+                Header {
+                    index: index as _,
+                    count: 0.into(),
+                    keys: RwLock::new(Keys::default()),
+                },
+                metas.iter().map(|&meta| Column::new(meta)),
+            ));
+
             if self.0.push_if_same(table.clone()).is_some() {
                 break table;
             }
@@ -261,13 +254,13 @@ impl State {
 
 impl Table {
     #[inline]
-    pub const fn index(&self) -> u32 {
-        self.index
+    pub fn index(&self) -> u32 {
+        self.0.header.index
     }
 
     #[inline]
     pub fn count(&self) -> usize {
-        self.count.load(Ordering::Acquire)
+        self.0.header.count.load(Ordering::Acquire)
     }
 
     #[inline]
@@ -281,8 +274,8 @@ impl Table {
     }
 
     #[inline]
-    pub const fn columns(&self) -> &[Column] {
-        &self.columns
+    pub fn columns(&self) -> &[Column] {
+        &self.0.slice
     }
 
     #[inline]
@@ -302,11 +295,11 @@ impl Table {
     }
 
     pub fn column_with(&self, identifier: TypeId) -> Result<(usize, &Column), Error> {
-        let index = self
-            .columns
+        let columns = self.columns();
+        let index = columns
             .binary_search_by_key(&identifier, |column| column.meta().identifier())
             .map_err(|_| Error::MissingColumn(identifier))?;
-        Ok((index, &self.columns[index]))
+        Ok((index, &columns[index]))
     }
 
     pub(crate) fn reserve<'a>(
@@ -344,7 +337,7 @@ impl Table {
             }
         }
 
-        let start = self.count.load(Ordering::Acquire);
+        let start = self.0.header.count.load(Ordering::Acquire);
         assert!(
             start < u32::MAX as usize - count.get(),
             "There can not be more than `u32::MAX` keys at a given time."
@@ -360,7 +353,7 @@ impl Table {
         let old_layout = Layout::array::<Key>(old_capacity).unwrap();
         let new_layout = Layout::array::<Key>(new_capacity).unwrap();
         let (target, layout) = next(
-            &self.columns,
+            self.columns(),
             (old_capacity, new_capacity),
             (old_layout, new_layout),
         )
@@ -394,25 +387,33 @@ impl Table {
 unsafe impl Send for Table {}
 unsafe impl Sync for Table {}
 
+impl Default for Table {
+    fn default() -> Self {
+        Self(SliceWithHeader::new(Header::default(), []))
+    }
+}
+
 impl Drop for Table {
     fn drop(&mut self) {
-        let count = *self.count.get_mut();
-        let Keys { data, capacity } = *self.keys.get_mut();
-        debug_assert!(count <= capacity);
-        let Some(capacity) = NonZeroUsize::new(capacity) else {
-            return;
-        };
-        debug_assert_ne!(data, NonNull::dangling());
+        if let Some(table) = Arc::get_mut(&mut self.0) {
+            let count = *table.header.count.get_mut();
+            let Keys { data, capacity } = *table.header.keys.get_mut();
+            debug_assert!(count <= capacity);
+            let Some(capacity) = NonZeroUsize::new(capacity) else {
+                return;
+            };
+            debug_assert_ne!(data, NonNull::dangling());
 
-        let mut total = Layout::array::<Key>(capacity.get()).unwrap();
-        for column in self.columns.iter_mut() {
-            let Meta { layout, .. } = column.meta();
-            if let Some(count) = NonZeroUsize::new(count) {
-                unsafe { column.drop(0, count) };
+            let mut total = Layout::array::<Key>(capacity.get()).unwrap();
+            for column in table.slice.iter_mut() {
+                let Meta { layout, .. } = column.meta();
+                if let Some(count) = NonZeroUsize::new(count) {
+                    unsafe { column.drop(0, count) };
+                }
+                (total, _) = total.extend(layout(capacity.get()).unwrap()).unwrap();
             }
-            (total, _) = total.extend(layout(capacity.get()).unwrap()).unwrap();
+            unsafe { dealloc(data.cast().as_ptr(), total) };
         }
-        unsafe { dealloc(data.cast().as_ptr(), total) };
     }
 }
 
@@ -441,13 +442,8 @@ impl Default for Keys {
 
 #[test]
 fn table_reserve_grows_when_empty() {
-    let table = Table {
-        index: 0,
-        count: 0.into(),
-        keys: Keys::default().into(),
-        columns: [].into(),
-    };
-    let keys = table.keys.upgradable_read();
+    let table = Table::default();
+    let keys = table.0.header.keys.upgradable_read();
     assert_eq!(keys.data, NonNull::dangling());
     assert_eq!(keys.len(), 0);
     let (index, keys) = table.reserve(keys, NonZeroUsize::MIN);
@@ -459,13 +455,8 @@ fn table_reserve_grows_when_empty() {
 
 #[test]
 fn table_reserve_grows_in_powers_of_2() {
-    let table = Table {
-        index: 0,
-        count: 0.into(),
-        keys: Keys::default().into(),
-        columns: [].into(),
-    };
-    let keys = table.keys.upgradable_read();
+    let table = Table::default();
+    let keys = table.0.header.keys.upgradable_read();
     let (_, keys) = table.reserve(keys, NonZeroUsize::MIN.saturating_add(2));
     assert_eq!(keys.len(), 4);
     let (_, keys) = table.reserve(keys, NonZeroUsize::MIN.saturating_add(4));

@@ -48,7 +48,7 @@ pub struct By<V = ()> {
 
 struct State<R: Row> {
     state: R::State,
-    table: Arc<Table>,
+    table: Table,
     locks: Box<[(usize, Access)]>,
 }
 
@@ -89,7 +89,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
 
     pub fn tables(&mut self) -> impl FullIterator<Item = &Table> {
         self.update();
-        self.states.iter().map(|state| &*state.table)
+        self.states.iter().map(|state| &state.table)
     }
 
     pub fn split(&mut self) -> impl FullIterator<Item = Split<'d, '_, R, I>> {
@@ -149,7 +149,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
     }
 
     pub(crate) fn update(&mut self) {
-        while let Ok(table) = self.tables.get_shared(self.index) {
+        while let Ok(table) = self.tables.get(self.index) {
             self.index += 1;
 
             if self.filter.filter(&table, self.database) {
@@ -178,7 +178,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                 self.indices.push(index);
                 self.states.push(State {
                     state,
-                    table,
+                    table: table.clone(),
                     locks: locks.into_boxed_slice(),
                 });
             }
@@ -203,7 +203,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     table,
                     locks,
                 } = unsafe { get_unchecked(states, index) };
-                let Some(keys) = table.keys.try_read() else {
+                let Some(keys) = table.0.header.keys.try_read() else {
                     return Err(state);
                 };
                 let Some(count) = NonZeroUsize::new(table.count()) else {
@@ -221,7 +221,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     table,
                     locks,
                 } = unsafe { get_unchecked(states, index) };
-                let keys = table.keys.read();
+                let keys = table.0.header.keys.read();
                 let Some(count) = NonZeroUsize::new(table.count()) else {
                     return Continue(state);
                 };
@@ -250,7 +250,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     table,
                     locks,
                 } = unsafe { get_unchecked(states, index) };
-                let Some(keys) = table.keys.try_read() else {
+                let Some(keys) = table.0.header.keys.try_read() else {
                     return Err(state);
                 };
                 let Some(count) = NonZeroUsize::new(table.count()) else {
@@ -267,7 +267,7 @@ impl<'d, R: Row, F: Filter, I> Query<'d, R, F, I> {
                     table,
                     locks,
                 } = unsafe { get_unchecked(states, index) };
-                let keys = table.keys.read();
+                let keys = table.0.header.keys.read();
                 let Some(count) = NonZeroUsize::new(table.count()) else {
                     return state;
                 };
@@ -479,7 +479,7 @@ impl<'d, R: Row, F: Filter> Query<'d, R, F, Item> {
                 None => break find(Err(Error::KeyNotInQuery(key))),
             };
 
-            let keys = table.keys.read();
+            let keys = table.0.header.keys.read();
             // The key must be checked again while holding the table lock to be sure is has
             // not been moved/destroyed since last read.
             let new_table = match slot.table(key) {
@@ -802,7 +802,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
             table,
             locks,
         } = self.state;
-        let keys = table.keys.read();
+        let keys = table.0.header.keys.read();
         let Some(count) = NonZeroUsize::new(table.count()) else {
             return Ok(state);
         };
@@ -830,7 +830,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
             table,
             locks,
         } = self.state;
-        let keys = table.keys.read();
+        let keys = table.0.header.keys.read();
         let Some(count) = NonZeroUsize::new(table.count()) else {
             return Ok(state);
         };
@@ -865,7 +865,7 @@ impl<'d, R: Row> Split<'d, '_, R, Item> {
             locks,
         } = self.state;
 
-        let keys = table.keys.read();
+        let keys = table.0.header.keys.read();
         // Check the slot while under the table lock to ensure that it doesn't move.
         let slot = match unsafe { self.keys.get_semi_checked(key) } {
             Ok(pair) if pair.1 == table.index() => pair.0,
@@ -908,7 +908,7 @@ impl<'d, R: Row> Split<'d, '_, R, Chunk> {
             table,
             locks,
         } = self.state;
-        let keys = table.keys.read();
+        let keys = table.0.header.keys.read();
         let Some(count) = NonZeroUsize::new(table.count()) else {
             return None;
         };
