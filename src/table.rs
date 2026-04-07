@@ -268,7 +268,7 @@ impl Table {
 
     #[inline]
     pub fn metas(&self) -> impl FullIterator<Item = &'static Meta> + '_ {
-        self.columns().iter().map(|column| column.meta())
+        self.columns().iter().map(Column::meta)
     }
 
     #[inline]

@@ -51,7 +51,8 @@ pub unsafe trait Row: 'static {
     /// # Safety
     ///
     /// The caller must hold the locks declared by [`Row::declare`] and provide
-    /// a context whose key slice and row count match the current table snapshot.
+    /// a context whose key slice and row count match the current table
+    /// snapshot.
     unsafe fn chunk<'a>(state: &'a Self::State, context: ChunkContext<'a>) -> Self::Chunk<'a>;
 }
 
