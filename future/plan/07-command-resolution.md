@@ -35,6 +35,7 @@ Implement deferred structural mutation through:
 5. Resolution should be batch-oriented.
 6. Remove is semantically heavier than insert because remove moves rows.
 7. The default resolve granularity is function-level batching over all command buffers produced by that function, not one resolve job per source chunk.
+8. Structural resolution may request broader scheduler dependencies than ordinary leaf-column iteration, for example `Write(chunk)` or `Write(table)` rather than one `Write(column)` per physical column.
 
 ## Command Buffer Ownership
 
@@ -113,6 +114,7 @@ Because insert does not move existing rows:
 
 - its ordering requirements are lighter than remove,
 - the main effects are visibility and chunk creation.
+- its resolver may still need broad chunk or table dependencies while appending storage.
 
 ## Remove Resolution
 
@@ -129,6 +131,11 @@ Remove resolution should:
 The important semantic fact is that remove moves rows.
 
 That is why remove conflicts more strongly than insert.
+
+In the hierarchical dependency model, this usually means remove resolution depends on broader scopes such as:
+
+- `Read(store) + Read(table) + Write(chunk)` for chunk-local remove work,
+- or broader table-level write dependencies when chunk movement or allocation management crosses chunk boundaries.
 
 ## Why Remove Needs Extra Care
 

@@ -24,7 +24,8 @@
 //! - `key`: opt-in stable identity vocabulary for keyed tables.
 //! - `query`: access vocabulary for future query declarations.
 //! - `schedule`: ordering vocabulary for future schedule construction.
-//! - `schema`: schema layout metrics for chunk planning.
+//! - `schema`: the metadata catalog, logical-schema identity, table descriptors, and resource
+//!   mapping.
 //! - `store`: the foundation store boundary and chunk planning surface.
 //!
 //! Glossary:
@@ -34,6 +35,10 @@
 //!
 //! `table`
 //!: The storage owner for one logical schema. A table owns metadata and a collection of chunks.
+//!
+//! `store`
+//!: The root owner for tables. Scheduler dependency identifiers are hierarchical from store down
+//! to physical columns.
 //!
 //! `chunk`
 //!: A densely packed, independently allocated subset of one table's rows. Chunks are the minimum

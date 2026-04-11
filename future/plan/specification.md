@@ -175,6 +175,10 @@ The actual stored column unit. Usually one logical datum maps to one physical co
 
 The schema-owned storage container for one logical schema. A table owns metadata and a set of chunks.
 
+### Store
+
+The root owner for tables and the top of the scheduler dependency tree.
+
 ### Chunk
 
 A densely packed, independently allocated subset of one table's rows. A chunk has:
@@ -186,13 +190,22 @@ A densely packed, independently allocated subset of one table's rows. A chunk ha
 
 ### Resource
 
-The smallest scheduler-visible access unit.
+One scheduler-visible identifier inside the hierarchical dependency tree.
 
-In the selected design, the resource granularity floor is:
+The scheduler must be able to name:
+
+- the whole store,
+- one table inside that store,
+- one chunk inside that table,
+- one physical column inside that chunk.
+
+The granularity floor is:
 
 - one physical column,
 - of one chunk,
 - of one table.
+
+This means broad dependencies are legal, but the scheduler can still reason at the finest useful leaf.
 
 ### Job
 
@@ -302,7 +315,7 @@ This is not an optimization detail. It is a core invariant.
 
 The planner and scheduler reason about resources at the following minimum scope:
 
-- physical column x chunk x table.
+- physical column x chunk x table x store.
 
 This is deliberate.
 
@@ -311,6 +324,24 @@ It means:
 - `Position` and `Velocity` in the same chunk are different resources,
 - future subcolumn decomposition can become separate resources,
 - one hot chunk does not force whole-table serialization.
+
+It also means the dependency model is hierarchical rather than leaf-only.
+
+Examples:
+
+- writing one physical column in one chunk requires dependencies like:
+  - `Read(store)`
+  - `Read(table)`
+  - `Read(chunk)`
+  - `Write(physical_column)`
+- writing a whole chunk for structural work can instead request:
+  - `Read(store)`
+  - `Read(table)`
+  - `Write(chunk)`
+- writing the whole store can request:
+  - `Write(store)`
+
+To the scheduler, these are just identifiers plus access modes. The important rule is that every descendant access carries the ancestor reads needed to make broad and narrow conflicts comparable.
 
 ## Chunk-Only Query Outputs
 

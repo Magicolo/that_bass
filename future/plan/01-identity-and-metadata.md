@@ -8,6 +8,7 @@ Read this file together with `future/plan/specification.md` and `future/plan/sta
 
 Define the rewrite's core identity types and metadata registries:
 
+- store identity,
 - schema identity,
 - table identity,
 - chunk identity,
@@ -57,15 +58,22 @@ Why this matters:
 The exact names are negotiable. The responsibilities are not.
 
 ```rust
+struct StoreId(u32);
 struct SchemaId(u32);
 struct TableId(u32);
 struct ChunkId(u32);
 struct PhysicalColumnId(u16);
 
-struct ResourceId {
-    table: TableId,
-    chunk: ChunkId,
-    column: PhysicalColumnId,
+enum ResourceId {
+    Store(StoreId),
+    Table { store: StoreId, table: TableId },
+    Chunk { store: StoreId, table: TableId, chunk: ChunkId },
+    PhysicalColumn {
+        store: StoreId,
+        table: TableId,
+        chunk: ChunkId,
+        column: PhysicalColumnId,
+    },
 }
 ```
 
@@ -107,15 +115,35 @@ Do not assume "logical datum == one column" inside the metadata model even if th
 
 The selected granularity floor is:
 
-- one physical column of one chunk of one table.
+- one physical column of one chunk of one table in one store.
 
 That means the scheduler resource model must be able to name:
 
+- store `0`,
+- chunk `7` of table `3` of store `0`,
 - `Position` column for chunk `7` of table `3`,
 - `Velocity` column for chunk `7` of table `3`,
 - `Key` column for chunk `7` of table `3`, if the table is keyed.
 
-This is the minimum conflict scope in the rewrite.
+This is the minimum conflict scope in the rewrite, not the only legal scope.
+
+The scheduler must also support broader requests.
+
+Examples:
+
+- whole-store write:
+  - `Write(store_0)`
+- whole-chunk write:
+  - `Read(store_0)`
+  - `Read(table_3)`
+  - `Write(chunk_7)`
+- one-column write:
+  - `Read(store_0)`
+  - `Read(table_3)`
+  - `Read(chunk_7)`
+  - `Write(column_2)`
+
+To the scheduler, these only need to be identifiers plus access modes. The important rule is that descendant accesses carry the ancestor reads that let broad and narrow requests conflict correctly.
 
 ## Why Resource Identity Must Exist Before The Scheduler
 
@@ -200,12 +228,16 @@ the descriptor API should still allow:
 3. Define the physical column descriptor.
 4. Define the identity policy enum.
 5. Define the mapping from logical query request to physical column list.
-6. Define the function that derives scheduler resource IDs from a chunk plus physical access request.
+6. Define the functions that derive:
+   - scheduler resource IDs at every store/table/chunk/physical-column scope,
+   - full hierarchical dependency lists for leaf accesses,
+   - and broader dependencies for chunk/table/store-wide work.
 7. Add tests for:
    - schema equality,
    - column ordering,
    - identity-policy tagging,
-   - resource-ID generation.
+   - resource-ID generation,
+   - hierarchical dependency generation.
 
 ## Pitfalls
 
@@ -221,6 +253,39 @@ Keep internal resource identity precise, but keep user-facing queries simple.
 
 The `ManagedKeys` path depends on this later. The table descriptor must leave room for it now.
 
+## Implementation Review
+
+The current repository now implements this task in `src/v2/schema.rs` with:
+
+- a `Catalog` that interns logical schemas and registers table descriptors,
+- explicit index newtypes for stores, schemas, tables, chunks, logical columns, and physical columns,
+- `Schema` descriptors for logical identity,
+- `Table` descriptors for physical layout, identity policy, row-address bit partitioning, and chunk planning,
+- `PhysicalColumn` descriptors that distinguish logical ownership from the special managed-key column,
+- hierarchical `Resource` identifiers from store scope down to physical-column scope,
+- `Dependency` generation for:
+  - broad store/table/chunk requests,
+  - and leaf accesses that expand into read ancestors plus the requested leaf access,
+- stable logical-to-physical access mapping through `Table::map_logical_access(...)` and `Table::map_access::<T>(...)`.
+
+The current implementation also leaves room for future decomposition by allowing a single logical datum to map to multiple physical columns in one table descriptor.
+
+## Actions Taken In The Repository
+
+The following concrete actions were taken to satisfy this task:
+
+- expanded `src/v2/schema.rs` from a simple chunk-planning helper into the actual metadata layer,
+- kept the logical schema registry separate from table-descriptor registration so one logical schema can later support different physical layouts,
+- made managed-key tables append an inline `Key` physical column automatically when needed,
+- added hierarchical store/table/chunk/physical-column resource identifiers,
+- added dependency generation so:
+  - broad store/table/chunk requests carry the required ancestor reads,
+  - and leaf accesses expand to ancestor reads plus leaf accesses,
+- added validation that every declared logical datum has at least one physical column,
+- added `tests/v2/metadata.rs` to cover schema interning, column ordering, identity tagging, resource generation, hierarchical dependency generation, and missing-coverage rejection,
+- added `examples/v2/metadata.rs` so the current metadata API is visible in runnable sample usage,
+- updated `AGENTS.md` and the `v2` module docs so newcomers can find the new surface quickly.
+
 ## Done Criteria
 
 This task is done when:
@@ -229,3 +294,7 @@ This task is done when:
 - a logical query request can map to physical columns,
 - the scheduler has a stable resource naming scheme to build on,
 - future decomposition and keyed tables do not require redesigning the metadata layer.
+
+Current status:
+
+- implemented in the current repository layout.

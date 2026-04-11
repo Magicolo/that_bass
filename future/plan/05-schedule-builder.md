@@ -44,6 +44,7 @@ At schedule-build time, analyze:
 
 - query access descriptors,
 - command capabilities,
+- hierarchical dependency shapes,
 - explicit ordering annotations,
 - declaration order.
 
@@ -65,17 +66,33 @@ This distinction is mandatory. Without it, dynamic chunks and reusable schedules
 
 ## What Counts As A Conflict
 
-A function conflicts with another function when their declared accesses can overlap on the same physical resource and at least one side is exclusive.
+A function conflicts with another function when their dependency identifiers can overlap and at least one side is exclusive.
 
 Examples:
 
 - `read(Position)` vs `read(Position)`: no conflict.
 - `write(Position)` vs `read(Position)`: conflict.
 - `write(Position)` vs `write(Position)`: conflict.
+- `write(store)` vs any table/chunk/column access in that store: conflict.
+- `write(chunk)` vs any physical-column access in that chunk: conflict.
 - `insert into Table<Position, Velocity>` vs later `read(Position)` on that table: conflict through visibility and chunk creation.
 - `remove rows from table T` vs later query over those chunks: conflict through row movement and visibility.
 
 The planner should represent these conflicts without yet naming concrete chunk indices.
+
+Important model detail:
+
+- leaf column accesses expand to dependency chains such as:
+  - `Read(store)`
+  - `Read(table)`
+  - `Read(chunk)`
+  - `Write(column)`
+- broader structural work can request:
+  - `Write(store)`
+  - `Read(store) + Write(table)`
+  - `Read(store) + Read(table) + Write(chunk)`
+
+The scheduler only needs identifiers plus access modes, but it must compare them hierarchically.
 
 ## Declaration Order
 
@@ -97,6 +114,12 @@ If function `Integrate` and function `Clamp` both write `Position`, then:
 - but `Clamp(chunk_5)` does not need to wait for `Integrate(chunk_9)`.
 
 That resource-scoped refinement is a major performance property of the rewrite.
+
+The new hierarchical dependency model refines this further:
+
+- a later leaf-column job may depend on an earlier whole-chunk writer for that same chunk,
+- a later whole-chunk writer may depend on an earlier leaf-column writer in that chunk,
+- but unrelated chunks can still run independently.
 
 ## Resolve Nodes Are Part Of The Plan
 
@@ -178,11 +201,12 @@ Important clarification:
 1. Define a function-family descriptor.
 2. Define a resolve-family descriptor.
 3. Define plan-time conflict edges between families.
-4. Define runtime dependency templates for per-chunk execution jobs and function-level batched resolve families.
+4. Define runtime dependency templates for per-chunk execution jobs and function-level batched resolve families, using hierarchical dependency identifiers rather than leaf-only resource names.
 5. Define a stable schedule object that can be reused across frames.
 6. Add tests for:
    - no conflict between pure reads,
    - chunk-scoped ordering between same-writer families,
+   - broad chunk/store writers conflicting correctly with descendant accesses,
    - visibility ordering through resolve families,
    - stable schedule reuse after chunk-count changes.
 
