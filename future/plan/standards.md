@@ -107,6 +107,41 @@ Required rules:
 
 The library will expand carefully over time. It should not start wide.
 
+## Examples
+
+Examples are part of the public API contract.
+
+Required rules:
+
+- keep runnable `v2` examples under `examples/v2/`,
+- when the public `v2` API changes, update the relevant examples in the same patch,
+- use examples to show the intended public workflow, not internal implementation trivia,
+- prefer small focused examples over one giant showcase,
+- treat examples as newcomer-facing documentation that also happens to compile.
+
+## Commits
+
+Use conventional commits when creating commits.
+
+Required rules:
+
+- the commit title must follow conventional-commit structure,
+- keep the title to a short one-line summary,
+- write a body for every meaningful commit,
+- the body must describe the high-level changes rather than diff trivia,
+- focus the body on non-obvious changes and their implications,
+- write the body as if a careful newcomer to the library will read it later,
+- include a succinct rationale for why the change was made,
+- when the body uses project-specific terminology, briefly explain it or point to the relevant documentation,
+- when useful, reference files such as `AGENTS.md`, `future/plan/specification.md`, or the relevant task file so the reader can recover context quickly.
+
+Good commit bodies in this repository should answer:
+
+- what changed at a high level,
+- what is non-obvious about the change,
+- why the change was worth making,
+- where a newcomer should read next if they need the design context.
+
 ## Dependencies
 
 Do not reinvent the wheel for problems that are not specific to this library's goals.

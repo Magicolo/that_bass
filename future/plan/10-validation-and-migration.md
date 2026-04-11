@@ -162,6 +162,7 @@ Required rule:
   - `AGENTS.md`,
   - `future/plan/specification.md`,
   - and the specific task file or future proposal that changed.
+- when committing that change, use the commit-message standard from `future/plan/standards.md` so the rationale and non-obvious effects are preserved in history.
 
 This rule is not optional. It is part of the process.
 
@@ -198,6 +199,7 @@ When a future implementation patch claims to complete part of the rewrite, it sh
 3. What semantic rules changed, if any?
 4. Were `AGENTS.md` and `future/plan/specification.md` updated?
 5. Were `cargo fmt`, `cargo build`, and `cargo clippy --all-targets --all-features` run?
+6. Does the commit message follow the repository conventional-commit standard and explain the rationale?
 
 If a patch cannot answer those, it is not finished.
 

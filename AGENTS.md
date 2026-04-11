@@ -51,6 +51,7 @@ Primary source references:
 | `src/v1/core/utility.rs` | Unsafe helpers, sorted-set helpers, requeue/fold helpers | `src/v1/core/utility.rs:16-74`, `src/v1/core/utility.rs:74-163`, `src/v1/core/utility.rs:171-230` |
 | `that_base_derive/src/lib.rs` | Procedural macros; emits absolute `that_bass::v1::...` paths for the stable engine | `that_base_derive/src/lib.rs:23`, `that_base_derive/src/lib.rs:37`, `that_base_derive/src/lib.rs:83`, `that_base_derive/src/lib.rs:198` |
 | `tests/` | Integration suites grouped by engine generation; read these before changing semantics | `tests/v1/check.rs`, `tests/v1/query.rs`, `tests/v1/event.rs`, `tests/v1/derive.rs`, `tests/v2/foundation.rs` |
+| `examples/v2/` | Runnable sample usage for the rewrite lane; keep this aligned with the current `v2` public API | `examples/v2/main.rs`, `examples/v2/store_planning.rs`, `examples/v2/instrumentation.rs`, `examples/v2/vocabulary.rs` |
 | `future/` | Architecture proposals and rewrite planning docs | `future/README.md`, `future/06-recommended-roadmap.md`, `future/plan/specification.md` |
 
 Inactive or misleading files:
@@ -259,6 +260,7 @@ These rules matter more than style. Breaking any of them is likely UB or subtle 
 - `tests/v2/foundation.rs` verifies the rewrite-lane foundation boundary, chunk-capacity planning formula, and required measurement categories.
 - `benches/v1/create.rs` measures alternative create APIs, not end-to-end workload throughput.
 - `benches/v2/foundation.rs` is the initial comparative harness for the rewrite lane. It currently measures boundary construction and chunk-capacity planning, and should grow with later `v2` tasks instead of adding benchmark hooks inside library code.
+- `examples/v2/` is the executable API-evolution trace for the rewrite lane. When `v2` public behavior or naming changes, update these examples in the same patch.
 
 ## Recommended Workflow For Agents
 
@@ -275,7 +277,10 @@ These rules matter more than style. Breaking any of them is likely UB or subtle 
    - event emission,
    - query retry/revalidation paths.
 4. If a public behavior changes, update tests in the same patch.
-5. After any significant code, API, invariant, workflow, or roadmap change, update this `AGENTS.md` in the same change set. Do not let it drift.
+5. If the public `v2` surface changes, update `examples/v2/` in the same patch so the runnable sample usage stays current.
+6. After any significant code, API, invariant, workflow, or roadmap change, update this `AGENTS.md` in the same change set. Do not let it drift.
+7. If you create a commit, use a conventional-commit title and a detailed body.
+   The body should explain the high-level change, highlight non-obvious details, give a concise rationale, and point a newcomer at the relevant documentation when terminology needs context.
 
 ## Required End-Of-Task Checks
 
