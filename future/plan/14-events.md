@@ -18,7 +18,7 @@ Reintroduce structural events and observers in a way that matches:
 - `future/plan/specification.md`
 - `future/plan/standards.md`
 - `AGENTS.md`
-- current event behavior in `src/event.rs`
+- current event behavior in `src/v1/event.rs`
 
 ## Why This Was Deferred
 

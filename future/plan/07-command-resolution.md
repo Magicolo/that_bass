@@ -22,9 +22,9 @@ Implement deferred structural mutation through:
 - `future/07-keyless-and-user-keyed-tables.md`
 - `future/08-nested-query-soundness.md`
 - `AGENTS.md`
-- `src/create.rs`
-- `src/modify.rs`
-- `src/destroy.rs`
+- `src/v1/create.rs`
+- `src/v1/modify.rs`
+- `src/v1/destroy.rs`
 
 ## Selected Principles
 

@@ -14,7 +14,7 @@ Implement global settings, resources, and singleton-like data as normal tables, 
 - `future/plan/standards.md`
 - `future/04-scheduler-first-lockless-mode.md`
 - `AGENTS.md`
-- `src/resources.rs`
+- `src/v1/resources.rs`
 
 ## Selected Model
 

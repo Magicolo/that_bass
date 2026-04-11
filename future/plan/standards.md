@@ -32,6 +32,7 @@ Required rules:
 - no abbreviations,
 - no acronyms unless they are already the canonical type or trait name used by Rust or the ecosystem,
 - no single-letter variable names,
+- for public API types, prefer short complete English words and let the surrounding module provide context,
 - no vague names like `data`, `item`, `value`, or `state` unless the surrounding type makes the meaning precise and unavoidable.
 
 Examples:
@@ -39,6 +40,9 @@ Examples:
 - prefer `target_chunk_capacity` over `cap`,
 - prefer `physical_column_index` over `column_index` when both logical and physical columns exist,
 - prefer `resolve_result` over `result` when several results exist in scope.
+- prefer `Store` over `World`,
+- prefer `Configuration` over `WorldConfiguration`,
+- prefer `command::Kind` over `DeferredCommandKind` when the module already supplies the missing context.
 
 If a type, function, or variable is hard to name, that is often a sign the code wants to be split or simplified.
 
@@ -347,4 +351,3 @@ When in doubt, choose the option that is:
 4. smaller in public surface,
 5. smaller in unsafe surface,
 6. and no worse for performance.
-

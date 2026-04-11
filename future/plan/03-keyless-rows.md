@@ -20,9 +20,9 @@ Implement the keyless identity model:
 - `future/07-keyless-and-user-keyed-tables.md`
 - `future/08-nested-query-soundness.md`
 - `AGENTS.md`
-- `src/key.rs`
-- `src/modify.rs`
-- `src/destroy.rs`
+- `src/v1/key.rs`
+- `src/v1/modify.rs`
+- `src/v1/destroy.rs`
 
 ## Selected Model
 

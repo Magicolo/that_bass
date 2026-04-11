@@ -1,0 +1,465 @@
+use super::{
+    core::{
+        iterate::FullIterator,
+        utility::{get_unchecked, sorted_contains},
+        view_vec::{self, ViewVec},
+    },
+    key::Key,
+    Database, Datum, Error, Meta,
+};
+use parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
+use slice_dst::SliceWithHeader;
+use std::{
+    alloc::{alloc, dealloc, Layout, LayoutError},
+    any::TypeId,
+    num::NonZeroUsize,
+    ops::{Deref, DerefMut},
+    ptr::{copy_nonoverlapping, NonNull},
+    slice::{from_raw_parts, from_raw_parts_mut},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
+
+/// Columns are ordered consistently between tables.
+#[derive(Clone)]
+pub struct Table(pub(crate) Arc<SliceWithHeader<Header, Column>>);
+
+pub struct Column {
+    meta: &'static Meta,
+    data: RwLock<NonNull<u8>>,
+}
+
+pub(crate) struct State {
+    tables: ViewVec<Table>,
+}
+
+pub(crate) struct Keys {
+    data: NonNull<Key>,
+    capacity: usize,
+}
+
+#[derive(Clone)]
+pub struct Tables<'a>(view_vec::View<'a, Table>);
+
+#[derive(Default)]
+pub(crate) struct Header {
+    index: u32,
+    pub(crate) count: AtomicUsize,
+    pub(crate) keys: RwLock<Keys>,
+}
+
+impl Database {
+    #[inline]
+    pub fn tables(&self) -> Tables<'_> {
+        Tables(self.tables.tables.view())
+    }
+}
+
+impl Column {
+    pub(crate) fn new(meta: &'static Meta) -> Self {
+        Self {
+            data: RwLock::new(NonNull::dangling()),
+            meta,
+        }
+    }
+
+    #[inline]
+    pub const fn meta(&self) -> &'static Meta {
+        self.meta
+    }
+
+    #[inline]
+    pub(crate) const fn data(&self) -> &RwLock<NonNull<u8>> {
+        &self.data
+    }
+
+    #[inline]
+    pub(crate) unsafe fn copy_to(
+        source: (&Self, usize),
+        target: (&Self, usize),
+        count: NonZeroUsize,
+    ) -> bool {
+        debug_assert_eq!(source.0.meta().identifier(), target.0.meta().identifier());
+        let &Meta {
+            copy: Some(copy), ..
+        } = source.0.meta()
+        else {
+            return false;
+        };
+        copy(
+            (*source.0.data.data_ptr(), source.1),
+            (*target.0.data.data_ptr(), target.1),
+            count,
+        );
+        true
+    }
+
+    /// SAFETY: Both the 'source' and 'target' indices must be within the bounds
+    /// of the column. The ranges 'source_index..source_index + count' and
+    /// 'target_index..target_index + count' must not overlap.
+    #[inline]
+    pub(crate) unsafe fn squash(
+        &self,
+        source_index: usize,
+        target_index: usize,
+        count: NonZeroUsize,
+    ) {
+        let &Meta { copy, drop, .. } = self.meta();
+        let data = unsafe { *self.data.data_ptr() };
+        if let Some(drop) = drop {
+            drop(data, target_index, count);
+        }
+        if let Some(copy) = copy {
+            copy((data, source_index), (data, target_index), count);
+        }
+    }
+
+    /// SAFETY: Both the 'source' and 'target' indices must be within the bounds
+    /// of the column. The ranges 'source_index..source_index + count' and
+    /// 'target_index..target_index + count' must not overlap.
+    #[inline]
+    pub(crate) unsafe fn copy(
+        &self,
+        source_index: usize,
+        target_index: usize,
+        count: NonZeroUsize,
+    ) -> bool {
+        let &Meta {
+            copy: Some(copy), ..
+        } = self.meta()
+        else {
+            return false;
+        };
+        let data = *self.data.data_ptr();
+        copy((data, source_index), (data, target_index), count);
+        true
+    }
+
+    #[inline]
+    pub(crate) unsafe fn drop(&self, index: usize, count: NonZeroUsize) -> bool {
+        let &Meta {
+            drop: Some(drop), ..
+        } = self.meta()
+        else {
+            return false;
+        };
+        let data = unsafe { *self.data.data_ptr() };
+        drop(data, index, count);
+        true
+    }
+
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) unsafe fn get<T: 'static>(&self, index: usize) -> &mut T {
+        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
+        let data = *self.data.data_ptr();
+        &mut *data.as_ptr().cast::<T>().add(index)
+    }
+
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) unsafe fn get_all<T: 'static>(&self, count: usize) -> &mut [T] {
+        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
+        let data = *self.data.data_ptr();
+        from_raw_parts_mut(data.as_ptr().cast::<T>(), count)
+    }
+
+    #[inline]
+    pub(crate) unsafe fn set<T: 'static>(&self, index: usize, value: T) {
+        debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
+        let data = *self.data.data_ptr();
+        data.as_ptr().cast::<T>().add(index).write(value);
+    }
+}
+
+impl Tables<'_> {
+    #[inline]
+    pub fn update(&mut self) {
+        self.0.update();
+    }
+
+    #[inline]
+    pub fn len(&mut self) -> usize {
+        self.0.get_updated().len()
+    }
+
+    #[inline]
+    pub fn is_empty(&mut self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn iter(&mut self) -> impl FullIterator<Item = &Table> {
+        self.0.get_updated().iter()
+    }
+
+    #[inline]
+    pub fn get(&mut self, index: usize) -> Result<&Table, Error> {
+        match self.0.get_updated().get(index) {
+            Some(table) => Ok(table),
+            None => Err(Error::MissingTable(index)),
+        }
+    }
+
+    #[inline]
+    /// # Safety
+    ///
+    /// `index` must be in bounds for the current table view held by `self`.
+    pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
+        get_unchecked(self.0.get(), index)
+    }
+
+    /// `metas` must be sorted by `meta.identifier()` and must be deduplicated.
+    #[inline]
+    pub(crate) fn find_or_add(&mut self, metas: &[&'static Meta]) -> Table {
+        // Verifies that `metas` is sorted and deduplicated.
+        debug_assert!(metas
+            .windows(2)
+            .all(|metas| metas[0].identifier() < metas[1].identifier()));
+
+        let mut index = 0;
+        loop {
+            let tables = self.0.get_updated();
+            for table in &tables[index..] {
+                if table.is_all(metas.iter().map(|meta| meta.identifier())) {
+                    return table.clone();
+                }
+            }
+            index = tables.len();
+
+            let table = Table(SliceWithHeader::new(
+                Header {
+                    index: index as _,
+                    count: 0.into(),
+                    keys: RwLock::new(Keys::default()),
+                },
+                metas.iter().map(|&meta| Column::new(meta)),
+            ));
+
+            if self.0.push_if_same(table.clone()).is_some() {
+                break table;
+            }
+        }
+    }
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            tables: ViewVec::new(&[]),
+        }
+    }
+}
+
+impl Table {
+    #[inline]
+    pub fn index(&self) -> u32 {
+        self.0.header.index
+    }
+
+    #[inline]
+    pub fn count(&self) -> usize {
+        self.0.header.count.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn metas(&self) -> impl FullIterator<Item = &'static Meta> + '_ {
+        self.columns().iter().map(Column::meta)
+    }
+
+    #[inline]
+    pub fn types(&self) -> impl FullIterator<Item = TypeId> + '_ {
+        self.metas().map(Meta::identifier)
+    }
+
+    #[inline]
+    pub fn columns(&self) -> &[Column] {
+        &self.0.slice
+    }
+
+    #[inline]
+    pub fn has<D: Datum>(&self) -> bool {
+        self.has_with(TypeId::of::<D>())
+    }
+
+    #[inline]
+    pub fn has_with(&self, identifier: TypeId) -> bool {
+        self.columns()
+            .binary_search_by_key(&identifier, |column| column.meta().identifier())
+            .is_ok()
+    }
+
+    pub fn column<D: Datum>(&self) -> Result<(usize, &Column), Error> {
+        self.column_with(TypeId::of::<D>())
+    }
+
+    pub fn column_with(&self, identifier: TypeId) -> Result<(usize, &Column), Error> {
+        let columns = self.columns();
+        let index = columns
+            .binary_search_by_key(&identifier, |column| column.meta().identifier())
+            .map_err(|_| Error::MissingColumn(identifier))?;
+        Ok((index, &columns[index]))
+    }
+
+    pub(crate) fn reserve<'a>(
+        &self,
+        keys: RwLockUpgradableReadGuard<'a, Keys>,
+        count: NonZeroUsize,
+    ) -> (usize, RwLockUpgradableReadGuard<'a, Keys>) {
+        fn next(
+            columns: &[Column],
+            capacities: (usize, usize),
+            layouts: (Layout, Layout),
+        ) -> Result<(*mut u8, Layout), LayoutError> {
+            match columns.split_first() {
+                Some((column, columns)) if column.meta().size() == 0 => {
+                    next(columns, capacities, layouts)
+                }
+                Some((column, columns)) => {
+                    let Meta { layout, .. } = column.meta();
+                    let old: (Layout, usize) = layouts.0.extend(layout(capacities.0)?)?;
+                    let new: (Layout, usize) = layouts.1.extend(layout(capacities.1)?)?;
+                    let (target, layout) = next(columns, capacities, (old.0, new.0))?;
+                    let mut guard = column.data().write();
+                    unsafe {
+                        copy_nonoverlapping(
+                            guard.as_ptr(),
+                            target.add(new.1),
+                            old.0.size() - old.1,
+                        );
+                        *guard = NonNull::new_unchecked(target.add(new.1));
+                    }
+                    drop(guard);
+                    Ok((target, layout))
+                }
+                None => Ok((unsafe { alloc(layouts.1) }, layouts.0)),
+            }
+        }
+
+        let start = self.0.header.count.load(Ordering::Acquire);
+        assert!(
+            start < u32::MAX as usize - count.get(),
+            "There can not be more than `u32::MAX` keys at a given time."
+        );
+
+        let end = count.saturating_add(start as _);
+        let old_capacity = keys.capacity;
+        let new_capacity = end.get().next_power_of_two();
+        if new_capacity <= old_capacity {
+            return (start, keys);
+        }
+
+        let old_layout = Layout::array::<Key>(old_capacity).unwrap();
+        let new_layout = Layout::array::<Key>(new_capacity).unwrap();
+        let (target, layout) = next(
+            self.columns(),
+            (old_capacity, new_capacity),
+            (old_layout, new_layout),
+        )
+        .unwrap();
+        let source = keys.data.cast().as_ptr();
+        // Copy can happen outside of write lock since `Key` is immutable.
+        unsafe { copy_nonoverlapping(source, target, old_layout.size()) };
+        let mut keys = RwLockUpgradableReadGuard::upgrade(keys);
+        keys.data = unsafe { NonNull::new_unchecked(target).cast() };
+        keys.capacity = new_capacity;
+        let keys = RwLockWriteGuard::downgrade_to_upgradable(keys);
+        if old_capacity > 0 {
+            unsafe { dealloc(source, layout) };
+        }
+        (start, keys)
+    }
+
+    /// `types` must be ordered and deduplicated.
+    #[inline]
+    pub(crate) fn is_all(&self, types: impl ExactSizeIterator<Item = TypeId>) -> bool {
+        self.columns().len() == types.len() && self.types().eq(types)
+    }
+
+    /// `types` must be ordered and deduplicated.
+    #[inline]
+    pub(crate) fn has_all(&self, types: impl ExactSizeIterator<Item = TypeId>) -> bool {
+        self.columns().len() >= types.len() && sorted_contains(self.types(), types)
+    }
+}
+
+unsafe impl Send for Table {}
+unsafe impl Sync for Table {}
+
+impl Default for Table {
+    fn default() -> Self {
+        Self(SliceWithHeader::new(Header::default(), []))
+    }
+}
+
+impl Drop for Table {
+    fn drop(&mut self) {
+        if let Some(table) = Arc::get_mut(&mut self.0) {
+            let count = *table.header.count.get_mut();
+            let Keys { data, capacity } = *table.header.keys.get_mut();
+            debug_assert!(count <= capacity);
+            let Some(capacity) = NonZeroUsize::new(capacity) else {
+                return;
+            };
+            debug_assert_ne!(data, NonNull::dangling());
+
+            let mut total = Layout::array::<Key>(capacity.get()).unwrap();
+            for column in table.slice.iter_mut() {
+                let Meta { layout, .. } = column.meta();
+                if let Some(count) = NonZeroUsize::new(count) {
+                    unsafe { column.drop(0, count) };
+                }
+                (total, _) = total.extend(layout(capacity.get()).unwrap()).unwrap();
+            }
+            unsafe { dealloc(data.cast().as_ptr(), total) };
+        }
+    }
+}
+
+impl Deref for Keys {
+    type Target = [Key];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { from_raw_parts(self.data.as_ptr(), self.capacity) }
+    }
+}
+
+impl DerefMut for Keys {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { from_raw_parts_mut(self.data.as_ptr(), self.capacity) }
+    }
+}
+
+impl Default for Keys {
+    fn default() -> Self {
+        Self {
+            data: NonNull::dangling(),
+            capacity: 0,
+        }
+    }
+}
+
+#[test]
+fn table_reserve_grows_when_empty() {
+    let table = Table::default();
+    let keys = table.0.header.keys.upgradable_read();
+    assert_eq!(keys.data, NonNull::dangling());
+    assert_eq!(keys.len(), 0);
+    let (index, keys) = table.reserve(keys, NonZeroUsize::MIN);
+    assert_eq!(index, 0);
+    assert_eq!(keys.len(), 1);
+    assert_ne!(keys.data, NonNull::dangling());
+    assert_eq!(table.count(), 0);
+}
+
+#[test]
+fn table_reserve_grows_in_powers_of_2() {
+    let table = Table::default();
+    let keys = table.0.header.keys.upgradable_read();
+    let (_, keys) = table.reserve(keys, NonZeroUsize::MIN.saturating_add(2));
+    assert_eq!(keys.len(), 4);
+    let (_, keys) = table.reserve(keys, NonZeroUsize::MIN.saturating_add(4));
+    assert_eq!(keys.len(), 8);
+}

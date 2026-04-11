@@ -22,7 +22,7 @@ for item1 in query1 {
 }
 ```
 
-The current source already recognizes the issue and sketches an incomplete approach in `src/lib.rs:177-196`.
+The current source already recognizes the issue and sketches an incomplete approach in `src/v1/mod.rs:177-196`.
 
 ## The Core Problem
 
@@ -187,7 +187,7 @@ Specifically:
 - Any outer write that conflicts with an inner read or write remains exclusive.
 - Missing inner accesses that could require lower-index columns on the current table are pre-acquired in a compatible order.
 
-This is close in spirit to the existing TODO in `src/lib.rs:177-188`, but the key missing piece is the borrow model.
+This is close in spirit to the existing TODO in `src/v1/mod.rs:177-188`, but the key missing piece is the borrow model.
 
 ## The Missing Piece: Proxy Borrows
 

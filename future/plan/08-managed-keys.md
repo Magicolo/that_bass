@@ -19,10 +19,10 @@ Implement managed keyed tables through:
 - `future/plan/standards.md`
 - `future/07-keyless-and-user-keyed-tables.md`
 - `AGENTS.md`
-- `src/key.rs`
-- `src/create.rs`
-- `src/destroy.rs`
-- `src/modify.rs`
+- `src/v1/key.rs`
+- `src/v1/create.rs`
+- `src/v1/destroy.rs`
+- `src/v1/modify.rs`
 
 ## Selected Model
 

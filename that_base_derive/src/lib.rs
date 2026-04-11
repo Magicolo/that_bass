@@ -27,7 +27,7 @@ pub fn datum(input: TokenStream) -> TokenStream {
         ident, generics, ..
     } = parse_macro_input!(input as DeriveInput);
     let (impl_generics, type_generics, where_clauses) = generics.split_for_impl();
-    let datum = path(ident.span(), ["that_bass", "Datum"]);
+    let datum = path(ident.span(), ["that_bass", "v1", "Datum"]);
     quote!(
         #[automatically_derived]
         impl #impl_generics #datum for #ident #type_generics #where_clauses { }
@@ -47,11 +47,20 @@ pub fn template(input: TokenStream) -> TokenStream {
         return quote!(compile_error!("Enumeration and union types are not supported for this derive.");).into();
     };
     let (impl_generics, type_generics, where_clauses) = generics.split_for_impl();
-    let template_path = path(ident.span(), ["that_bass", "template", "Template"]);
-    let error_path = path(ident.span(), ["that_bass", "Error"]);
-    let declare_path = path(ident.span(), ["that_bass", "template", "DeclareContext"]);
-    let initialize_path = path(ident.span(), ["that_bass", "template", "InitializeContext"]);
-    let apply_path = path(ident.span(), ["that_bass", "template", "ApplyContext"]);
+    let template_path = path(ident.span(), ["that_bass", "v1", "template", "Template"]);
+    let error_path = path(ident.span(), ["that_bass", "v1", "Error"]);
+    let declare_path = path(
+        ident.span(),
+        ["that_bass", "v1", "template", "DeclareContext"],
+    );
+    let initialize_path = path(
+        ident.span(),
+        ["that_bass", "v1", "template", "InitializeContext"],
+    );
+    let apply_path = path(
+        ident.span(),
+        ["that_bass", "v1", "template", "ApplyContext"],
+    );
     let DeconstructedFields {
         construct,
         names,
@@ -90,14 +99,14 @@ pub fn filter(input: TokenStream) -> TokenStream {
         ..
     } = parse_macro_input!(input as DeriveInput);
     let (impl_generics, type_generics, where_clauses) = generics.split_for_impl();
-    let filter_path = path(ident.span(), ["that_bass", "filter", "Filter"]);
-    // let any_filter_path = path(ident.span(), ["that_bass", "filter", "Any"]);
-    // let any_path = path(ident.span(), ["that_bass", "filter", "any"]);
-    // let same_filter_path = path(ident.span(), ["that_bass", "filter", "Same"]);
-    // let same_path = path(ident.span(), ["that_bass", "filter", "same"]);
-    let dynamic_path = path(ident.span(), ["that_bass", "filter", "Dynamic"]);
-    let database_path = path(ident.span(), ["that_bass", "Database"]);
-    let table_path = path(ident.span(), ["that_bass", "table", "Table"]);
+    let filter_path = path(ident.span(), ["that_bass", "v1", "filter", "Filter"]);
+    // let any_filter_path = path(ident.span(), ["that_bass", "v1", "filter", "Any"]);
+    // let any_path = path(ident.span(), ["that_bass", "v1", "filter", "any"]);
+    // let same_filter_path = path(ident.span(), ["that_bass", "v1", "filter", "Same"]);
+    // let same_path = path(ident.span(), ["that_bass", "v1", "filter", "same"]);
+    let dynamic_path = path(ident.span(), ["that_bass", "v1", "filter", "Dynamic"]);
+    let database_path = path(ident.span(), ["that_bass", "v1", "Database"]);
+    let table_path = path(ident.span(), ["that_bass", "v1", "table", "Table"]);
     match data {
         Data::Struct(DataStruct { fields, .. }) => {
             let DeconstructedFields {
@@ -218,12 +227,15 @@ pub fn row(input: TokenStream) -> TokenStream {
     LifetimeVisitor("static").visit_generics_mut(&mut static_generics);
     let (_, type_generics, _) = static_generics.split_for_impl();
 
-    let row_path = path(ident.span(), ["that_bass", "row", "Row"]);
-    let declare_path = path(ident.span(), ["that_bass", "row", "DeclareContext"]);
-    let initialize_path = path(ident.span(), ["that_bass", "row", "InitializeContext"]);
-    let item_path = path(ident.span(), ["that_bass", "row", "ItemContext"]);
-    let chunk_path = path(ident.span(), ["that_bass", "row", "ChunkContext"]);
-    let error_path = path(ident.span(), ["that_bass", "Error"]);
+    let row_path = path(ident.span(), ["that_bass", "v1", "row", "Row"]);
+    let declare_path = path(ident.span(), ["that_bass", "v1", "row", "DeclareContext"]);
+    let initialize_path = path(
+        ident.span(),
+        ["that_bass", "v1", "row", "InitializeContext"],
+    );
+    let item_path = path(ident.span(), ["that_bass", "v1", "row", "ItemContext"]);
+    let chunk_path = path(ident.span(), ["that_bass", "v1", "row", "ChunkContext"]);
+    let error_path = path(ident.span(), ["that_bass", "v1", "Error"]);
     match data {
         Data::Struct(DataStruct { mut fields, .. }) => {
             LifetimeVisitor("static").visit_fields_mut(&mut fields);

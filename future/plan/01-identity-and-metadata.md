@@ -23,10 +23,10 @@ This task is about names, indexing, and metadata ownership, not yet about execut
 - `future/03-chunking-locks-and-query-plans.md`
 - `future/07-keyless-and-user-keyed-tables.md`
 - `AGENTS.md`
-- `src/lib.rs`
-- `src/table.rs`
-- `src/template.rs`
-- `src/row.rs`
+- `src/v1/mod.rs`
+- `src/v1/table.rs`
+- `src/v1/template.rs`
+- `src/v1/row.rs`
 
 ## Key Design Decision
 

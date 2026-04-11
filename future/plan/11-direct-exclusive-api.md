@@ -19,10 +19,10 @@ Implement the direct exclusive mode where:
 - `future/plan/standards.md`
 - `AGENTS.md`
 - current direct APIs in:
-  - `src/create.rs`
-  - `src/query.rs`
-  - `src/modify.rs`
-  - `src/destroy.rs`
+  - `src/v1/create.rs`
+  - `src/v1/query.rs`
+  - `src/v1/modify.rs`
+  - `src/v1/destroy.rs`
 
 ## Selected Rule
 
@@ -116,11 +116,11 @@ That is preferable to building a second independent mutation subsystem.
 ## Example Direction
 
 ```rust
-let mut world = World::new();
+let mut store = Store::new();
 
-world.insert_now((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }));
+store.insert_now((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }));
 
-world.query_now(query::all((query::write::<Position>(), query::read::<Velocity>())))
+store.query_now(query::all((query::write::<Position>(), query::read::<Velocity>())))
     .for_each_chunk(|positions, velocities| {
         for (position, velocity) in positions.zip(velocities) {
             position.x += velocity.x;

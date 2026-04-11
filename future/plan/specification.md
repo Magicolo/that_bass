@@ -15,12 +15,12 @@ Primary references:
 - `future/07-keyless-and-user-keyed-tables.md`
 - `future/08-nested-query-soundness.md`
 - Current implementation reference points:
-  - `src/lib.rs`
-  - `src/table.rs`
-  - `src/query.rs`
-  - `src/modify.rs`
-  - `src/destroy.rs`
-  - `src/key.rs`
+  - `src/v1/mod.rs`
+  - `src/v1/table.rs`
+  - `src/v1/query.rs`
+  - `src/v1/modify.rs`
+  - `src/v1/destroy.rs`
+  - `src/v1/key.rs`
 
 ## Status
 

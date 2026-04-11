@@ -24,9 +24,9 @@ If this task is skipped, later tasks will drift and the rewrite will become hard
 - `future/plan/standards.md`
 - `future/03-chunking-locks-and-query-plans.md`
 - `future/04-scheduler-first-lockless-mode.md`
-- `src/lib.rs`
-- `src/table.rs`
-- `src/query.rs`
+- `src/v1/mod.rs`
+- `src/v1/table.rs`
+- `src/v1/query.rs`
 
 ## Decisions Already Taken
 
@@ -40,7 +40,7 @@ If this task is skipped, later tasks will drift and the rewrite will become hard
 ## Deliverables
 
 1. A dedicated rewrite module or crate boundary.
-2. A short architecture README for that boundary, pointing back to `future/plan/specification.md`.
+2. A short architecture README or top-level module docs for that boundary, pointing back to `future/plan/specification.md`.
 3. A benchmark harness that can compare current behavior against rewrite prototypes.
 4. A minimal instrumentation plan for:
    - schedule build cost,
@@ -60,7 +60,7 @@ If this task is skipped, later tasks will drift and the rewrite will become hard
 
 ## Recommended Repository Strategy
 
-Do not start by deleting or rewriting `src/table.rs`, `src/query.rs`, or the existing deferred operations.
+Do not start by deleting or rewriting `src/v1/table.rs`, `src/v1/query.rs`, or the existing deferred operations.
 
 Prefer one of these:
 
@@ -187,16 +187,68 @@ This task should leave the project with a clear shape like:
 ```rust
 pub mod v2 {
     pub mod schema;
-    pub mod storage;
+    pub mod store;
     pub mod query;
     pub mod schedule;
-    pub mod commands;
+    pub mod command;
     pub mod key;
     pub mod bench;
 }
 ```
 
 That exact layout is negotiable. The point is the boundary, not the names.
+
+## Implementation Review
+
+The current repository now satisfies the task in this concrete shape:
+
+- the stable engine lives under `src/v1/` and remains available as the behavioral reference,
+- the rewrite lane lives under `src/v2/` and is isolated from `v1`,
+- the crate root only exposes `pub mod v1;` and `pub mod v2;`,
+- the rewrite boundary is documented directly in `src/v2/mod.rs`,
+- the current foundation API is intentionally small:
+  - `Store`,
+  - `Configuration`,
+  - `ChunkPlan`,
+  - `command`,
+  - `instrumentation`,
+  - `key`,
+  - `query`,
+  - `schedule`,
+  - `schema`,
+  - `store`,
+- the benchmark harness is grouped by generation in:
+  - `benches/v1/`,
+  - `benches/v2/`,
+- the integration suites are grouped by generation in:
+  - `tests/v1/`,
+  - `tests/v2/`,
+- the measurement plan exists in `src/v2/instrumentation.rs`,
+- the glossary now lives in `src/v2/mod.rs` rather than in a separate file.
+
+This means Task 00 should now be treated as implemented, not merely proposed.
+
+## Actions Taken In The Repository
+
+The following concrete actions have already been taken to satisfy this task:
+
+- the stable runtime was moved under `src/v1/` so the rewrite can evolve without sharing the same module root,
+- the rewrite foundation was isolated under `src/v2/` and is exposed only through `pub mod v2;`,
+- the `v2` boundary docs and glossary were consolidated into `src/v2/mod.rs`,
+- the early `v2` public API was renamed to use short complete English words:
+  - `Store`,
+  - `Configuration`,
+  - `ChunkPlan`,
+  - `command`,
+- integration tests and benchmarks were reorganized by generation so the repository layout now mirrors the source layout:
+  - `tests/v1/`,
+  - `tests/v2/`,
+  - `benches/v1/`,
+  - `benches/v2/`,
+- the proc-macro crate now points stable derive output at `that_bass::v1::...`,
+- Task 00 benchmark scaffolding exists as generation-specific bench targets instead of a single mixed benchmark entry point.
+
+These actions are part of the accepted baseline for later tasks. Future tasks should build on this layout instead of reopening the boundary question unless the rewrite plan itself changes.
 
 ## Risks
 
@@ -231,3 +283,8 @@ This task is done when:
 - benchmark and instrumentation scaffolding exists,
 - the glossary and success criteria are written down,
 - later tasks have a stable place to land code without destabilizing the current crate.
+
+Current status:
+
+- done in the current repository layout.
+- the current baseline includes the `src/v1/` and `src/v2/` split, grouped `tests/` and `benches/`, and the renamed `Store`-oriented `v2` foundation surface.

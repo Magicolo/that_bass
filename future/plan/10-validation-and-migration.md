@@ -21,7 +21,8 @@ Define:
 - `future/README.md`
 - `future/06-recommended-roadmap.md`
 - `AGENTS.md`
-- current tests in `tests/`
+- current tests in `tests/v1/` and `tests/v2/`
+- current benchmarks in `benches/v1/` and `benches/v2/`
 
 ## Validation Strategy
 

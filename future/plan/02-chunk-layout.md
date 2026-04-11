@@ -22,9 +22,9 @@ The rewrite depends on chunks for:
 - `future/plan/standards.md`
 - `future/03-chunking-locks-and-query-plans.md`
 - `AGENTS.md`
-- `src/table.rs`
-- `src/modify.rs`
-- `src/destroy.rs`
+- `src/v1/table.rs`
+- `src/v1/modify.rs`
+- `src/v1/destroy.rs`
 
 ## Selected Chunk Capacity Rule
 

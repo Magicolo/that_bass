@@ -21,9 +21,9 @@ Build the reusable schedule representation that:
 - `future/04-scheduler-first-lockless-mode.md`
 - `future/08-nested-query-soundness.md`
 - `AGENTS.md`
-- `src/query.rs`
-- `src/modify.rs`
-- `src/destroy.rs`
+- `src/v1/query.rs`
+- `src/v1/modify.rs`
+- `src/v1/destroy.rs`
 
 ## Selected Scheduler Principles
 

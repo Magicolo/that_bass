@@ -28,5 +28,9 @@ skeptic = "0.13"
 members = ["that_base_derive"]
 
 [[bench]]
-name = "create"
+name = "v1"
+harness = false
+
+[[bench]]
+name = "v2"
 harness = false

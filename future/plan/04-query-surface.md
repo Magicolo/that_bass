@@ -20,9 +20,9 @@ Implement the MVP query surface:
 - `future/plan/standards.md`
 - `future/08-nested-query-soundness.md`
 - `AGENTS.md`
-- `src/query.rs`
-- `src/row.rs`
-- `src/filter.rs`
+- `src/v1/query.rs`
+- `src/v1/row.rs`
+- `src/v1/filter.rs`
 
 ## Selected Query Principles
 
