@@ -393,9 +393,9 @@ Required MVP combinators:
 - `query::read::<T>()`
 - `query::write::<T>()`
 - `query::rows()`
+- `query::option(...)`
 - `query::all(...)`
 - `query::one(...)`
-- likely `query::opt(...)`
 
 Why `query::all(...)` exists:
 
@@ -411,7 +411,7 @@ Examples:
 
 - `Read<T>` plus `Write<T>` on potentially overlapping rows: reject.
 - `Write<T>` plus `Write<T>` on potentially overlapping rows: reject.
-- `Write<T> + Has<U>` versus `Write<T> + Not<Has<U>>`: acceptable if the planner can prove disjointness.
+- `Write<T>` with filter `has::<U>()` versus `Write<T>` with filter `not(has::<U>())`: acceptable if the planner can prove disjointness.
 
 MVP stance:
 

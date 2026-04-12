@@ -22,7 +22,8 @@
 //! - `command`: deferred command vocabulary.
 //! - `instrumentation`: measurement categories and public diagnostics hooks.
 //! - `key`: stable-identity vocabulary used by later extension resources.
-//! - `query`: access vocabulary plus transient row-handle request terms.
+//! - `query`: typed query descriptors, inline dense-slice projections, optional chunk views,
+//!   filters, and access analysis.
 //! - `schedule`: ordering vocabulary for future schedule construction.
 //! - `schema`: the metadata catalog, `Meta` descriptors, chunk layouts, tables, chunks, and
 //!   resource mapping.

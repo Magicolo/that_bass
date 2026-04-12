@@ -27,6 +27,7 @@ use core::{
     iter::FusedIterator,
     marker::PhantomData,
     mem::{align_of, needs_drop, size_of},
+    num::NonZeroUsize,
     ptr::NonNull,
     slice::{from_raw_parts, from_raw_parts_mut},
 };
@@ -746,6 +747,10 @@ impl Meta {
         self.storage
     }
 
+    pub const fn is_inline(self) -> bool {
+        matches!(self.storage, Storage::Inline)
+    }
+
     pub fn layout(self) -> Layout {
         Layout::from_size_align(self.element_size, self.element_alignment)
             .expect("meta layout must be valid")
@@ -1127,7 +1132,7 @@ impl Chunk {
         let last_row_index = self.count - 1;
 
         for (meta, pointer) in self.metas().iter().zip(self.pointers.iter().copied()) {
-            if meta.storage() != Storage::Inline {
+            if !meta.is_inline() {
                 continue;
             }
 
@@ -1173,7 +1178,7 @@ impl Chunk {
     ) -> Result<(&Meta, NonNull<u8>), ChunkError> {
         let (meta, pointer) = self.meta_and_pointer(column_index)?;
 
-        if meta.storage() != Storage::Inline {
+        if !meta.is_inline() {
             return Err(ChunkError::ColumnNotInline {
                 meta_name: meta.name(),
             });
@@ -1196,7 +1201,7 @@ impl Chunk {
         }
 
         for (meta, pointer) in self.metas().iter().zip(self.pointers.iter().copied()) {
-            if meta.storage() != Storage::Inline {
+            if !meta.is_inline() {
                 continue;
             }
 
@@ -1262,8 +1267,17 @@ impl Table {
             .find(|meta| meta.identifier() == identifier)
     }
 
+    pub fn inline_meta_for_identifier(&self, identifier: TypeId) -> Option<&Meta> {
+        let meta = self.meta_for_identifier(identifier)?;
+        meta.is_inline().then_some(meta)
+    }
+
     pub fn meta_for<T: 'static>(&self) -> Option<&Meta> {
         self.meta_for_identifier(TypeId::of::<T>())
+    }
+
+    pub fn inline_meta_for<T: 'static>(&self) -> Option<&Meta> {
+        self.inline_meta_for_identifier(TypeId::of::<T>())
     }
 
     pub fn chunks(&self) -> &[Chunk] {
@@ -1698,7 +1712,7 @@ impl Catalog {
 
         let row_width = metas
             .iter()
-            .filter(|meta| meta.storage() == Storage::Inline)
+            .filter(|meta| meta.is_inline())
             .map(|meta| meta.element_size())
             .sum();
         let layout = TableLayout::new(row_width, metas.len());
@@ -1725,7 +1739,7 @@ impl Catalog {
 }
 
 fn region_layout_for_meta(meta: Meta, capacity: usize) -> Result<Option<Layout>, DefinitionError> {
-    if meta.storage() != Storage::Inline || meta.element_size() == 0 {
+    if !meta.is_inline() || meta.element_size() == 0 {
         return Ok(None);
     }
 
@@ -1799,10 +1813,12 @@ fn aligned_dangling_pointer(alignment: usize) -> NonNull<u8> {
     debug_assert!(alignment >= 1);
     debug_assert!(alignment.is_power_of_two());
 
-    // Safety: any non-zero power-of-two address is aligned for the corresponding alignment and is
-    // suitable as a dangling sentinel because it is never dereferenced when no inline region
-    // exists.
-    unsafe { NonNull::new_unchecked(alignment as *mut u8) }
+    let alignment =
+        NonZeroUsize::new(alignment).expect("alignment must remain a non-zero power of two");
+
+    // `NonNull::without_provenance` gives us an aligned dangling sentinel without relying on an
+    // integer-to-pointer cast, which keeps Miri and strict provenance happy.
+    NonNull::without_provenance(alignment)
 }
 
 fn meta_pointer_from_slice(metas: &[Meta]) -> NonNull<Meta> {

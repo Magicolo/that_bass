@@ -9,6 +9,10 @@ pub fn run() {
     let position_access = Access::Write;
     let velocity_access = Access::Read;
     let rows_request = query::rows();
+    let optional_velocity = query::option(query::read::<u32>());
+    let singleton_position = query::one(query::read::<u64>());
+    let query_shape = query::all((rows_request, query::read::<u32>(), optional_velocity))
+        .filter(query::has::<u64>());
     let remove_command_kind = Kind::Remove;
     let resolve_strategy = Strategy::FunctionLevelBatch;
     let default_ordering = Ordering::ImplicitDeclarationOrder;
@@ -18,6 +22,9 @@ pub fn run() {
     println!("Vocabulary snapshot");
     println!("  query access: position={position_access:?}, velocity={velocity_access:?}");
     println!("  query rows request: {rows_request:?}");
+    println!("  optional query item: {optional_velocity:?}");
+    println!("  one query item: {singleton_position:?}");
+    println!("  analyzed conjunctive query: {:?}", query_shape.analyze());
     println!("  command kind: {remove_command_kind:?}");
     println!("  empty remove buffer length: {}", remove_buffer.len());
     println!("  resolve strategy: {resolve_strategy:?}");

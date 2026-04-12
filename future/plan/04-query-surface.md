@@ -39,10 +39,10 @@ The exact API syntax can evolve. The MVP needs the following concepts:
 - `query::read::<T>()`
 - `query::write::<T>()`
 - `query::rows()`
+- `query::option(...)`
 - `query::all(...)`
 - `query::one(...)`
-- likely `query::opt(...)`
-- filter combinators such as `Has<T>` and `Not<Has<T>>`
+- filter combinators such as `query::has::<T>()` and `query::not(...)`
 
 The design must avoid this ambiguity:
 
@@ -68,6 +68,7 @@ Examples:
 &mut [Position]
 (&mut [Position], &[Velocity])
 (Rows<'job>, &[Contact])
+(Rows<'job>, query::Optional<&[Contact]>)
 ```
 
 Those views should all share one positional indexing convention:
@@ -128,8 +129,8 @@ Reason:
 
 ```rust
 (
-    query::all((query::write::<Position>(), Has<Dynamic>())),
-    query::all((query::write::<Position>(), Not<Has<Dynamic>>())),
+    query::all(query::write::<Position>()).filter(query::has::<Dynamic>()),
+    query::all(query::write::<Position>()).filter(query::not(query::has::<Dynamic>())),
 )
 ```
 
@@ -173,7 +174,7 @@ The current crate has `Option<R>` row semantics. The rewrite should likely keep 
 
 Possible directions:
 
-- `query::opt(read::<T>())` returns an optional chunk slice per matching stream,
+- `query::option(read::<T>())` returns a zip-friendly optional chunk view per matching stream,
 - or optionality remains a structural query combinator rather than a plain type wrapper.
 
 This exact shape is open, but the task must at least document and prototype one approach.
@@ -223,6 +224,11 @@ This sketch captures the selected core semantics:
 - optional row handles,
 - deferred structural edits.
 
+Current implementation note:
+
+- filters attach through `.filter(...)` on `query::all(...)`,
+- `query::option(...)` yields a zip-friendly `query::Optional<_>` view rather than a raw `Option<&[T]>`.
+
 ## Implementation Checklist
 
 1. Define the query item descriptors.
@@ -264,3 +270,51 @@ This task is done when:
 - obvious conflicting overlaps are rejected,
 - obvious disjoint cases can be accepted,
 - the API shape leaves room for future query algebra without forcing it into the MVP.
+
+## Implementation Review
+
+Task 04 is implemented in the isolated `v2` lane.
+
+The current implementation lives primarily in:
+
+- `src/v2/query.rs`
+- `tests/v2/query_surface.rs`
+- `examples/v2/query_surface.rs`
+
+## Actions Taken
+
+The current implementation does the following:
+
+1. defines typed query descriptors:
+   - `query::Read<T>`
+   - `query::Write<T>`
+   - `query::RowsRequest`
+   - `query::OptionQuery<Q>`
+   - `query::One<Q>`
+2. exposes the public constructors:
+   - `query::read::<T>()`
+   - `query::write::<T>()`
+   - `query::rows()`
+   - `query::option(...)`
+   - `query::one(...)`
+   - `query::all(...)`
+3. implements `query::Optional<_>` as a zip-friendly optional view that yields `Option`s of the sub-query's iterated item type,
+4. implements table-level filters through:
+   - `query::has::<T>()`
+   - `query::not(...)`
+   - `.filter(...)` on `query::all(...)`,
+5. projects chunk views directly from `Table` chunks for reads, writes, rows, optional sub-queries, and `one(...)`,
+6. analyzes declared accesses ahead of projection and rejects obvious aliasing conflicts,
+7. proves one conservative disjointness case through complementary table-level filters,
+8. treats `query::read::<T>()` and `query::write::<T>()` as inline-column views only, so sidecar-only columns do not falsely match the dense slice projection API.
+
+## Current Status
+
+The implemented surface is intentionally query-local:
+
+- chunk views and access analysis exist,
+- `query::option(...)` is usable in `zip(...)`,
+- filters exist for table admission and conservative disjointness proofs,
+- but schedule registration and executor integration remain later tasks.
+
+That split is deliberate. Task 04 establishes the query contract before Task 05 and Task 06 turn it into a schedule and runtime.
