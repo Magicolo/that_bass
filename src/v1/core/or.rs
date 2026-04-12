@@ -202,3 +202,24 @@ impl<T: DerefMut> DerefMut for Or<T, T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_left() {
+        let left: Or<u32, f32> = Left(1);
+        let right: Or<u32, f32> = Right(1.0);
+        assert!(left.is_left());
+        assert!(!right.is_left());
+    }
+
+    #[test]
+    fn test_is_right() {
+        let left: Or<u32, f32> = Left(1);
+        let right: Or<u32, f32> = Right(1.0);
+        assert!(!left.is_right());
+        assert!(right.is_right());
+    }
+}
