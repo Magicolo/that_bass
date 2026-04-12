@@ -84,7 +84,8 @@ schedule.push(
         query::write::<Position>(),
         query::read::<Velocity>(),
         query::one(query::read::<DeltaTime>()),
-    )),
+    ))
+    .expect("query declaration should succeed"),
     |positions, velocities, dt| {
         for (position, velocity) in positions.zip(velocities) {
             position.x += velocity.x * dt.seconds;

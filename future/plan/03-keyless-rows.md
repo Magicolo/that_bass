@@ -82,6 +82,7 @@ query::all((
     query::rows(),
     query::write::<Position>(),
 ))
+.expect("query declaration should succeed")
 ```
 
 Then within the chunk callback:
@@ -179,7 +180,8 @@ The point of this task is precisely to make the zero-identity path honest and ef
 
 ```rust
 schedule.push(
-    query::all((query::rows(), query::read::<Contact>())),
+    query::all((query::rows(), query::read::<Contact>()))
+        .expect("query declaration should succeed"),
     |rows, contacts, commands| {
         for (row, contact) in rows.zip(contacts) {
             if contact.invalid {

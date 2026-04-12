@@ -33,7 +33,7 @@ fn read_query_projects_a_dense_chunk_slice() {
         &[Position { x: 1.0, y: 2.0 }, Position { x: 3.0, y: 4.0 }],
     );
 
-    let query = query::all(query::read::<Position>());
+    let query = query::all(query::read::<Position>()).expect("query declaration should succeed");
     let positions = query
         .project_chunk(&mut table, chunk_index)
         .expect("read query projection should succeed");
@@ -48,7 +48,7 @@ fn read_query_projects_a_dense_chunk_slice() {
 fn read_query_rejects_sidecar_only_columns() {
     let mut table = make_table([Meta::sidecar::<Position>()]);
     let chunk_index = push_chunk_with_minimum_capacity(&mut table, 1);
-    let query = query::all(query::read::<Position>());
+    let query = query::all(query::read::<Position>()).expect("query declaration should succeed");
     let table_index = table.index();
 
     assert_eq!(
@@ -67,7 +67,7 @@ fn write_query_projects_a_mutable_dense_chunk_slice() {
         &[Position { x: 1.0, y: 2.0 }, Position { x: 3.0, y: 4.0 }],
     );
 
-    let query = query::all(query::write::<Position>());
+    let query = query::all(query::write::<Position>()).expect("query declaration should succeed");
     let positions = query
         .project_chunk(&mut table, chunk_index)
         .expect("write query projection should succeed");
@@ -94,7 +94,8 @@ fn rows_and_data_queries_share_the_same_positional_indexing() {
         &[Position { x: 5.0, y: 6.0 }, Position { x: 7.0, y: 8.0 }],
     );
 
-    let query = query::all((query::rows(), query::read::<Position>()));
+    let query = query::all((query::rows(), query::read::<Position>()))
+        .expect("query declaration should succeed");
     let row_layout = table.row_layout();
     let (rows, positions) = query
         .project_chunk(&mut table, chunk_index)
@@ -119,7 +120,8 @@ fn option_query_yields_none_values_when_the_sub_query_is_missing() {
     let query = query::all((
         query::read::<Position>(),
         query::option(query::read::<Velocity>()),
-    ));
+    ))
+    .expect("query declaration should succeed");
     let (positions, velocities) = query
         .project_chunk(&mut table, chunk_index)
         .expect("optional query projection should succeed");
@@ -159,7 +161,8 @@ fn option_query_yields_some_values_when_the_sub_query_is_present() {
     let query = query::all((
         query::read::<Position>(),
         query::option(query::read::<Velocity>()),
-    ));
+    ))
+    .expect("query declaration should succeed");
     let (positions, velocities) = query
         .project_chunk(&mut table, chunk_index)
         .expect("optional query projection should succeed");
@@ -173,11 +176,9 @@ fn option_query_yields_some_values_when_the_sub_query_is_present() {
 }
 
 #[test]
-fn analysis_rejects_obvious_aliasing_conflicts() {
-    let query = query::all((query::write::<Position>(), query::read::<Position>()));
-
+fn all_query_construction_rejects_obvious_aliasing_conflicts() {
     assert_eq!(
-        query.analyze(),
+        query::all((query::write::<Position>(), query::read::<Position>())),
         Err(Error::ConflictingAccess {
             left_type_name: core::any::type_name::<Position>(),
             left_access: query::Access::Write,
@@ -189,12 +190,14 @@ fn analysis_rejects_obvious_aliasing_conflicts() {
 
 #[test]
 fn disjoint_filter_split_is_accepted_for_same_written_type() {
-    let left = query::all(query::write::<Position>()).filter(query::has::<Dynamic>());
-    let right = query::all(query::write::<Position>()).filter(query::not(query::has::<Dynamic>()));
+    let left = query::all(query::write::<Position>())
+        .expect("query declaration should succeed")
+        .filter(query::has::<Dynamic>());
+    let right = query::all(query::write::<Position>())
+        .expect("query declaration should succeed")
+        .filter(query::not(query::has::<Dynamic>()));
 
-    assert!(!left
-        .conflicts_with(&right)
-        .expect("disjoint filter proof should analyze successfully"));
+    assert!(!left.conflicts_with(&right));
 }
 
 #[test]
@@ -203,7 +206,8 @@ fn one_query_projects_one_row_as_a_single_item() {
     let chunk_index = push_chunk_with_minimum_capacity(&mut table, 1);
     write_positions(&mut table, chunk_index, &[Position { x: 9.0, y: 10.0 }]);
 
-    let query = query::all(query::one(query::read::<Position>()));
+    let query = query::all(query::one(query::read::<Position>()))
+        .expect("query declaration should succeed");
     let position = query
         .project_chunk(&mut table, chunk_index)
         .expect("one query projection should succeed");
@@ -221,7 +225,8 @@ fn one_query_rejects_chunks_with_more_than_one_row() {
         &[Position { x: 1.0, y: 2.0 }, Position { x: 3.0, y: 4.0 }],
     );
 
-    let query = query::all(query::one(query::read::<Position>()));
+    let query = query::all(query::one(query::read::<Position>()))
+        .expect("query declaration should succeed");
     let table_index = table.index();
 
     assert_eq!(

@@ -173,9 +173,17 @@ It should not assume:
 For a simple sequence:
 
 ```rust
-schedule.push(query::all((write::<Position>(), read::<Velocity>())), integrate);
+schedule.push(
+    query::all((write::<Position>(), read::<Velocity>()))
+        .expect("query declaration should succeed"),
+    integrate,
+);
 schedule.push(Insert::<(Position, Velocity)>(), spawn);
-schedule.push(query::all((write::<Position>(), read::<Bounds>())), clamp);
+schedule.push(
+    query::all((write::<Position>(), read::<Bounds>()))
+        .expect("query declaration should succeed"),
+    clamp,
+);
 ```
 
 the plan should conceptually become:

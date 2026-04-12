@@ -174,8 +174,14 @@ It also addresses the earlier serialization issue:
 Consider:
 
 ```rust
-schedule.push(query::all((query::read::<Emitter>(),)), emit_particles);
-schedule.push(query::all((query::write::<Particle>(),)), integrate_particles);
+schedule.push(
+    query::all((query::read::<Emitter>(),)).expect("query declaration should succeed"),
+    emit_particles,
+);
+schedule.push(
+    query::all((query::write::<Particle>(),)).expect("query declaration should succeed"),
+    integrate_particles,
+);
 ```
 
 If `emit_particles` records `Insert<Particle>` commands, the intended semantics are:
@@ -191,7 +197,7 @@ This is a core use case that should drive the implementation.
 
 ```rust
 schedule.push(
-    query::all((query::read::<Spawner>(),)),
+    query::all((query::read::<Spawner>(),)).expect("query declaration should succeed"),
     |spawners, mut insert: Insert<(Position, Velocity)>| {
         for spawner in spawners {
             insert.one((spawner.position, spawner.velocity));
@@ -204,7 +210,8 @@ and:
 
 ```rust
 schedule.push(
-    query::all((query::rows(), query::read::<Lifetime>())),
+    query::all((query::rows(), query::read::<Lifetime>()))
+        .expect("query declaration should succeed"),
     |rows, lifetimes, mut remove: Remove| {
         for (row, lifetime) in rows.zip(lifetimes) {
             if lifetime.done {

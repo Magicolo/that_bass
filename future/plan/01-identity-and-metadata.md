@@ -195,6 +195,7 @@ Suppose the user declares:
 
 ```rust
 query::all((query::write::<Position>(), query::read::<Velocity>()))
+    .expect("query declaration should succeed")
 ```
 
 The metadata layer should be able to answer:

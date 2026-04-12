@@ -12,6 +12,7 @@ pub fn run() {
     let optional_velocity = query::option(query::read::<u32>());
     let singleton_position = query::one(query::read::<u64>());
     let query_shape = query::all((rows_request, query::read::<u32>(), optional_velocity))
+        .expect("query declaration should succeed")
         .filter(query::has::<u64>());
     let remove_command_kind = Kind::Remove;
     let resolve_strategy = Strategy::FunctionLevelBatch;
@@ -24,7 +25,7 @@ pub fn run() {
     println!("  query rows request: {rows_request:?}");
     println!("  optional query item: {optional_velocity:?}");
     println!("  one query item: {singleton_position:?}");
-    println!("  analyzed conjunctive query: {:?}", query_shape.analyze());
+    println!("  analyzed conjunctive query: {:?}", query_shape.analysis());
     println!("  command kind: {remove_command_kind:?}");
     println!("  empty remove buffer length: {}", remove_buffer.len());
     println!("  resolve strategy: {resolve_strategy:?}");

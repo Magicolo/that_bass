@@ -57,6 +57,14 @@ because it could mean:
 
 That is why `query::all(...)` should exist.
 
+`query::all(...)` should also be the one fallible query constructor:
+
+- `Read<T>`, `Write<T>`, `Rows`, and the other leaf descriptors are just declarations and are not
+  invalid by themselves,
+- only the conjunctive combination can become unsound,
+- so invalid overlapping live access should be rejected at `query::all(...)` construction time,
+- and it should be impossible to hold an invalid `All` query value.
+
 ## Chunk View Semantics
 
 If a query matches a chunk, the user callback should receive dense inhabited-prefix views.
@@ -129,8 +137,12 @@ Reason:
 
 ```rust
 (
-    query::all(query::write::<Position>()).filter(query::has::<Dynamic>()),
-    query::all(query::write::<Position>()).filter(query::not(query::has::<Dynamic>())),
+    query::all(query::write::<Position>())
+        .expect("query declaration should succeed")
+        .filter(query::has::<Dynamic>()),
+    query::all(query::write::<Position>())
+        .expect("query declaration should succeed")
+        .filter(query::not(query::has::<Dynamic>())),
 )
 ```
 
@@ -206,7 +218,8 @@ schedule.push(
         query::rows(),
         query::write::<Position>(),
         query::read::<Velocity>(),
-    )),
+    ))
+    .expect("query declaration should succeed"),
     |rows, positions, velocities, commands| {
         for ((row, position), velocity) in rows.zip(positions).zip(velocities) {
             position.x += velocity.x;
@@ -226,6 +239,7 @@ This sketch captures the selected core semantics:
 
 Current implementation note:
 
+- `query::all(...)` is fallible and validates the full conjunctive query when it is built,
 - filters attach through `.filter(...)` on `query::all(...)`,
 - `query::option(...)` yields a zip-friendly `query::Optional<_>` view rather than a raw `Option<&[T]>`.
 
@@ -304,7 +318,8 @@ The current implementation does the following:
    - `query::not(...)`
    - `.filter(...)` on `query::all(...)`,
 5. projects chunk views directly from `Table` chunks for reads, writes, rows, optional sub-queries, and `one(...)`,
-6. analyzes declared accesses ahead of projection and rejects obvious aliasing conflicts,
+6. validates declared accesses at `query::all(...)` construction time so invalid `All` queries can
+   not exist, and rejects obvious aliasing conflicts there,
 7. proves one conservative disjointness case through complementary table-level filters,
 8. treats `query::read::<T>()` and `query::write::<T>()` as inline-column views only, so sidecar-only columns do not falsely match the dense slice projection API.
 
@@ -313,6 +328,7 @@ The current implementation does the following:
 The implemented surface is intentionally query-local:
 
 - chunk views and access analysis exist,
+- `query::all(...)` is the fallible validation boundary for conjunctive queries,
 - `query::option(...)` is usable in `zip(...)`,
 - filters exist for table admission and conservative disjointness proofs,
 - but schedule registration and executor integration remain later tasks.

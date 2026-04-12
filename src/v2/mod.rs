@@ -23,7 +23,7 @@
 //! - `instrumentation`: measurement categories and public diagnostics hooks.
 //! - `key`: stable-identity vocabulary used by later extension resources.
 //! - `query`: typed query descriptors, inline dense-slice projections, optional chunk views,
-//!   filters, and access analysis.
+//!   filters, and access analysis validated at `query::all(...)` construction time.
 //! - `schedule`: ordering vocabulary for future schedule construction.
 //! - `schema`: the metadata catalog, `Meta` descriptors, chunk layouts, tables, chunks, and
 //!   resource mapping.

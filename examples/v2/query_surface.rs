@@ -62,7 +62,8 @@ pub fn run() {
         query::rows(),
         query::write::<Position>(),
         query::option(query::read::<Velocity>()),
-    ));
+    ))
+    .expect("query declaration should succeed");
 
     let row_layout = table.row_layout();
     let (rows, positions, velocities) = query
@@ -82,7 +83,7 @@ pub fn run() {
     println!("Query surface");
     println!(
         "  conflicting self-query rejected: {:?}",
-        query::all((query::write::<Position>(), query::read::<Position>())).analyze()
+        query::all((query::write::<Position>(), query::read::<Position>()))
     );
     println!(
         "  updated positions: {:?}",

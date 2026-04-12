@@ -1,3 +1,15 @@
+pub trait Flatten {
+    type Output;
+}
+
+impl Flatten for () {
+    type Output = ();
+}
+
+impl<T: Flatten> Flatten for ((), T) {
+    type Output = T::Output;
+}
+
 macro_rules! tuples {
     ($m:ident) => {
         $m!(Tuples0, 0);
@@ -5,8 +17,12 @@ macro_rules! tuples {
         $m!(Tuples2, 2, p0, T0, 0, p1, T1, 1);
         $m!(Tuples3, 3, p0, T0, 0, p1, T1, 1, p2, T2, 2);
         $m!(Tuples4, 4, p0, T0, 0, p1, T1, 1, p2, T2, 2, p3, T3, 3);
-        $m!(Tuples5, 5, p0, T0, 0, p1, T1, 1, p2, T2, 2, p3, T3, 3, p4, T4, 4);
-        $m!(Tuples6, 6, p0, T0, 0, p1, T1, 1, p2, T2, 2, p3, T3, 3, p4, T4, 4, p5, T5, 5);
+        $m!(
+            Tuples5, 5, p0, T0, 0, p1, T1, 1, p2, T2, 2, p3, T3, 3, p4, T4, 4
+        );
+        $m!(
+            Tuples6, 6, p0, T0, 0, p1, T1, 1, p2, T2, 2, p3, T3, 3, p4, T4, 4, p5, T5, 5
+        );
         $m!(
             Tuples7, 7, p0, T0, 0, p1, T1, 1, p2, T2, 2, p3, T3, 3, p4, T4, 4, p5, T5, 5, p6, T6, 6
         );

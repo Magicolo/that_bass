@@ -120,7 +120,10 @@ let mut store = Store::new();
 
 store.insert_now((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }));
 
-store.query_now(query::all((query::write::<Position>(), query::read::<Velocity>())))
+store.query_now(
+    query::all((query::write::<Position>(), query::read::<Velocity>()))
+        .expect("query declaration should succeed"),
+)
     .for_each_chunk(|positions, velocities| {
         for (position, velocity) in positions.zip(velocities) {
             position.x += velocity.x;

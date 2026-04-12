@@ -368,7 +368,8 @@ Example direction:
 
 ```rust
 schedule.push(
-    query::all((query::write::<Position>(), query::read::<Velocity>())),
+    query::all((query::write::<Position>(), query::read::<Velocity>()))
+        .expect("query declaration should succeed"),
     |positions, velocities| {
         for (position, velocity) in positions.zip(velocities) {
             position.x += velocity.x;
@@ -402,6 +403,8 @@ Why `query::all(...)` exists:
 - it distinguishes one conjunctive stream from multiple independent query objects,
 - it avoids overloading tuple syntax ambiguously,
 - it leaves room for future dynamic query forms.
+- it is the one fallible query constructor, so invalid overlapping live access is rejected before
+  any `All` query exists.
 
 ## Query Safety Rule
 

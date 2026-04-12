@@ -466,6 +466,7 @@ impl Analysis {
 pub struct All<Q, F = AllowAll> {
     query: Q,
     filter: F,
+    analysis: Analysis,
 }
 
 pub const fn rows() -> RowsRequest {
@@ -502,11 +503,18 @@ pub const fn not<F>(filter: F) -> Not<F> {
     Not { filter }
 }
 
-pub const fn all<Q>(query: Q) -> All<Q> {
-    All {
+pub fn all<Q>(query: Q) -> Result<All<Q>, Error>
+where
+    Q: QueryTuple,
+{
+    let filter = AllowAll;
+    let analysis = build_analysis(&query, &filter)?;
+
+    Ok(All {
         query,
-        filter: AllowAll,
-    }
+        filter,
+        analysis,
+    })
 }
 
 pub trait Filter: Sized {
@@ -860,33 +868,33 @@ where
     where
         G: Filter,
     {
+        let filter = (self.filter, filter);
+        let analysis = Analysis {
+            declared_accesses: self.analysis.declared_accesses,
+            filter_plan: filter.plan().unwrap_or_default(),
+        };
+
         All {
             query: self.query,
-            filter: (self.filter, filter),
+            filter,
+            analysis,
         }
     }
 
-    pub fn analyze(&self) -> Result<Analysis, Error> {
-        let mut declared_accesses = Vec::new();
-        self.query.collect_declared_accesses(&mut declared_accesses);
-        validate_declared_accesses(&declared_accesses)?;
-
-        Ok(Analysis {
-            declared_accesses: declared_accesses.into_boxed_slice(),
-            filter_plan: self.filter.plan().unwrap_or_default(),
-        })
+    pub fn analysis(&self) -> &Analysis {
+        &self.analysis
     }
 
     pub fn matches_table(&self, table: &Table) -> bool {
         self.filter.matches(table) && self.query.matches_table(table)
     }
 
-    pub fn conflicts_with<Q2, F2>(&self, other: &All<Q2, F2>) -> Result<bool, Error>
+    pub fn conflicts_with<Q2, F2>(&self, other: &All<Q2, F2>) -> bool
     where
         Q2: QueryTuple,
         F2: Filter,
     {
-        Ok(self.analyze()?.conflicts_with(&other.analyze()?))
+        self.analysis.conflicts_with(&other.analysis)
     }
 
     pub fn project_chunk<'table, 'job>(
@@ -894,8 +902,6 @@ where
         table: &'table mut Table,
         chunk_index: ChunkIndex,
     ) -> Result<Q::Item<'table, 'job>, Error> {
-        self.analyze()?;
-
         if !self.matches_table(table) {
             return Err(Error::TableDoesNotMatch {
                 table_index: table.index(),
@@ -904,11 +910,25 @@ where
 
         let table_pointer = table as *mut Table;
 
-        // Safety: `analyze()` rejects overlapping conflicting accesses within one conjunctive
-        // query, and the filter plus required-column checks above ensure projection only runs on
-        // matching tables.
+        // Safety: `query::all(...)` validated this conjunctive query at construction time, and the
+        // filter plus required-column checks above ensure projection only runs on matching tables.
         unsafe { self.query.project_chunk(table_pointer, chunk_index) }
     }
+}
+
+fn build_analysis<Q, F>(query: &Q, filter: &F) -> Result<Analysis, Error>
+where
+    Q: QueryTuple,
+    F: Filter,
+{
+    let mut declared_accesses = Vec::new();
+    query.collect_declared_accesses(&mut declared_accesses);
+    validate_declared_accesses(&declared_accesses)?;
+
+    Ok(Analysis {
+        declared_accesses: declared_accesses.into_boxed_slice(),
+        filter_plan: filter.plan().unwrap_or_default(),
+    })
 }
 
 fn validate_declared_accesses(declared_accesses: &[DeclaredAccess]) -> Result<(), Error> {

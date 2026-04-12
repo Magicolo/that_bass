@@ -118,6 +118,7 @@ query::all((
     query::read::<Key>(),
     query::write::<Transform>(),
 ))
+.expect("query declaration should succeed")
 ```
 
 This gives users:
@@ -161,7 +162,8 @@ schedule.push(
     query::all((
         query::read::<Key>(),
         query::write::<Health>(),
-    )),
+    ))
+    .expect("query declaration should succeed"),
     |keys, healths| {
         for (key, health) in keys.zip(healths) {
             if health.current == 0 {
