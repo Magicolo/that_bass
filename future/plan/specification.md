@@ -207,6 +207,53 @@ The granularity floor is:
 
 This means broad dependencies are legal, but the scheduler can still reason at the finest useful leaf.
 
+### Dependency
+
+One scheduler-visible access requirement.
+
+Selected direction:
+
+- a dependency has one `Access` for its whole path,
+- and one root-to-leaf resource path,
+- where the path may be empty to represent a full barrier.
+
+Example direction:
+
+```rust
+enum Access {
+    Read,
+    Write,
+}
+
+struct Resource {
+    kind: TypeId,
+    identifier: Option<usize>,
+}
+
+struct Dependency {
+    access: Access,
+    path: Vec<Resource>,
+}
+```
+
+Important rule:
+
+- a dependency path is monotone,
+- so it is either entirely read-shaped or entirely write-shaped,
+- it does not mix ancestor reads with descendant writes inside one path.
+
+This mirrors the intended ownership interpretation more closely:
+
+- a write of a descendant semantically implies write capability along the whole path to that
+  descendant,
+- and a read of a descendant implies read capability along the whole path.
+
+The empty-path case means:
+
+- `Dependency { access: Write, path: [] }` behaves like a full write barrier,
+- `Dependency { access: Read, path: [] }` is less useful semantically, but the model permits it if
+  needed for symmetry.
+
 ### Job
 
 A runtime work unit scheduled by the executor. In the selected design, functions expand into per-chunk jobs. Jobs are independently stealable.
@@ -338,19 +385,66 @@ It also means the dependency model is hierarchical rather than leaf-only.
 
 Examples:
 
-- writing one column in one chunk requires dependencies like:
-  - `Read(store)`
-  - `Read(table)`
-  - `Read(chunk)`
-  - `Write(column)`
+- writing one column in one chunk can be represented as:
+  - `Dependency { access: Write, path: [store_0, table_1, chunk_2, column_3] }`
+- reading one column in one chunk can be represented as:
+  - `Dependency { access: Read, path: [store_0, table_1, chunk_2, column_3] }`
 - writing a whole chunk for structural work can instead request:
-  - `Read(store)`
-  - `Read(table)`
-  - `Write(chunk)`
+  - `Dependency { access: Write, path: [store_0, table_1, chunk_2] }`
 - writing the whole store can request:
-  - `Write(store)`
+  - `Dependency { access: Write, path: [store_0] }`
+- a full barrier can request:
+  - `Dependency { access: Write, path: [] }`
 
-To the scheduler, these are just identifiers plus access modes. The important rule is that every descendant access carries the ancestor reads needed to make broad and narrow conflicts comparable.
+To the scheduler, these are still just identifiers plus access modes. The important rule is that
+all dependencies use the same path model and are compared by shared prefix and access mode rather
+than by special-casing broad and narrow forms.
+
+## Dependency Conflict Rule
+
+Selected direction:
+
+- `Read` versus `Read` never conflicts,
+- any pair involving `Write` conflicts if their paths may alias for the full shared prefix,
+- once two paths diverge to distinct concrete resources, they do not conflict,
+- an empty path behaves as a full barrier because its shared prefix with every other path is the
+  empty prefix.
+
+This gives the intended behavior:
+
+- write-table conflicts with all descendant chunk and column access in that table,
+- write-chunk conflicts with all descendant column access in that chunk,
+- write-column does not conflict with sibling-column access in the same chunk if the paths diverge
+  at the leaf,
+- unrelated chunks remain independent.
+
+## Static And Dynamic Dependency Precision
+
+The selected model does not use separate types for static and dynamic dependencies.
+
+Instead:
+
+- both use the same `Dependency` shape,
+- either may use `Some(identifier)` or `None`,
+- and `None` means "may alias any resource of this kind at this path position".
+
+This allows:
+
+- a static dependency to be fully concrete when a target is known in advance,
+- a dynamic dependency to stay broad when runtime precision is not available or not worth
+  materializing.
+
+One important relation still needs to exist:
+
+- a more general dependency must be able to cover a more precise one.
+
+Conceptually:
+
+- `Write(path with None)` covers `Write(path with Some(...))`,
+- `Write(path)` covers `Read(path)` at the same path shape,
+- but not the inverse.
+
+Task 05 must define and test that `covers(...)` relation explicitly.
 
 ## Chunk-Only Query Outputs
 
@@ -472,8 +566,15 @@ At frame execution time, functions expand into per-chunk jobs based on current t
 This separation matters because:
 
 - chunk existence is dynamic,
-- tables may grow mid-frame,
+- new chunks may appear mid-frame,
 - the expensive reasoning should happen ahead of time when possible.
+
+Selected refinement:
+
+- tables themselves are intended to be known before the first execution when possible,
+- especially for typed command families such as `Insert<T>`,
+- so runtime dynamism should primarily be chunk creation and row-count visibility, not table
+  creation.
 
 ## Job Granularity
 
@@ -502,6 +603,16 @@ The intended model is:
 
 - lightweight in-flight scheduling for new jobs,
 - heavier reshaping or reanalysis at frame boundaries.
+
+Selected refinement:
+
+- ordinary jobs do not mutate topology directly,
+- only resolve phases perform structural mutation,
+- and the main mid-frame topology change to support is creation of new chunks in already-known
+  tables.
+
+This deliberately avoids a more general "arbitrary job returns true and forces global task update"
+model.
 
 ## Ordering Semantics
 
@@ -589,6 +700,13 @@ Insert is relatively light:
 - no existing rows move,
 - conflicts are mostly about target table/chunk capacity and visibility, not row relocation.
 
+Selected refinement:
+
+- typed insert families such as `Insert<T>` should know their target table shape before execution,
+- that table can therefore be created eagerly before the first schedule run,
+- insert resolution then only has to allocate or fill chunks inside that known table,
+- and schedule/query setup can cache eligible tables at initialization time.
+
 ## Remove Semantics
 
 Remove is heavier:
@@ -605,6 +723,12 @@ Current selected rule:
 Open performance question:
 
 - can some remove patterns be relaxed or batched more aggressively without weakening the row-movement guarantees needed by `Row<'job>` targeting?
+
+Selected refinement:
+
+- `Remove<F>` should be able to declare a filter `F`,
+- so remove dependencies can be narrowed to only the tables that `F` can match,
+- reducing overly broad scheduling edges for removal-heavy workloads.
 
 ## Deferred Value Writes
 

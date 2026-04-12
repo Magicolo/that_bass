@@ -99,6 +99,15 @@ That means the executor needs:
 
 This is one of the hardest executor requirements in the rewrite.
 
+Selected refinement:
+
+- ordinary jobs do not perform structural mutation directly,
+- only resolve phases create new visible chunks or otherwise change structural topology,
+- and the main injection case is therefore newly visible chunks inside already-known tables.
+
+This is intentionally narrower than a general "any job may structurally change the store and force
+all tasks to update" model.
+
 ## Suggested Runtime Flow
 
 1. Build the frame-local runtime job pool from the reusable schedule and current chunks.
@@ -109,6 +118,7 @@ This is one of the hardest executor requirements in the rewrite.
    - mutate tables,
    - create chunks,
    - publish new row counts,
+   - report the affected known tables or chunks,
    - inject downstream chunk jobs.
 6. The executor continues until all job families and resolve families for the frame are drained.
 
@@ -162,6 +172,20 @@ Clamp(chunk 0..203)
 
 The important part is not the exact trace syntax. It is that the runtime job expansion and injection are visible and debuggable.
 
+## Update Strategy
+
+The selected executor direction does not rely on a generic user-defined mid-frame `update(&T)`
+callback.
+
+Instead:
+
+- schedule-time initialization computes stable per-function descriptors,
+- known eligible tables can be cached up front when types make them knowable,
+- resolve phases emit narrow structural change information,
+- and the executor uses that information to inject new chunk jobs without stopping the world.
+
+Heavier reshaping remains a frame-boundary concern.
+
 ## Implementation Checklist
 
 1. Implement the worker pool.
@@ -169,8 +193,9 @@ The important part is not the exact trace syntax. It is that the runtime job exp
 3. Implement pooled runtime job objects.
 4. Implement job readiness tracking.
 5. Implement affinity hints.
-6. Implement dynamic job injection from resolve work.
-7. Add benchmarks for:
+6. Implement resolve-to-executor reporting of affected tables or chunks.
+7. Implement dynamic job injection from resolve work.
+8. Add benchmarks for:
    - many tiny jobs,
    - mixed-cost jobs,
    - heavy injection workloads,
@@ -189,6 +214,11 @@ That will bury the benefits of chunk-level parallelism in allocator overhead.
 ### Pitfall: Ignoring injection cost
 
 Dynamic scheduling is a core feature, not a slow path. Measure it directly.
+
+### Pitfall: Requiring a generic stop-the-world task update path
+
+The selected direction narrows mid-frame dynamism to resolve-driven topology changes in known
+tables. Do not add a heavier generic update mechanism unless benchmarks and semantics justify it.
 
 ## Done Criteria
 

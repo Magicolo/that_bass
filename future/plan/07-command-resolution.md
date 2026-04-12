@@ -36,6 +36,7 @@ Implement deferred structural mutation through:
 6. Remove is semantically heavier than insert because remove moves rows.
 7. The default resolve granularity is function-level batching over all command buffers produced by that function, not one resolve job per source chunk.
 8. Structural resolution may request broader scheduler dependencies than ordinary leaf-column iteration, for example `Write(chunk)` or `Write(table)` rather than one `Write(column)` per column.
+9. Only resolve phases perform structural mutation; ordinary jobs record commands only.
 
 ## Command Buffer Ownership
 
@@ -116,6 +117,14 @@ Because insert does not move existing rows:
 - the main effects are visibility and chunk creation.
 - its resolver may still need broad chunk or table dependencies while appending storage.
 
+Selected refinement:
+
+- typed insert families such as `Insert<T>` should know their target table before first execution,
+- the schedule should therefore create or register that table eagerly,
+- and insert resolution should only need to allocate or fill chunks inside that already-known table.
+
+This keeps schedule-time query analysis and eligible-table caching much simpler.
+
 ## Remove Resolution
 
 Remove resolution should:
@@ -132,10 +141,18 @@ The important semantic fact is that remove moves rows.
 
 That is why remove conflicts more strongly than insert.
 
-In the hierarchical dependency model, this usually means remove resolution depends on broader scopes such as:
+In the hierarchical dependency model, this usually means remove resolution depends on broader
+write paths such as:
 
-- `Read(store) + Read(table) + Write(chunk)` for chunk-local remove work,
-- or broader table-level write dependencies when chunk movement or allocation management crosses chunk boundaries.
+- `Write([store, table, chunk])` for chunk-local remove work,
+- or broader table-level write paths when chunk movement or allocation management crosses chunk
+  boundaries.
+
+Selected refinement:
+
+- `Remove<F>` should accept a filter `F`,
+- so the schedule can narrow remove dependencies to the tables that `F` may match,
+- instead of pessimistically treating remove as a whole-store structural command.
 
 ## Why Remove Needs Extra Care
 
@@ -193,6 +210,20 @@ If `emit_particles` records `Insert<Particle>` commands, the intended semantics 
 
 This is a core use case that should drive the implementation.
 
+## Resolve Reporting
+
+Resolve phases should report narrow structural change information back to the executor.
+
+The selected direction is not a generic "job returned true, now everything updates" model.
+
+Instead, resolve should be able to report things such as:
+
+- which known tables gained new chunks,
+- which chunks became newly visible,
+- and which downstream families therefore need additional runtime job expansion.
+
+This keeps mid-frame dynamism focused on the concrete topology changes that actually happened.
+
 ## Example API Sketch
 
 ```rust
@@ -241,12 +272,15 @@ Design the command pipeline so those choices can be benchmarked.
 4. Implement pre-resolve grouping and merge logic across that whole function batch.
 5. Implement insert resolution.
 6. Implement remove resolution with safe same-chunk handling.
-7. Wire batched resolve phases into the scheduler runtime.
-8. Add tests for:
+7. Implement resolve-to-executor reporting of newly visible chunks or equivalent narrow structural deltas.
+8. Wire batched resolve phases into the scheduler runtime.
+9. Add tests for:
    - same-frame insert visibility to later functions,
    - no self-visibility inside the producing function,
    - safe same-chunk batched remove,
    - new chunk injection after insert resolution,
+   - `Insert<T>` targeting one known table without creating tables mid-frame,
+   - `Remove<F>` narrowing its table dependencies through `F`,
    - one function with many originating command buffers still producing one batched resolve phase.
 
 ## Pitfalls

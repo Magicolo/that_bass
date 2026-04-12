@@ -33,6 +33,9 @@ Build the reusable schedule representation that:
 4. Happens-before is resource-scoped rather than globally serializing.
 5. The schedule should be reusable across frames.
 6. Dynamic in-flight job injection is required for newly created chunks.
+7. Only resolve phases perform structural mutation; ordinary jobs do not mutate topology directly.
+8. Typed command families such as `Insert<T>` should let the schedule know their target table
+   before first execution when possible.
 
 ## Two-Level Model
 
@@ -64,6 +67,40 @@ At frame execution time:
 
 This distinction is mandatory. Without it, dynamic chunks and reusable schedules fight each other.
 
+## Dependency Shape
+
+Task 05 should implement one canonical dependency representation:
+
+```rust
+enum Access {
+    Read,
+    Write,
+}
+
+struct Resource {
+    kind: TypeId,
+    identifier: Option<usize>,
+}
+
+struct Dependency {
+    access: Access,
+    path: Box<[Resource]>,
+}
+```
+
+Selected rules:
+
+- the path is root-to-leaf and canonical,
+- the path may be empty to represent a full barrier,
+- the access is monotone for the whole path,
+- so one dependency is either read-shaped or write-shaped, never mixed.
+
+Static and dynamic dependencies use the same shape:
+
+- either may contain `Some(identifier)` or `None`,
+- `None` means "may alias any resource of this kind at this path depth",
+- the distinction is semantic precision, not a type boundary.
+
 ## What Counts As A Conflict
 
 A function conflicts with another function when their dependency identifiers can overlap and at least one side is exclusive.
@@ -78,21 +115,23 @@ Examples:
 - `insert into Table<Position, Velocity>` vs later `read(Position)` on that table: conflict through visibility and chunk creation.
 - `remove rows from table T` vs later query over those chunks: conflict through row movement and visibility.
 
-The planner should represent these conflicts without yet naming concrete chunk indices.
+The planner should represent these conflicts without yet naming concrete chunk indices unless that
+precision is already known.
 
 Important model detail:
 
-- leaf column accesses expand to dependency chains such as:
-  - `Read(store)`
-  - `Read(table)`
-  - `Read(chunk)`
-  - `Write(column)`
-- broader structural work can request:
-  - `Write(store)`
-  - `Read(store) + Write(table)`
-  - `Read(store) + Read(table) + Write(chunk)`
+- a dependency is one path, not a sequence of mixed-access partial paths,
+- so a column writer is represented as one write dependency over `[store, table, chunk, column]`,
+- a chunk writer is represented as one write dependency over `[store, table, chunk]`,
+- and a full barrier is represented by an empty path.
 
-The scheduler only needs identifiers plus access modes, but it must compare them hierarchically.
+Task 05 must define and test:
+
+- `conflict(a, b)`,
+- and `covers(general, specific)`.
+
+The scheduler only needs identifiers plus access modes, but it must compare them hierarchically by
+shared prefix.
 
 ## Declaration Order
 
@@ -120,6 +159,7 @@ The new hierarchical dependency model refines this further:
 - a later leaf-column job may depend on an earlier whole-chunk writer for that same chunk,
 - a later whole-chunk writer may depend on an earlier leaf-column writer in that chunk,
 - but unrelated chunks can still run independently.
+- and a full-barrier dependency may deliberately force later work to wait on everything.
 
 ## Resolve Nodes Are Part Of The Plan
 
@@ -161,12 +201,21 @@ This means the schedule representation should cache:
 - function descriptors,
 - query access analysis,
 - conflict relationships between function families,
-- enough metadata to expand jobs quickly each frame.
+- enough metadata to expand jobs quickly each frame,
+- and the set of tables that are statically known to be eligible for each function when that can be
+  derived up front.
 
 It should not assume:
 
 - a fixed chunk count,
 - a fixed set of chunk indices forever.
+
+Selected refinement:
+
+- the schedule should try to know all relevant tables before the first execution,
+- especially for typed inserts such as `Insert<T>` where the target table is known from `T`,
+- so mid-frame dynamism is primarily about chunk creation inside known tables rather than creation
+  of entirely new tables.
 
 ## Example Schedule Shape
 
@@ -203,18 +252,26 @@ Important clarification:
 
 - the resolve family is not "one node per source chunk job" by default,
 - it is the scheduled phase that gathers all command buffers produced by the function and resolves them as one batched unit or as a small number of batched internal partitions.
+- that resolve family is also the only place where structural mutation is allowed.
 
 ## Implementation Checklist
 
 1. Define a function-family descriptor.
 2. Define a resolve-family descriptor.
-3. Define plan-time conflict edges between families.
-4. Define runtime dependency templates for per-chunk execution jobs and function-level batched resolve families, using hierarchical dependency identifiers rather than leaf-only resource names.
-5. Define a stable schedule object that can be reused across frames.
-6. Add tests for:
+3. Define the canonical dependency and resource-path model, including empty-path barriers.
+4. Define and test `conflict(a, b)` for hierarchical dependency paths.
+5. Define and test `covers(general, specific)` for broad-versus-precise dependencies.
+6. Define plan-time conflict edges between families.
+7. Define runtime dependency templates for per-chunk execution jobs and function-level batched resolve families, using hierarchical dependency paths rather than leaf-only resource names.
+8. Define a stable schedule object that can be reused across frames.
+9. Cache known eligible tables during initialization when that information is statically available.
+10. Add tests for:
    - no conflict between pure reads,
    - chunk-scoped ordering between same-writer families,
    - broad chunk/store writers conflicting correctly with descendant accesses,
+   - empty-path full barriers conflicting with all writes and reads as intended,
+   - `covers(...)` handling `None` versus `Some(...)` identifiers correctly,
+   - `Insert<T>` exposing one known target-table dependency before first execution,
    - visibility ordering through resolve families,
    - stable schedule reuse after chunk-count changes.
 
@@ -223,6 +280,11 @@ Important clarification:
 ### Pitfall: Planning concrete chunk indices into the static schedule
 
 Chunk existence is dynamic. The plan must describe how to reason about chunks, not freeze the current chunk list.
+
+### Pitfall: Reintroducing mixed-access paths
+
+The selected dependency model is monotone. If a path needs mixed semantics, that should be modeled
+as multiple dependencies, not one dependency with access changes along the path.
 
 ### Pitfall: Treating resolve as an implementation detail
 
