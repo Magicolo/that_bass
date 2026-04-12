@@ -3,3 +3,4 @@ mod foundation;
 mod keyless_rows;
 mod metadata;
 mod query_surface;
+pub mod schedule;

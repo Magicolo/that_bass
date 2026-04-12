@@ -71,3 +71,69 @@ impl<'job> Remove<'job> {
         table.resolve_remove_rows(self.rows)
     }
 }
+
+use crate::v2::{
+    query::Access,
+    schedule::{Dependency, Inject, Resource},
+};
+
+/// The command buffer injected into scheduled functions.
+#[derive(Debug, Clone, Default)]
+pub struct Commands {
+    // For now, just handles Removes. In the future, this might hold multiple kinds of buffers.
+}
+
+impl Commands {
+    pub const fn new() -> Self {
+        Self {}
+    }
+}
+
+use crate::v2::schedule::{Job, ResolveJob};
+use std::sync::Arc;
+
+impl<T> Inject<T> for Commands {
+    type Item<'job> = &'job mut Remove<'job>;
+
+    fn static_accesses(&self) -> Vec<crate::v2::query::DeclaredAccess> {
+        Vec::new()
+    }
+
+    fn generate_jobs<F>(
+        &self,
+        _data: &T,
+        function_id: usize,
+        f: Arc<F>,
+        jobs: &mut Vec<Job<T>>,
+        resolve_jobs: &mut Vec<ResolveJob<T>>,
+    ) where
+        F: Fn(Self::Item<'_>) + Send + Sync + 'static,
+    {
+        // For a standalone Commands injection, we create a single job that runs `f` once,
+        // providing a new command buffer.
+        let run_f = f.clone();
+        jobs.push(Job {
+            function_id,
+            dependencies: Vec::new(),
+            run: Box::new(move |_data_ptr| {
+                // Task 06 will correctly route this buffer to resolve jobs.
+                // For now, we stub a temporary buffer just to satisfy the API.
+                let mut temp_remove = Remove::default();
+                run_f(&mut temp_remove);
+                false
+            }),
+        });
+
+        resolve_jobs.push(ResolveJob {
+            function_id,
+            dependencies: vec![Dependency {
+                resource: Resource::Store,
+                access: Access::Write,
+            }],
+            run: Box::new(move |_data_ptr| {
+                // Task 06 resolve logic would run here.
+                false
+            }),
+        });
+    }
+}
