@@ -39,11 +39,13 @@ The selected direction is:
 
 Current implementation status in `src/v2/`:
 
-- Tasks `00` through `05` are implemented in the isolated rewrite lane.
+- Tasks `00` through `06` are implemented in the isolated rewrite lane.
 - The current `v2` surface now includes the foundation boundary, metadata and row vocabulary,
   single-allocation chunk storage, keyless row views and remove buffers, the first typed query
-  surface, and reusable schedule-family planning with monotone dependency paths.
-- Tasks `06` and later remain planned work.
+  surface, reusable schedule-family planning with monotone dependency paths, and a frame-local
+  executor runtime with worker-local deques, work stealing, runtime reports, and resolve-driven
+  chunk injection.
+- Tasks `07` and later remain planned work.
 
 ## Goals
 

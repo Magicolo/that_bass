@@ -24,6 +24,8 @@
 //! - `key`: stable-identity vocabulary used by later extension resources.
 //! - `query`: typed query descriptors, inline dense-slice projections, optional chunk views,
 //!   filters, and access analysis validated at `query::all(...)` construction time.
+//! - `runtime`: frame-local executor runtime, work stealing, runtime reports, and resolve-driven
+//!   chunk injection.
 //! - `schedule`: reusable schedule families, happens-before edges, conflict planning, and the
 //!   storage-aware initialization helper that turns typed queries and inserts into schedule data.
 //! - `schema`: the metadata catalog, `Meta` descriptors, chunk layouts, tables, chunks, and
@@ -78,6 +80,7 @@ pub mod command;
 pub mod instrumentation;
 pub mod key;
 pub mod query;
+pub mod runtime;
 pub mod schedule;
 pub mod schema;
 pub mod store;

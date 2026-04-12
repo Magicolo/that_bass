@@ -294,8 +294,8 @@ impl<'table> Builder<'table> {
         query: All<Q, F>,
     ) -> FunctionIndex
     where
-        Q: QueryTuple,
-        F: Filter,
+        Q: QueryTuple + 'static,
+        F: Filter + 'static,
     {
         let known_tables = self
             .tables
@@ -318,6 +318,7 @@ impl<'table> Builder<'table> {
             query_analysis: Some(query_analysis),
             command_plans: Vec::new(),
             command_dependencies: Vec::new(),
+            matches_table: Box::new(move |table| query.matches_table(table)),
         });
 
         function_index
@@ -331,25 +332,53 @@ impl<'table> Builder<'table> {
     where
         T: Columns,
     {
-        let Some(function) = self.functions.get_mut(function_index.value()) else {
+        if function_index.value() >= self.functions.len() {
             return Err(Error::MissingFunction { function_index });
-        };
+        }
 
         let target_table_index =
             self.catalog
                 .get_or_create_table(self.tables, T::metas(), self.configuration)?;
+        let target_table = self
+            .tables
+            .iter()
+            .find(|table| table.index() == target_table_index)
+            .expect("catalog get-or-create should leave the target table addressable");
         let dependency = Dependency::write([
             Resource::store(Some(self.root_identifier)),
             Resource::table(Some(target_table_index.into())),
         ]);
         let command_plan = insert.plan(target_table_index);
 
+        for pending_function in &mut self.functions {
+            if pending_function.matches_table(target_table)
+                && !pending_function.known_tables.contains(&target_table_index)
+            {
+                pending_function.known_tables.push(target_table_index);
+                if let Some(query_analysis) = pending_function.query_analysis.as_ref() {
+                    for declared_access in query_analysis.declared_accesses() {
+                        let Some(column_access) = target_table.map_access_for_identifier(
+                            declared_access.identifier(),
+                            declared_access.access(),
+                        ) else {
+                            continue;
+                        };
+
+                        push_dependency_if_missing(
+                            &mut pending_function.dependencies,
+                            column_access.dependency_with_wildcard_chunk(self.root_identifier),
+                        );
+                    }
+                }
+            }
+        }
+
+        let function = self
+            .functions
+            .get_mut(function_index.value())
+            .expect("validated function index should stay addressable");
         function.command_plans.push(command_plan);
         push_dependency_if_missing(&mut function.command_dependencies, dependency);
-
-        if !function.known_tables.contains(&target_table_index) {
-            function.known_tables.push(target_table_index);
-        }
 
         Ok(target_table_index)
     }
@@ -589,7 +618,6 @@ fn push_edge_if_missing(edges: &mut Vec<Edge>, edge: Edge) {
     }
 }
 
-#[derive(Debug)]
 struct PendingFunction {
     label: Box<str>,
     dependencies: Vec<Dependency>,
@@ -597,4 +625,11 @@ struct PendingFunction {
     query_analysis: Option<Analysis>,
     command_plans: Vec<command::Plan>,
     command_dependencies: Vec<Dependency>,
+    matches_table: Box<dyn Fn(&Table) -> bool>,
+}
+
+impl PendingFunction {
+    fn matches_table(&self, table: &Table) -> bool {
+        (self.matches_table)(table)
+    }
 }

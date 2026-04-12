@@ -333,6 +333,8 @@ The following concrete actions were taken to satisfy this task:
 - added wildcard-chunk dependency templates for query families so runtime expansion can stay
   chunk-dynamic without rebuilding the whole schedule,
 - added typed insert predeclaration so known target tables can be resolved before first execution,
+- updated `Builder::add_insert(...)` so newly created target tables also refresh the matching
+  pending query families' known-table caches and dependency templates before the schedule is built,
 - added `tests/v2/schedule_builder.rs` to cover pure-read non-conflict, broad-versus-descendant
   conflict, empty-path barriers, `covers(...)`, typed insert planning, resolve visibility edges,
   and schedule stability across chunk-count changes,

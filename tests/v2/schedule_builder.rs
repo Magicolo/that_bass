@@ -188,6 +188,40 @@ fn insert_descriptor_exposes_one_known_target_table_before_first_execution() {
 }
 
 #[test]
+fn typed_insert_table_creation_refreshes_later_matching_function_caches() {
+    let mut catalog = Catalog::new();
+    let mut tables = make_tables(&mut catalog, [[Meta::of::<Velocity>()].as_slice()]);
+    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let spawn_index = builder.push_query(
+        "spawn",
+        query::all(query::read::<Velocity>()).expect("query declaration should succeed"),
+    );
+    let clamp_index = builder.push_query(
+        "clamp",
+        query::all(query::read::<Position>()).expect("query declaration should succeed"),
+    );
+
+    let target_table_index = builder
+        .add_insert(spawn_index, command::Insert::<(Position,)>::new())
+        .expect("typed insert should resolve to one known table");
+    let schedule = builder.build();
+    let clamp_function = schedule
+        .function(clamp_index)
+        .expect("scheduled clamp function should exist");
+
+    assert_eq!(clamp_function.known_tables(), &[target_table_index]);
+    assert_eq!(
+        clamp_function.dependencies(),
+        &[Dependency::read([
+            Resource::store(Some(schedule.root_identifier())),
+            Resource::table(Some(target_table_index.into())),
+            Resource::chunk(None),
+            Resource::column::<Position>(Some(ResourceId::new(0))),
+        ])]
+    );
+}
+
+#[test]
 fn conflicting_functions_produce_resolve_to_function_edges() {
     let mut catalog = Catalog::new();
     let mut tables = make_tables(&mut catalog, [[Meta::of::<Position>()].as_slice()]);

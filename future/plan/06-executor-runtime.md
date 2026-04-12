@@ -228,3 +228,45 @@ This task is done when:
 - jobs are independently stealable,
 - affinity exists without forcing bundling,
 - resolve work can inject new downstream chunk jobs during the same frame.
+
+## Implementation Review
+
+The current repository now implements this task in `src/v2/runtime.rs` with:
+
+- a public `Seed` built from the current table snapshot rather than direct live-store coupling,
+- a public `Executor` and `Options` surface,
+- worker-local FIFO deques plus work stealing through `crossbeam-deque`,
+- one runtime function job per seeded chunk and one runtime resolve job per function family,
+- explicit readiness tracking with successor lists and per-job predecessor counters,
+- resolve callbacks that report `VisibleChunk` values through `runtime::Outcome`,
+- same-frame injection of later function jobs when resolve phases expose new chunks,
+- runtime traces and summary metrics through `runtime::Report`,
+- and executor-focused examples, tests, and benchmarks.
+
+Important implementation note:
+
+- Task 06 also tightened the Task 05 builder so `Insert<T>` table creation updates the matching
+  pending query families' known tables and wildcard-chunk dependency templates before the
+  reusable schedule is finalized. Without that, later resolve families could become ready too
+  early when a newly created table was only discovered through typed insert planning.
+
+## Actions Taken In The Repository
+
+The following concrete actions were taken to satisfy this task:
+
+- added `src/v2/runtime.rs` as the frame-local executor runtime,
+- introduced the `Seed`, `Executor`, `Callbacks`, `FunctionContext`, `ResolveContext`,
+  `Outcome`, `VisibleChunk`, `Trace`, and `Report` runtime vocabulary,
+- implemented worker-local deques, injector-based ready queues, and stealing,
+- implemented initial per-chunk job seeding from the frame snapshot,
+- implemented one batched resolve job per function family,
+- implemented resolve-driven injection of new downstream chunk jobs during the same frame,
+- added `tests/v2/executor_runtime.rs` for seeded execution, stealing, and injection behavior,
+- added `examples/v2/executor_runtime.rs` to keep the public runtime surface visible,
+- added `benches/v2/runtime.rs` so many-job and injection-heavy executor costs are benchmarkable,
+- and updated the schedule builder so typed insert planning refreshes known-table and dependency
+  metadata for already-registered matching query families.
+
+Current status:
+
+- implemented in the current repository layout.

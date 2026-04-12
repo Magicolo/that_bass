@@ -1,4 +1,5 @@
 mod chunk_layout;
+mod executor_runtime;
 mod foundation;
 mod keyless_rows;
 mod metadata;

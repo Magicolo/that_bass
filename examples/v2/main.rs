@@ -1,4 +1,5 @@
 mod chunk_layout;
+mod executor_runtime;
 mod instrumentation;
 mod keyless_rows;
 mod metadata;
@@ -27,6 +28,9 @@ fn main() {
     println!();
 
     schedule_builder::run();
+    println!();
+
+    executor_runtime::run();
     println!();
 
     vocabulary::run();
