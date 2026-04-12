@@ -26,35 +26,20 @@ struct Spawner {
 
 #[test]
 fn executor_runs_all_seeded_chunk_jobs_and_resolves() -> Result<(), String> {
+    if cfg!(miri) {
+        for (chunk_count, worker_count) in [(1usize, 1usize), (4, 2), (8, 3)] {
+            assert_seeded_chunk_execution(chunk_count, worker_count);
+        }
+
+        return Ok(());
+    }
+
     let chunk_count_generator = 1usize..17usize;
     let worker_count_generator = 1usize..5usize;
 
     (&chunk_count_generator, &worker_count_generator)
         .check(|(chunk_count, worker_count)| {
-            let mut catalog = Catalog::new();
-            let mut tables = vec![catalog
-                .register_table([Meta::of::<Position>()], test_configuration())
-                .expect("table registration should succeed")];
-            populate_chunks(&mut tables[0], chunk_count);
-
-            let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
-            builder.push_query(
-                "scan",
-                query::all(query::read::<Position>()).expect("query declaration should succeed"),
-            );
-            let schedule = builder.build();
-            let seed = Seed::from_tables(&tables);
-            let callbacks = Recorder::new(Duration::ZERO);
-            let report = Executor::with_options(
-                Options::default().with_worker_count(non_zero_usize(worker_count)),
-            )
-            .run(&schedule, &seed, &callbacks);
-
-            assert_eq!(callbacks.function_call_count(), chunk_count);
-            assert_eq!(callbacks.resolve_call_count(), 1);
-            assert_eq!(report.function_job_count(), chunk_count);
-            assert_eq!(report.resolve_job_count(), 1);
-            assert_eq!(report.completed_job_count(), chunk_count + 1);
+            assert_seeded_chunk_execution(chunk_count, worker_count)
         })
         .map_or(Ok(()), |failure| Err(format!("{failure:?}")))
 }
@@ -253,6 +238,32 @@ fn populate_chunks(table: &mut Table, chunk_count: usize) {
     for _ in 0..chunk_count {
         table.push_chunk();
     }
+}
+
+fn assert_seeded_chunk_execution(chunk_count: usize, worker_count: usize) {
+    let mut catalog = Catalog::new();
+    let mut tables = vec![catalog
+        .register_table([Meta::of::<Position>()], test_configuration())
+        .expect("table registration should succeed")];
+    populate_chunks(&mut tables[0], chunk_count);
+
+    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    builder.push_query(
+        "scan",
+        query::all(query::read::<Position>()).expect("query declaration should succeed"),
+    );
+    let schedule = builder.build();
+    let seed = Seed::from_tables(&tables);
+    let callbacks = Recorder::new(Duration::ZERO);
+    let report =
+        Executor::with_options(Options::default().with_worker_count(non_zero_usize(worker_count)))
+            .run(&schedule, &seed, &callbacks);
+
+    assert_eq!(callbacks.function_call_count(), chunk_count);
+    assert_eq!(callbacks.resolve_call_count(), 1);
+    assert_eq!(report.function_job_count(), chunk_count);
+    assert_eq!(report.resolve_job_count(), 1);
+    assert_eq!(report.completed_job_count(), chunk_count + 1);
 }
 
 fn non_zero_usize(value: usize) -> NonZeroUsize {

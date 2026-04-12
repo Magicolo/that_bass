@@ -23,10 +23,9 @@ use crate::v2::{
     schema::{ChunkIndex, ColumnIndex, Dependency, Resource, ResourceId, Table, TableIndex},
 };
 use core::{any::TypeId, num::NonZeroUsize};
-use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 use parking_lot::{Mutex, RwLock};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -321,39 +320,18 @@ impl Executor {
         C: Callbacks,
     {
         let worker_count = self.options.worker_count.get();
-        let mut local_queues = (0..worker_count)
-            .map(|_| Worker::new_fifo())
-            .collect::<Vec<_>>();
-        let stealers = local_queues
-            .iter()
-            .map(Worker::stealer)
-            .collect::<Vec<Stealer<JobIndex>>>();
-        let injector = Arc::new(Injector::new());
+        let queues = Queues::new(worker_count);
         let shared = Arc::new(Shared::new(schedule, seed, self.options));
-        let build = Build::new(schedule, seed, worker_count).seed_ready_jobs(
-            &mut local_queues,
-            &injector,
-            &shared,
-        );
+        let build = Build::new(schedule, seed, worker_count).seed_ready_jobs(&queues, &shared);
 
         thread::scope(|scope| {
-            let handles = local_queues
-                .into_iter()
-                .enumerate()
-                .map(|(worker_index, local_queue)| {
-                    let worker_stealers = stealers.clone();
+            let handles = (0..worker_count)
+                .map(|worker_index| {
                     let shared = Arc::clone(&shared);
-                    let injector = Arc::clone(&injector);
+                    let queues = &queues;
 
                     scope.spawn(move || {
-                        worker_loop(
-                            worker_index,
-                            local_queue,
-                            &worker_stealers,
-                            &injector,
-                            &shared,
-                            callbacks,
-                        );
+                        worker_loop(worker_index, queues, &shared, callbacks);
                     })
                 })
                 .collect::<Vec<_>>();
@@ -519,6 +497,27 @@ impl JobRecord {
     }
 }
 
+struct Queues {
+    local_queues: Box<[Mutex<VecDeque<JobIndex>>]>,
+    shared_queue: Mutex<VecDeque<JobIndex>>,
+}
+
+impl Queues {
+    fn new(worker_count: usize) -> Self {
+        Self {
+            local_queues: (0..worker_count)
+                .map(|_| Mutex::new(VecDeque::new()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            shared_queue: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn local_queue(&self, worker_index: usize) -> &Mutex<VecDeque<JobIndex>> {
+        &self.local_queues[worker_index]
+    }
+}
+
 struct Shared<'schedule, 'seed> {
     schedule: &'schedule Schedule,
     seed: &'seed Seed,
@@ -597,13 +596,13 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
         self.resolve_job_indices.write()[resolve_index.value()] = Some(job_index);
     }
 
-    fn push_ready_local(&self, local_queue: &Worker<JobIndex>, job_index: JobIndex) {
-        local_queue.push(job_index);
+    fn push_ready_local(&self, local_queue: &Mutex<VecDeque<JobIndex>>, job_index: JobIndex) {
+        local_queue.lock().push_back(job_index);
         self.note_ready_push();
     }
 
-    fn push_ready_shared(&self, injector: &Injector<JobIndex>, job_index: JobIndex) {
-        injector.push(job_index);
+    fn push_ready_shared(&self, shared_queue: &Mutex<VecDeque<JobIndex>>, job_index: JobIndex) {
+        shared_queue.lock().push_back(job_index);
         self.note_ready_push();
     }
 
@@ -635,8 +634,7 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
         &self,
         current_job_index: JobIndex,
         current_worker_index: usize,
-        local_queue: &Worker<JobIndex>,
-        injector: &Injector<JobIndex>,
+        queues: &Queues,
     ) {
         let current_record = self.job(current_job_index);
         current_record.completed.store(true, Ordering::Release);
@@ -651,34 +649,23 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
                 .fetch_sub(1, Ordering::AcqRel)
                 == 1
             {
-                self.enqueue_ready_job(
-                    successor_index,
-                    current_worker_index,
-                    local_queue,
-                    injector,
-                );
+                self.enqueue_ready_job(successor_index, current_worker_index, queues);
             }
         }
 
         self.remaining_job_count.fetch_sub(1, Ordering::AcqRel);
     }
 
-    fn enqueue_ready_job(
-        &self,
-        job_index: JobIndex,
-        current_worker_index: usize,
-        local_queue: &Worker<JobIndex>,
-        injector: &Injector<JobIndex>,
-    ) {
+    fn enqueue_ready_job(&self, job_index: JobIndex, current_worker_index: usize, queues: &Queues) {
         let job_record = self.job(job_index);
         match self.options.injection {
             Injection::PreferProducer
                 if job_record.job.affinity_worker_index == current_worker_index =>
             {
-                self.push_ready_local(local_queue, job_index);
+                self.push_ready_local(queues.local_queue(current_worker_index), job_index);
             }
-            Injection::PreferProducer => self.push_ready_shared(injector, job_index),
-            Injection::SharedFirst => self.push_ready_shared(injector, job_index),
+            Injection::PreferProducer => self.push_ready_shared(&queues.shared_queue, job_index),
+            Injection::SharedFirst => self.push_ready_shared(&queues.shared_queue, job_index),
         }
     }
 
@@ -693,8 +680,7 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
         resolve_index: ResolveIndex,
         outcome: Outcome,
         current_worker_index: usize,
-        local_queue: &Worker<JobIndex>,
-        injector: &Injector<JobIndex>,
+        queues: &Queues,
     ) {
         if outcome.chunks().is_empty() {
             return;
@@ -790,7 +776,7 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
                     .load(Ordering::Acquire)
                     == 0
                 {
-                    self.enqueue_ready_job(job_index, current_worker_index, local_queue, injector);
+                    self.enqueue_ready_job(job_index, current_worker_index, queues);
                 }
             }
         }
@@ -843,8 +829,7 @@ impl<'schedule, 'seed, 'shared> Build<'schedule, 'seed, 'shared> {
 
     fn seed_ready_jobs(
         mut self,
-        local_queues: &mut [Worker<JobIndex>],
-        injector: &Injector<JobIndex>,
+        queues: &Queues,
         shared: &'shared Arc<Shared<'schedule, 'seed>>,
     ) -> Self {
         self.shared = Some(shared);
@@ -862,10 +847,8 @@ impl<'schedule, 'seed, 'shared> Build<'schedule, 'seed, 'shared> {
         for job_index in self.ready_job_indices.iter().copied() {
             let job_record = shared.job(job_index);
             let affinity_worker_index = job_record.job.affinity_worker_index % self.worker_count;
-            shared.push_ready_local(&local_queues[affinity_worker_index], job_index);
+            shared.push_ready_local(queues.local_queue(affinity_worker_index), job_index);
         }
-
-        let _ = injector;
         self
     }
 
@@ -1002,17 +985,14 @@ impl<'schedule, 'seed, 'shared> Build<'schedule, 'seed, 'shared> {
 
 fn worker_loop<'schedule, 'seed, C>(
     worker_index: usize,
-    local_queue: Worker<JobIndex>,
-    stealers: &[Stealer<JobIndex>],
-    injector: &Injector<JobIndex>,
+    queues: &Queues,
     shared: &Arc<Shared<'schedule, 'seed>>,
     callbacks: &C,
 ) where
     C: Callbacks,
 {
     loop {
-        let Some(job_index) = pop_ready_job(worker_index, &local_queue, stealers, injector, shared)
-        else {
+        let Some(job_index) = pop_ready_job(worker_index, queues, shared) else {
             if shared.remaining_job_count.load(Ordering::Acquire) == 0 {
                 return;
             }
@@ -1064,59 +1044,38 @@ fn worker_loop<'schedule, 'seed, C>(
                         resolve_index: *resolve_index,
                     },
                 });
-                shared.inject_from_resolve(
-                    *resolve_index,
-                    outcome,
-                    worker_index,
-                    &local_queue,
-                    injector,
-                );
+                shared.inject_from_resolve(*resolve_index, outcome, worker_index, queues);
             }
         }
 
-        shared.mark_completed(job_index, worker_index, &local_queue, injector);
+        shared.mark_completed(job_index, worker_index, queues);
     }
 }
 
 fn pop_ready_job<'schedule, 'seed>(
     worker_index: usize,
-    local_queue: &Worker<JobIndex>,
-    stealers: &[Stealer<JobIndex>],
-    injector: &Injector<JobIndex>,
+    queues: &Queues,
     shared: &Shared<'schedule, 'seed>,
 ) -> Option<JobIndex> {
-    if let Some(job_index) = local_queue.pop() {
+    if let Some(job_index) = queues.local_queue(worker_index).lock().pop_back() {
         shared.note_ready_pop();
         return Some(job_index);
     }
 
-    loop {
-        match injector.steal_batch_and_pop(local_queue) {
-            Steal::Success(job_index) => {
-                shared.note_ready_pop();
-                shared.steal_count.fetch_add(1, Ordering::Relaxed);
-                return Some(job_index);
-            }
-            Steal::Retry => continue,
-            Steal::Empty => break,
-        }
+    if let Some(job_index) = queues.shared_queue.lock().pop_front() {
+        shared.note_ready_pop();
+        return Some(job_index);
     }
 
-    for (victim_index, stealer) in stealers.iter().enumerate() {
+    for victim_index in 0..queues.local_queues.len() {
         if victim_index == worker_index {
             continue;
         }
 
-        loop {
-            match stealer.steal() {
-                Steal::Success(job_index) => {
-                    shared.note_ready_pop();
-                    shared.steal_count.fetch_add(1, Ordering::Relaxed);
-                    return Some(job_index);
-                }
-                Steal::Retry => continue,
-                Steal::Empty => break,
-            }
+        if let Some(job_index) = queues.local_queue(victim_index).lock().pop_front() {
+            shared.note_ready_pop();
+            shared.steal_count.fetch_add(1, Ordering::Relaxed);
+            return Some(job_index);
         }
     }
 
