@@ -67,12 +67,12 @@ Examples:
 &[Velocity]
 &mut [Position]
 (&mut [Position], &[Velocity])
-(&[Row<'job>], &[Contact])
+(Rows<'job>, &[Contact])
 ```
 
 Those views should all share one positional indexing convention:
 
-- index `i` in every slice refers to the same row in that chunk.
+- index `i` in every slice-like view refers to the same row in that chunk.
 
 ## Row-Level Iteration Is Local Sugar
 
@@ -101,7 +101,7 @@ Examples:
 
 - `read::<Position>()` -> shared access to the `Position` column,
 - `write::<Position>()` -> exclusive access to the `Position` column,
-- `rows()` -> no conflicting data access, but requires row-handle materialization,
+- `rows()` -> no conflicting data access, but requires generation of a `Rows<'job>` view,
 - `one(read::<Physics>())` -> shared access with a cardinality constraint.
 
 These descriptors should be generated before runtime expansion into concrete chunk jobs.

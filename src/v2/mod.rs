@@ -22,7 +22,7 @@
 //! - `command`: deferred command vocabulary.
 //! - `instrumentation`: measurement categories and public diagnostics hooks.
 //! - `key`: stable-identity vocabulary used by later extension resources.
-//! - `query`: access vocabulary for future query declarations.
+//! - `query`: access vocabulary plus transient row-handle request terms.
 //! - `schedule`: ordering vocabulary for future schedule construction.
 //! - `schema`: the metadata catalog, `Meta` descriptors, chunk layouts, tables, chunks, and
 //!   resource mapping.
@@ -51,6 +51,10 @@
 //! `row`
 //!: An ephemeral locator that is valid only for the current scheduled job epoch. A row is not
 //! stable identity and must not be persisted across structural change boundaries.
+//!
+//! `rows`
+//!: A generated chunk-aligned view of transient row handles. `Rows<'job>` behaves like a
+//! slice-shaped view even though rows are not stored in a physical column.
 //!
 //! `key`
 //!: A stable identity datum. Storage primitives treat `Key` like any other column, and

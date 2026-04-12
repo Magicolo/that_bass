@@ -24,6 +24,7 @@ use crate::v2::{
 use core::{
     alloc::Layout,
     any::{type_name, TypeId},
+    iter::FusedIterator,
     marker::PhantomData,
     mem::{align_of, needs_drop, size_of},
     ptr::NonNull,
@@ -292,6 +293,10 @@ pub enum ChunkError {
         row_index: usize,
         count: usize,
     },
+    RowTableMismatch {
+        expected_table_index: TableIndex,
+        actual_table_index: TableIndex,
+    },
 }
 
 /// The bit partition used by the packed `Row<'job>` representation.
@@ -354,32 +359,22 @@ impl RowLayout {
             });
         }
 
-        let packed_chunk_and_row_index = if self.row_index_bit_count == 32 {
-            row_index
-        } else {
-            (chunk_index.value() << self.row_index_bit_count) | row_index
-        };
-
-        Ok(Row {
-            table_index,
-            packed_chunk_and_row_index,
-            marker: PhantomData,
-        })
+        Ok(self.pack_row(table_index, chunk_index, row_index))
     }
 
     pub const fn chunk_index<'job>(self, row: Row<'job>) -> ChunkIndex {
         if self.chunk_index_bit_count == 0 {
             ChunkIndex::new(0)
         } else {
-            ChunkIndex::new(row.packed_chunk_and_row_index >> self.row_index_bit_count)
+            ChunkIndex::new(row.packed_chunk_and_row_index() >> self.row_index_bit_count)
         }
     }
 
     pub const fn row_index<'job>(self, row: Row<'job>) -> u32 {
         if self.row_index_bit_count == 32 {
-            row.packed_chunk_and_row_index
+            row.packed_chunk_and_row_index()
         } else {
-            row.packed_chunk_and_row_index & self.row_index_mask()
+            row.packed_chunk_and_row_index() & self.row_index_mask()
         }
     }
 
@@ -410,25 +405,258 @@ impl RowLayout {
             (1u32 << self.row_index_bit_count) - 1
         }
     }
+
+    fn pack_row<'job>(
+        self,
+        table_index: TableIndex,
+        chunk_index: ChunkIndex,
+        row_index: u32,
+    ) -> Row<'job> {
+        debug_assert!(row_index <= self.maximum_row_index());
+        debug_assert!(chunk_index.value() <= self.maximum_chunk_index());
+
+        let packed_chunk_and_row_index = if self.row_index_bit_count == 32 {
+            row_index
+        } else {
+            (chunk_index.value() << self.row_index_bit_count) | row_index
+        };
+
+        let packed =
+            (u64::from(table_index.value()) << u32::BITS) | u64::from(packed_chunk_and_row_index);
+
+        Row {
+            packed,
+            marker: PhantomData,
+        }
+    }
 }
 
 /// A row index into a chunk of a table of a store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Row<'job> {
-    table_index: TableIndex,
-    packed_chunk_and_row_index: u32,
+    packed: u64,
     marker: PhantomData<&'job ()>,
 }
 
 impl<'job> Row<'job> {
     pub const fn table_index(self) -> TableIndex {
-        self.table_index
+        TableIndex::new((self.packed >> u32::BITS) as u32)
     }
 
     pub const fn packed_chunk_and_row_index(self) -> u32 {
-        self.packed_chunk_and_row_index
+        self.packed as u32
+    }
+
+    pub const fn packed(self) -> u64 {
+        self.packed
     }
 }
+
+/// A generated chunk-aligned view of transient row handles.
+///
+/// `Rows<'job>` behaves like a slice-shaped view even though no physical row column exists in
+/// storage. Each yielded handle is derived lazily from the table index, chunk index, and the
+/// current inhabited row range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rows<'job> {
+    table_index: TableIndex,
+    chunk_index: ChunkIndex,
+    row_layout: RowLayout,
+    row_index_start: u32,
+    count: usize,
+    marker: PhantomData<&'job ()>,
+}
+
+impl<'job> Rows<'job> {
+    const fn new(
+        table_index: TableIndex,
+        chunk_index: ChunkIndex,
+        row_layout: RowLayout,
+        row_index_start: u32,
+        count: usize,
+    ) -> Self {
+        Self {
+            table_index,
+            chunk_index,
+            row_layout,
+            row_index_start,
+            count,
+            marker: PhantomData,
+        }
+    }
+
+    pub const fn table_index(self) -> TableIndex {
+        self.table_index
+    }
+
+    pub const fn chunk_index(self) -> ChunkIndex {
+        self.chunk_index
+    }
+
+    pub const fn row_layout(self) -> RowLayout {
+        self.row_layout
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn get(&self, index: usize) -> Option<Row<'job>> {
+        self.row_for_offset(index)
+    }
+
+    pub fn first(&self) -> Option<Row<'job>> {
+        self.get(0)
+    }
+
+    pub fn last(&self) -> Option<Row<'job>> {
+        self.count.checked_sub(1).and_then(|index| self.get(index))
+    }
+
+    pub fn iter(&self) -> RowsIter<'job> {
+        RowsIter::new(*self)
+    }
+
+    pub fn split_at(&self, midpoint: usize) -> Option<(Self, Self)> {
+        if midpoint > self.count {
+            return None;
+        }
+
+        Some((
+            self.subrows(0, midpoint),
+            self.subrows(midpoint, self.count - midpoint),
+        ))
+    }
+
+    pub fn zip<I>(self, other: I) -> core::iter::Zip<RowsIter<'job>, I::IntoIter>
+    where
+        I: IntoIterator,
+    {
+        self.into_iter().zip(other)
+    }
+
+    fn subrows(&self, start_offset: usize, count: usize) -> Self {
+        let row_index_start = if count == 0 {
+            self.row_index_start
+        } else {
+            self.row_index_start
+                .checked_add(
+                    u32::try_from(start_offset)
+                        .expect("row offsets must fit inside a packed row handle"),
+                )
+                .expect("subrow start index must remain representable")
+        };
+
+        debug_assert!(usize::try_from(row_index_start)
+            .ok()
+            .and_then(|start| start.checked_add(count))
+            .is_some());
+
+        Self::new(
+            self.table_index,
+            self.chunk_index,
+            self.row_layout,
+            row_index_start,
+            count,
+        )
+    }
+
+    fn row_for_offset(&self, offset: usize) -> Option<Row<'job>> {
+        if offset >= self.count {
+            return None;
+        }
+
+        Some(self.row_for_offset_unchecked(offset))
+    }
+
+    fn row_for_offset_unchecked(&self, offset: usize) -> Row<'job> {
+        debug_assert!(offset < self.count);
+
+        let row_index = self
+            .row_index_start
+            .checked_add(
+                u32::try_from(offset).expect("row offsets must fit inside a packed row handle"),
+            )
+            .expect("row indices inside a rows view must remain representable");
+
+        self.row_layout
+            .pack_row(self.table_index, self.chunk_index, row_index)
+    }
+}
+
+impl<'job> IntoIterator for Rows<'job> {
+    type IntoIter = RowsIter<'job>;
+    type Item = Row<'job>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        RowsIter::new(self)
+    }
+}
+
+impl<'job> IntoIterator for &Rows<'job> {
+    type IntoIter = RowsIter<'job>;
+    type Item = Row<'job>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Iterator over a generated `Rows<'job>` view.
+#[derive(Debug, Clone)]
+pub struct RowsIter<'job> {
+    rows: Rows<'job>,
+    next_offset: usize,
+    end_offset: usize,
+}
+
+impl<'job> RowsIter<'job> {
+    const fn new(rows: Rows<'job>) -> Self {
+        Self {
+            rows,
+            next_offset: 0,
+            end_offset: rows.count,
+        }
+    }
+}
+
+impl<'job> Iterator for RowsIter<'job> {
+    type Item = Row<'job>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next_offset == self.end_offset {
+            return None;
+        }
+
+        let row = self.rows.row_for_offset_unchecked(self.next_offset);
+        self.next_offset += 1;
+        Some(row)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.end_offset.saturating_sub(self.next_offset);
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'job> DoubleEndedIterator for RowsIter<'job> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.next_offset == self.end_offset {
+            return None;
+        }
+
+        self.end_offset -= 1;
+        Some(self.rows.row_for_offset_unchecked(self.end_offset))
+    }
+}
+
+impl<'job> ExactSizeIterator for RowsIter<'job> {}
+
+impl<'job> FusedIterator for RowsIter<'job> {}
 
 /// The layout metrics that matter for chunk-capacity planning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -812,6 +1040,12 @@ impl Chunk {
         Some(Column::new(pointer, meta))
     }
 
+    pub fn rows<'job>(&self, table_index: TableIndex, row_layout: RowLayout) -> Rows<'job> {
+        debug_assert!(self.count <= self.capacity);
+
+        Rows::new(table_index, self.chunk_index, row_layout, 0, self.count)
+    }
+
     /// # Safety
     ///
     /// The caller must ensure that writing `value` into `row_index` is valid for the current
@@ -1048,6 +1282,14 @@ impl Table {
         self.chunks.len()
     }
 
+    pub fn rows<'job>(&self, chunk_index: ChunkIndex) -> Result<Rows<'job>, ChunkError> {
+        let chunk = self
+            .chunk(chunk_index)
+            .ok_or(ChunkError::MissingChunk { chunk_index })?;
+
+        Ok(chunk.rows(self.index, self.row_layout))
+    }
+
     pub fn chunk_layouts(&self) -> &[ChunkLayout] {
         &self.chunk_layouts
     }
@@ -1269,6 +1511,53 @@ impl Table {
             .ok_or(ChunkError::MissingChunk { chunk_index })?;
 
         chunk.swap_remove_row(row_index)
+    }
+
+    pub fn resolve_remove_rows<'job, I>(&mut self, rows: I) -> Result<usize, ChunkError>
+    where
+        I: IntoIterator<Item = Row<'job>>,
+    {
+        let mut row_indices_by_chunk = BTreeMap::<ChunkIndex, Vec<usize>>::new();
+
+        for row in rows {
+            let actual_table_index = row.table_index();
+            if actual_table_index != self.index {
+                return Err(ChunkError::RowTableMismatch {
+                    expected_table_index: self.index,
+                    actual_table_index,
+                });
+            }
+
+            let chunk_index = self.row_layout.chunk_index(row);
+            let row_index = self.row_layout.row_index(row) as usize;
+
+            row_indices_by_chunk
+                .entry(chunk_index)
+                .or_default()
+                .push(row_index);
+        }
+
+        if row_indices_by_chunk.is_empty() {
+            return Ok(0);
+        }
+
+        let mut removed_row_count = 0usize;
+
+        for (chunk_index, row_indices) in row_indices_by_chunk {
+            let chunk = self
+                .chunk_mut(chunk_index)
+                .ok_or(ChunkError::MissingChunk { chunk_index })?;
+            let mut row_indices = row_indices;
+            row_indices.sort_unstable();
+            row_indices.dedup();
+
+            for row_index in row_indices.into_iter().rev() {
+                chunk.swap_remove_row(row_index)?;
+                removed_row_count += 1;
+            }
+        }
+
+        Ok(removed_row_count)
     }
 
     fn column_index_for_type<T: 'static>(&self) -> Result<ColumnIndex, ChunkError> {

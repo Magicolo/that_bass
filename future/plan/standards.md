@@ -284,10 +284,13 @@ Any change that touches unsafe code directly or indirectly must include Miri cov
 
 Required rules:
 
+- always run Miri through the nightly toolchain: `cargo +nightly miri ...`,
 - add or update targeted tests so Miri exercises the unsafe path,
 - prefer deterministic and reasonably small tests for Miri,
 - do not assume ordinary tests are enough for pointer and aliasing correctness,
 - if a change affects a shared unsafe helper, widen Miri coverage to every important caller.
+- when validating `v2` rewrite work, prefer a focused `v2` Miri run such as `cargo +nightly miri test --test v2 ...`; do not spend time running `v1` under Miri unless the changed unsafe path reaches into `v1` or shared code that is only exercised there,
+- if nightly Miri is unavailable in the environment, say that explicitly and record the exact failure.
 
 The goal is not symbolic completeness. The goal is aggressive practical auditing of unsafe assumptions.
 
@@ -312,10 +315,10 @@ cargo test
 Required when unsafe-touched code changes:
 
 ```bash
-cargo miri test
+cargo +nightly miri test --test v2
 ```
 
-If those checks are scoped more narrowly for iteration speed, the final patch still needs equivalent coverage for the changed area.
+If the affected unsafe path is outside `v2`, or if a narrower test target is more appropriate, use the equivalent nightly Miri command for that area. If checks are scoped more narrowly for iteration speed, the final patch still needs equivalent coverage for the changed area.
 
 ## Current Codebase Standards To Preserve
 

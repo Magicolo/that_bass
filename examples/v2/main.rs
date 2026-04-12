@@ -1,5 +1,6 @@
 mod chunk_layout;
 mod instrumentation;
+mod keyless_rows;
 mod metadata;
 mod store_planning;
 mod vocabulary;
@@ -15,6 +16,9 @@ fn main() {
     println!();
 
     chunk_layout::run();
+    println!();
+
+    keyless_rows::run();
     println!();
 
     vocabulary::run();

@@ -69,7 +69,7 @@ Important design change:
 At minimum, the rewrite should define command families for:
 
 - `Insert<T>`
-- `Remove<Row<'job>>` for keyless tables
+- `Remove<Row<'job>>` for keyless tables, currently surfaced as `command::Remove<'job>`
 - `Remove<Key>` for keyed tables later
 - future deferred value writes such as `Set<T>` or `Patch<T>`
 - future `Destroy`, `Add`, `RemoveComponent`, `Modify`, and event emission hooks

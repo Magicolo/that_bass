@@ -232,3 +232,47 @@ This task is done when:
 - row-targeted deferred commands exist,
 - remove semantics are documented and tested,
 - the code makes it difficult to mistake `Row<'job>` for stable identity.
+
+## Implementation Review
+
+Task 03 is implemented in the isolated `v2` lane.
+
+The current implementation lives primarily in:
+
+- `src/v2/schema.rs`
+- `src/v2/query.rs`
+- `src/v2/command.rs`
+- `tests/v2/keyless_rows.rs`
+- `examples/v2/keyless_rows.rs`
+
+## Actions Taken
+
+The current implementation does the following:
+
+1. keeps `Row<'job>` as an ephemeral lifetime-carried handle packed into a `u64`,
+2. uses table-specific `RowLayout` metadata to encode and decode chunk and row indices,
+3. exposes `Table::rows(...) -> Rows<'job>` for chunk-aligned row-handle views,
+4. implements `Rows<'job>` as a generated slice-shaped view rather than a stored column,
+5. gives `Rows<'job>` safe slice-like helpers:
+   - `len`,
+   - `is_empty`,
+   - `get`,
+   - `first`,
+   - `last`,
+   - `split_at`,
+   - `iter`,
+   - `IntoIterator`,
+   - `zip(...)`,
+6. adds a keyless `command::Remove<'job>` buffer with `one`, `array`, `slice`, and `extend`,
+7. resolves row-targeted removes in batch through table-local descending per-chunk application with sort-and-deduplicate behavior.
+
+## Current Status
+
+The implemented Task 03 surface is intentionally storage-local:
+
+- generated row views exist,
+- keyless remove recording exists,
+- batched keyless remove resolution exists,
+- but scheduler integration and full query-plan lowering remain later tasks.
+
+That split is deliberate. It keeps the row-handle contract honest before Task 04 and Task 07 wire it into the larger execution model.

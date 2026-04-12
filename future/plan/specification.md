@@ -392,10 +392,10 @@ Required MVP combinators:
 
 - `query::read::<T>()`
 - `query::write::<T>()`
+- `query::rows()`
 - `query::all(...)`
 - `query::one(...)`
 - likely `query::opt(...)`
-- a way to request ephemeral `Row<'job>`
 
 Why `query::all(...)` exists:
 
@@ -639,7 +639,7 @@ This is deliberate. Hot scan-heavy data should not pay identity tax by default.
 
 Keyless row targeting uses an ephemeral row handle.
 
-Planned properties:
+Selected properties:
 
 - packed into a `u64`,
 - contains at least:
@@ -648,6 +648,14 @@ Planned properties:
   - row index within the chunk,
 - row bits versus chunk bits are table-parameterized,
 - lifetime-carried API, for example `Row<'job>`, to signal that the handle is transient and should not be stored.
+
+Chunk queries do not materialize row handles into a physical column. Instead they expose a generated
+`Rows<'job>` view that:
+
+- behaves like a slice-shaped chunk view,
+- supports `len`, `is_empty`, `get`, `first`, `last`, and safe `split_at`,
+- implements `IntoIterator`,
+- and exposes `zip(...)` so it aligns naturally with chunk slices such as `&[T]` and `&mut [T]`.
 
 `Row<'job>` is for:
 
@@ -660,6 +668,14 @@ Planned properties:
 - persistent storage,
 - cross-frame identity,
 - post-resolution assumptions that the same row still names the same logical object.
+
+The current Task 03 direction also includes a keyless batched remove buffer:
+
+- row-targeted remove commands are recorded as `command::Remove<'job>`,
+- remove resolution groups targets by chunk,
+- row indices are sorted, deduplicated, and applied from highest to lowest within each chunk,
+- and old row coordinates may be reused immediately after resolution because `swap_remove` moves
+  tail rows into vacated slots.
 
 ## `Key` Columns And `Keys` Extension
 

@@ -185,8 +185,10 @@ cargo test
 Required when the changed code touches unsafe paths directly or indirectly:
 
 ```bash
-cargo miri test
+cargo +nightly miri test --test v2
 ```
+
+For rewrite-lane work, prefer a focused `v2` Miri run over the full repository test suite. Only run `v1` under Miri when the changed unsafe path reaches into `v1` or shared code that is only exercised there. If nightly Miri is unavailable in the environment, say so explicitly.
 
 If the rewrite introduces separate benchmark targets or crates, add their equivalent checks here too.
 

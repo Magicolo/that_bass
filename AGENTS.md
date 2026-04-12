@@ -26,7 +26,7 @@ Primary source references:
   - Add better deferred orchestration, query combinators, richer transforms, generative testing, and possibly event filters.
   - Chunk-based storage, interpreter/serialization work, and scheduler integration are exploratory design notes, not active implementation (`src/v1/mod.rs:53-220`).
   - The selected long-term rewrite direction is now documented in `future/plan/specification.md`, `future/plan/standards.md`, `future/plan/README.md`, and the ordered `future/plan/00-foundation.md` through `future/plan/15-layout-specialization.md` task set. That plan currently assumes per-job command recording but function-level batched resolve phases. Treat those files as design documents for future work, not descriptions of current runtime behavior.
-  - Task `future/plan/00-foundation.md` is implemented through the isolated `src/v2/` rewrite lane. Treat `src/v2/` as the future-engine boundary and keep it isolated from the current runtime modules.
+  - Tasks `future/plan/00-foundation.md` through `future/plan/03-keyless-rows.md` are implemented through the isolated `src/v2/` rewrite lane. Treat `src/v2/` as the future-engine boundary and keep it isolated from the current runtime modules.
   - For `v2`, prefer short public type names that are still full English words. Let module names carry context. Example shape: `Store`, `Configuration`, `command::Kind`, `instrumentation::Category`.
 
 ## Workspace Layout
@@ -46,19 +46,19 @@ Primary source references:
 | `src/v1/row.rs` | Read/write access declaration and row materialization | `src/v1/row.rs:11-37`, `src/v1/row.rs:81`, `src/v1/row.rs:260-448` |
 | `src/v1/filter.rs` | Table-level filtering and dynamic filter trees | `src/v1/filter.rs:9`, `src/v1/filter.rs:34`, `src/v1/filter.rs:68`, `src/v1/filter.rs:93`, `src/v1/filter.rs:165`, `src/v1/filter.rs:211` |
 | `src/v1/resources.rs` | Typed local/global caches for metadata and shared state | `src/v1/resources.rs:13-23`, `src/v1/resources.rs:107-170` |
-| `src/v2/` | Isolated rewrite lane for the next storage-and-scheduler architecture; current foundation includes `Store`, configuration, instrumentation vocabulary, a table-shape catalog, `Meta` descriptors, `Row` packing metadata, precomputed `ChunkLayout` values, single-allocation `Chunk` storage, low-level direct table/chunk operations, table/resource identity descriptors, hierarchical scheduler dependencies, and benchmarkable chunk-capacity planning | `src/v2/mod.rs`, `src/v2/store.rs`, `src/v2/schema.rs`, `src/v2/instrumentation.rs`, `src/v2/command.rs` |
+| `src/v2/` | Isolated rewrite lane for the next storage-and-scheduler architecture; current foundation includes `Store`, configuration, instrumentation vocabulary, a table-shape catalog, `Meta` descriptors, packed `Row<'job>` handles, generated `Rows<'job>` views, precomputed `ChunkLayout` values, single-allocation `Chunk` storage, low-level direct table/chunk operations, keyless batched remove recording, table/resource identity descriptors, hierarchical scheduler dependencies, and benchmarkable chunk-capacity planning | `src/v2/mod.rs`, `src/v2/store.rs`, `src/v2/schema.rs`, `src/v2/query.rs`, `src/v2/command.rs`, `src/v2/instrumentation.rs` |
 | `src/v1/core/view_vec.rs` | Snapshot vector primitive used by tables and keys | `src/v1/core/view_vec.rs:19`, `src/v1/core/view_vec.rs:34`, `src/v1/core/view_vec.rs:37`, `src/v1/core/view_vec.rs:59`, `src/v1/core/view_vec.rs:76`, `src/v1/core/view_vec.rs:182` |
 | `src/v1/core/utility.rs` | Unsafe helpers, sorted-set helpers, requeue/fold helpers | `src/v1/core/utility.rs:16-74`, `src/v1/core/utility.rs:74-163`, `src/v1/core/utility.rs:171-230` |
 | `that_base_derive/src/lib.rs` | Procedural macros; emits absolute `that_bass::v1::...` paths for the stable engine | `that_base_derive/src/lib.rs:23`, `that_base_derive/src/lib.rs:37`, `that_base_derive/src/lib.rs:83`, `that_base_derive/src/lib.rs:198` |
-| `tests/` | Integration suites grouped by engine generation; read these before changing semantics | `tests/v1/check.rs`, `tests/v1/query.rs`, `tests/v1/event.rs`, `tests/v1/derive.rs`, `tests/v2/foundation.rs`, `tests/v2/metadata.rs` |
-| `examples/v2/` | Runnable sample usage for the rewrite lane; keep this aligned with the current `v2` public API | `examples/v2/main.rs`, `examples/v2/store_planning.rs`, `examples/v2/metadata.rs`, `examples/v2/instrumentation.rs`, `examples/v2/vocabulary.rs` |
+| `tests/` | Integration suites grouped by engine generation; read these before changing semantics | `tests/v1/check.rs`, `tests/v1/query.rs`, `tests/v1/event.rs`, `tests/v1/derive.rs`, `tests/v2/foundation.rs`, `tests/v2/metadata.rs`, `tests/v2/keyless_rows.rs` |
+| `examples/v2/` | Runnable sample usage for the rewrite lane; keep this aligned with the current `v2` public API | `examples/v2/main.rs`, `examples/v2/store_planning.rs`, `examples/v2/metadata.rs`, `examples/v2/keyless_rows.rs`, `examples/v2/instrumentation.rs`, `examples/v2/vocabulary.rs` |
 | `future/` | Architecture proposals and rewrite planning docs | `future/README.md`, `future/06-recommended-roadmap.md`, `future/plan/specification.md` |
 
 Inactive or misleading files:
 
 - `src/v1/core/borrow.rs` and `src/v1/core/or.rs` are in the repository but not exported by `src/v1/core/mod.rs`; they are currently not compiled.
 - `src/v1/mod.rs` contains large dead experimental modules (`next_table_based`, `next_chunk_based`) and old sketches. Treat them as design notes, not runtime code (`src/v1/mod.rs:341-...`).
-- `src/v2/` is real compiled code, but it is still only the rewrite foundation lane from `future/plan/00-foundation.md`. It is not yet feature-parity runtime code.
+- `src/v2/` is real compiled code, but it is still only the early rewrite lane through `future/plan/03-keyless-rows.md`. It is not yet feature-parity runtime code.
 - Tests and benches are grouped under `v1` and `v2` directories to mirror the source layout. Keep new coverage in the matching generation directory.
 
 ## Core Mental Model
@@ -262,6 +262,7 @@ These rules matter more than style. Breaking any of them is likely UB or subtle 
 - `tests/v2/foundation.rs` verifies the rewrite-lane foundation boundary, chunk-capacity planning formula, and required measurement categories.
 - `tests/v2/metadata.rs` verifies table-shape interning, `Meta` handling, ordinary `Key` meta handling, hierarchical scheduler resource generation, dependency expansion, duplicate-meta rejection, `Row` packing, and inline-versus-sidecar layout accounting for the rewrite metadata layer.
 - `tests/v2/chunk_layout.rs` verifies bootstrap chunk-layout generation, one-allocation pointer placement, alignment/offset invariants, dense-prefix slices, and row-level `swap_remove` behavior for the rewrite storage lane.
+- `tests/v2/keyless_rows.rs` verifies generated `Rows<'job>` views, row/data positional alignment, batched descending remove resolution, row-handle reuse after `swap_remove`, and row-table mismatch rejection for keyless remove buffers.
 - `benches/v1/create.rs` measures alternative create APIs, not end-to-end workload throughput.
 - `benches/v2/foundation.rs` is the initial comparative harness for the rewrite lane. It currently measures boundary construction, chunk-capacity planning, and chunk allocation/growth, and should grow with later `v2` tasks instead of adding benchmark hooks inside library code.
 - `examples/v2/` is the executable API-evolution trace for the rewrite lane. When `v2` public behavior or naming changes, update these examples in the same patch.
@@ -301,5 +302,13 @@ Strongly recommended in addition:
 ```bash
 cargo test
 ```
+
+Required when the changed code touches unsafe paths directly or indirectly:
+
+```bash
+cargo +nightly miri test --test v2
+```
+
+For rewrite-lane work, prefer a focused `v2` Miri run instead of the full repository suite. Only run `v1` under Miri when the changed unsafe path reaches into `v1` or shared code that is only exercised there.
 
 If any of those checks are skipped, blocked, or fail, say so explicitly.
