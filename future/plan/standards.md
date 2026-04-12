@@ -79,6 +79,35 @@ Comment as if speaking to a newcomer to the library who is careful but has no re
 
 When unsafe code exists, safety comments are mandatory.
 
+## Assertions And Failure Handling
+
+Use `debug_assert!` freely for non-obvious internal assumptions.
+
+Good `debug_assert!` targets:
+
+- assumptions that are important for optimized code paths,
+- invariants that justify removing redundant runtime checks,
+- internal layout, indexing, ordering, aliasing, or synchronization assumptions,
+- preconditions that should already have been established by earlier validation,
+- facts that would be expensive or noisy to re-check in release builds.
+
+These assertions are encouraged because they help document invariants while keeping release-mode
+hot paths lean.
+
+Required rules:
+
+- prefer `debug_assert!` for internal invariants and non-obvious assumptions,
+- when a `debug_assert!` guards subtle logic, write the condition so the violated assumption is easy
+  to understand,
+- use `debug_assert!` especially around unsafe-adjacent code and optimized indexing/layout logic,
+- do not use `assert!` for ordinary validation or expected failure paths,
+- truly fallible functions must return `Result` rather than panic,
+- use `assert!` only as a last resort when continuing would violate a fundamental invariant and the
+  function is not meaningfully fallible in normal use.
+
+The rewrite should not normalize panic-driven control flow. It should make failure explicit where
+failure is part of the contract, and reserve hard assertions for broken invariants.
+
 ## Abstractions
 
 Be minimalist with abstractions.

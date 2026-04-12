@@ -228,6 +228,8 @@ These rules matter more than style. Breaking any of them is likely UB or subtle 
 - Reuse `Resources` caches for expensive type-derived state such as metadata lists, access sets, and per-table modify state (`src/v1/resources.rs:107-170`, `src/v1/template.rs:110-117`, `src/v1/row.rs:250-257`, `src/v1/modify.rs:685-735`).
 - Prefer schema-level reasoning over per-type ad hoc branching.
 - Skip column locks and copy/drop work for zero-sized types when possible; the code already does this in many places.
+- Use `debug_assert!` for non-obvious internal assumptions, especially around optimized paths, indexing/layout invariants, and unsafe-adjacent logic where redundant release-mode checks would be noise.
+- Prefer `Result` for truly fallible behavior. Do not use `assert!` as normal validation or control flow; reserve it for last-resort broken-invariant situations.
 - Keep comments that explain weird visibility windows or ordering constraints. They are part of the spec here.
 - Preserve tuple macro coverage when extending `Row`, `Template`, or `Filter`.
 - If you add a new operation that moves rows, update events and keyed-query retry logic together.
