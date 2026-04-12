@@ -1,14 +1,14 @@
-# Task 08: Managed Keys, Inline `Key` Columns, And Reverse Mapping
+# Task 08: `Keys` Resource, `Key` Columns, And Reverse Mapping
 
 This task adds stable identity back on top of the keyless-first storage core.
 
-Read this file together with `future/plan/specification.md` and `future/plan/standards.md`. The rewrite deliberately makes identity optional. This task is the opt-in managed-identity layer for the cases where stable references matter more than the extra overhead.
+Read this file together with `future/plan/specification.md` and `future/plan/standards.md`. The rewrite deliberately makes identity optional. This task is the opt-in stable-identity extension for the cases where stable references matter more than the extra overhead.
 
 ## Purpose
 
-Implement managed keyed tables through:
+Implement stable identity through:
 
-- an inline physical `Key` column,
+- ordinary tables that include a `Key` column,
 - a global `Keys` resource for `Key -> Row` mapping,
 - query support for `&[Key]`,
 - structural maintenance of the bidirectional mapping.
@@ -26,13 +26,13 @@ Implement managed keyed tables through:
 
 ## Selected Model
 
-Keyed tables opt into managed identity.
+Storage primitives stay agnostic to stable-identity extensions.
 
 Selected storage shape:
 
-- the table physically stores a `Key` column beside its normal data columns,
-- queries can request that column directly,
-- a global `Keys` resource stores the reverse `Key -> Row` mapping.
+- a table may physically store a `Key` column beside its normal data columns,
+- queries can request that column directly because it is just another chunk slice,
+- a global `Keys` resource discovers such tables and stores the reverse `Key -> Row` mapping.
 
 This is intentionally different from trying to reconstruct `Key` from generation fragments at query time.
 
@@ -75,9 +75,16 @@ Responsible for:
 
 Do not blur these roles.
 
+Important boundary:
+
+- storage primitives do not have a special keyed-table mode,
+- the existence of a `Key` column implies that the `Keys` resource must participate,
+- synchronization between the `Key` column and the reverse mapping belongs to the extension layer,
+  not to primitive table metadata.
+
 ## Structural Maintenance Rules
 
-Every structural operation on a keyed table must maintain both directions.
+Every structural operation on a table that carries `Key` must maintain both directions.
 
 ### Insert
 
@@ -92,13 +99,13 @@ Every structural operation on a keyed table must maintain both directions.
 
 ### Modify / Move Across Tables
 
-- if a keyed row moves between keyed tables, preserve the key,
+- if a keyed row moves between tables that both carry `Key`, preserve the key,
 - update reverse mapping to the new `Row`,
-- if moving between keyed and keyless tables is allowed at all, define the conversion explicitly rather than letting it happen accidentally.
+- if moving between `Key`-carrying and non-`Key` tables is allowed at all, define the conversion explicitly rather than letting it happen accidentally.
 
 That last point is important enough to call out:
 
-- keyed versus keyless table transitions must be explicit in the API and the planner.
+- `Key`-carrying versus non-`Key` tables must transition explicitly in the API and the planner.
 
 ## Query Support
 
@@ -140,10 +147,12 @@ This task explicitly does not implement user-keyed tables.
 
 Reason:
 
-- the chosen rewrite already introduces major complexity through chunking, scheduling, and managed keys,
+- the chosen rewrite already introduces major complexity through chunking, scheduling, and the
+  `Keys` extension,
 - user-key uniqueness and indexing policy deserve a separate design pass.
 
-However, this task should preserve room for them by keeping `IdentityPolicy` extensible.
+However, this task should preserve room for them by keeping extension hooks generic rather than by
+ hardcoding identity modes into primitive table metadata.
 
 ## Example
 
@@ -168,13 +177,12 @@ This is the reason the inline `Key` column matters.
 
 ## Implementation Checklist
 
-1. Extend the table descriptor for `ManagedKeys`.
-2. Add physical `Key` column support.
-3. Implement the `Keys` resource.
-4. Implement keyed insert maintenance.
-5. Implement keyed remove maintenance.
-6. Implement keyed move maintenance.
-7. Add tests for:
+1. Keep `Key`-column discovery generic through table metadata.
+2. Implement the `Keys` resource.
+3. Implement keyed insert maintenance.
+4. Implement keyed remove maintenance.
+5. Implement keyed move maintenance.
+6. Add tests for:
    - `&[Key]` query slices,
    - reverse lookup after insert,
    - reverse lookup after `swap_remove`,
@@ -190,15 +198,16 @@ The entire point of keyless-by-default is to let hot data avoid identity cost. K
 
 If the `Key -> Row` map lags behind row movement, keyed identity becomes subtly incorrect.
 
-### Pitfall: Accidentally turning `Key` into "just another component"
+### Pitfall: Reintroducing key management into primitive table metadata
 
-It is stored like a column, but it carries stronger invariants than ordinary data.
+`Key` is stored like a normal column, but its synchronization invariants belong to the `Keys`
+ resource. Keep that boundary explicit.
 
 ## Done Criteria
 
 This task is done when:
 
-- keyed tables can expose chunk `Key` slices,
+- tables with `Key` columns can expose chunk `Key` slices,
 - reverse lookup exists,
 - row movement keeps the bidirectional mapping correct,
 - keyless tables still pay none of this cost.

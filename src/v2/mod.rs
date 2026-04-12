@@ -21,36 +21,39 @@
 //!
 //! - `command`: deferred command vocabulary.
 //! - `instrumentation`: measurement categories and public diagnostics hooks.
-//! - `key`: opt-in stable identity vocabulary for keyed tables.
+//! - `key`: stable-identity vocabulary used by later extension resources.
 //! - `query`: access vocabulary for future query declarations.
 //! - `schedule`: ordering vocabulary for future schedule construction.
-//! - `schema`: the metadata catalog, logical-schema identity, table descriptors, and resource
-//!   mapping.
+//! - `schema`: the metadata catalog, `Meta` descriptors, table descriptors, and resource mapping.
 //! - `store`: the foundation store boundary and chunk planning surface.
 //!
 //! Glossary:
 //!
-//! `schema`
-//!: The logical set of datum types that define one table shape.
+//! `meta`
+//!: Type metadata for one stored type. A table stores one `Meta` per declared column.
 //!
 //! `table`
-//!: The storage owner for one logical schema. A table owns metadata and a collection of chunks.
+//!: The storage owner for one collection of `Meta` descriptors. A table owns metadata and a
+//! collection of chunks.
 //!
 //! `store`
 //!: The root owner for tables. Scheduler dependency identifiers are hierarchical from store down
-//! to physical columns.
+//! to columns.
 //!
 //! `chunk`
 //!: A densely packed, independently allocated subset of one table's rows. Chunks are the minimum
 //! unit of storage locality and the floor for potentially parallel work.
+//!
+//! `column`
+//!: A runtime wrapper around one chunk pointer paired with one `Meta`.
 //!
 //! `row`
 //!: An ephemeral locator that is valid only for the current scheduled job epoch. A row is not
 //! stable identity and must not be persisted across structural change boundaries.
 //!
 //! `key`
-//!: An opt-in managed stable identity used only by keyed tables. Keyless tables pay no identity
-//! maintenance cost by default.
+//!: A stable identity datum. Storage primitives treat `Key` like any other column, and
+//! later extension resources such as `Keys` synchronize tables that choose to store it.
 //!
 //! `job`
 //!: A runtime work unit that the executor may schedule independently. In the selected direction,

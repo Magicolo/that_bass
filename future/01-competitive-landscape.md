@@ -281,7 +281,7 @@ Why it matters:
 
 - This is not an ECS, but it is a very relevant data-oriented engine.
 - It shows how fixed-size chunks improve both CPU efficiency and work partitioning.
-- It also shows that a logical column does not need a single physical representation.
+- It also shows that one stored type does not need a single fixed column representation forever.
 
 Takeaway:
 

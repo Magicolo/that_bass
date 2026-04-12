@@ -1,15 +1,15 @@
-# Task 12: User-Keyed Tables, Identity Policies, And `Families`
+# Task 12: User-Keyed Tables And `Families`
 
-This task extends the rewrite's identity model beyond the keyless and managed-key MVP.
+This task extends the rewrite's identity model beyond the keyless core and `Keys` MVP.
 
-Read this file together with `future/plan/specification.md` and `future/plan/standards.md`. The selected architecture deliberately postpones some identity complexity. This task picks it back up once the keyless and managed-key paths are stable.
+Read this file together with `future/plan/specification.md` and `future/plan/standards.md`. The selected architecture deliberately postpones some identity complexity. This task picks it back up once the keyless core and `Keys` path are stable.
 
 ## Purpose
 
 Implement the two main post-MVP identity extensions:
 
 - user-keyed tables,
-- the `Families` resource layered on managed keys.
+- the `Families` resource layered on `Keys`.
 
 ## Required Reading
 
@@ -20,10 +20,10 @@ Implement the two main post-MVP identity extensions:
 
 ## Why These Belong Together
 
-They are both identity-policy extensions:
+They are both identity extensions:
 
 - user-keyed tables answer "the row has stable identity, but the engine should not invent it",
-- `Families` answers "managed keys need a first-class relationship graph".
+- `Families` answers "`Keys` need a first-class relationship graph".
 
 Neither should block the core rewrite, but both are important enough to deserve explicit follow-up instead of a vague "later".
 
@@ -64,7 +64,8 @@ or:
 insert_indexed.one((ghost_id, ghost_row));
 ```
 
-The exact syntax can change. The important part is that user-keyed storage is a deliberate table policy.
+The exact syntax can change. The important part is that user-keyed storage is a deliberate
+ extension layered on the storage core.
 
 ## `Families`
 
@@ -106,7 +107,7 @@ Do not leave these as implied behavior.
 
 ## Relationship To Keyed Storage
 
-`Families` depends on managed keys, not on keyless rows and not necessarily on user-keyed tables.
+`Families` depends on `Keys`, not on keyless rows and not necessarily on user-keyed tables.
 
 That means:
 
@@ -116,10 +117,10 @@ That means:
 
 ## Implementation Checklist
 
-1. Extend identity-policy metadata for `UserKeyed`.
+1. Define the metadata and indexing extension needed for `UserKeyed`.
 2. Implement user-key index storage and lookup.
 3. Define duplicate/replace semantics.
-4. Implement the `Families` resource on managed keys.
+4. Implement the `Families` resource on `Keys`.
 5. Define reparenting and removal rules.
 6. Add tests for:
    - user-key lookup,
@@ -132,7 +133,7 @@ That means:
 
 ### Pitfall: Smuggling user-keyed overhead into all tables
 
-Keep it opt-in just like managed keys.
+Keep it opt-in just like `Keys`.
 
 ### Pitfall: Starting `Families` with low-level atomic tricks
 
@@ -140,12 +141,12 @@ Correctness and explicit semantics come first.
 
 ### Pitfall: Leaving duplicate or removal semantics underspecified
 
-Identity policies are defined by their edge cases.
+Identity extensions are defined by their edge cases.
 
 ## Done Criteria
 
 This task is done when:
 
-- user-keyed tables are a real identity policy,
+- user-keyed tables are a real identity extension,
 - `Families` exists with explicit maintenance rules,
 - both features are clearly layered on top of the stable core rewrite rather than tangled into it.

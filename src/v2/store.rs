@@ -7,6 +7,7 @@
 //! - a chunk-capacity planner that follows the selected specification.
 
 use crate::v2::instrumentation::{NoopSink, Sink};
+use crate::v2::schema::Table;
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ const DEFAULT_TARGET_CHUNK_BYTE_COUNT: usize = 16 * 1024;
 pub struct Store {
     configuration: Configuration,
     instrumentation_sink: Arc<dyn Sink>,
+    tables: Vec<Table>,
 }
 
 impl Default for Store {
@@ -40,6 +42,7 @@ impl Store {
         Self {
             configuration,
             instrumentation_sink,
+            tables: Vec::new(),
         }
     }
 
@@ -49,6 +52,10 @@ impl Store {
 
     pub fn instrumentation_sink(&self) -> &(dyn Sink + Send + Sync + 'static) {
         &*self.instrumentation_sink
+    }
+
+    pub fn tables(&self) -> &[Table] {
+        &self.tables
     }
 
     pub fn plan_chunk_capacity_for_row_width(&self, inline_row_width: usize) -> ChunkPlan {

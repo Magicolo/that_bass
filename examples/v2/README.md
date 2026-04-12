@@ -13,7 +13,7 @@ Why this folder exists:
 - it gives a newcomer one concrete place to see the current `v2` public API in use,
 - it makes public-surface drift visible during the rewrite,
 - it provides a lightweight integration point that should evolve with the rewrite tasks.
-- it now includes both the Task 00 foundation surface and the Task 01 metadata catalog surface.
+- it now includes both the Task 00 foundation surface and the Task 01 `Meta`/table catalog surface.
 
 Maintenance rule:
 

@@ -32,7 +32,7 @@ The selected direction is:
 - chunked table storage with dense packed rows,
 - query execution over chunk slices, not per-row yielded references,
 - keyless tables by default,
-- optional managed keys when stable identity is required,
+- optional stable identity through ordinary `Key` columns synchronized by a `Keys` resource,
 - single-allocation chunks,
 - same-frame visibility through scheduled resolve jobs and happens-before edges,
 - conservative rejection of overlapping conflicting live queries unless disjointness can be proven.
@@ -102,7 +102,7 @@ Core idea:
 - structural edits are recorded into per-job command buffers,
 - resolve work collects and batches those per-job command buffers at the function level before applying them and making them visible to later dependent jobs,
 - tables are chunked, dense, and keyless by default,
-- stable identity is opt-in through managed keys,
+- stable identity is opt-in through ordinary `Key` columns plus the `Keys` resource,
 - direct immediate mutation remains available only behind exclusive mutable access.
 
 This combines the strongest parts of the earlier proposals:
@@ -157,23 +157,23 @@ These ideas also reinforce each other:
 
 ## Terminology
 
-### Logical Schema
+### Meta
 
-The set of logical datum types that define a table.
+Type metadata for one stored type.
 
 Example:
 
 ```rust
-(Position, Velocity, Mass)
+Meta::of::<Position>()
 ```
 
-### Physical Column
+### Column
 
-The actual stored column unit. Usually one logical datum maps to one physical column. Future decomposition may allow one logical datum to map to several physical columns.
+The runtime wrapper around one chunk pointer paired with one `Meta`.
 
 ### Table
 
-The schema-owned storage container for one logical schema. A table owns metadata and a set of chunks.
+The storage container that owns `Meta` descriptors and a set of chunks.
 
 ### Store
 
@@ -185,7 +185,7 @@ A densely packed, independently allocated subset of one table's rows. A chunk ha
 
 - a capacity,
 - a current count,
-- one storage region per physical column,
+- one storage region per column,
 - table-local metadata needed for row packing and scheduling.
 
 ### Resource
@@ -197,11 +197,11 @@ The scheduler must be able to name:
 - the whole store,
 - one table inside that store,
 - one chunk inside that table,
-- one physical column inside that chunk.
+- one column inside that chunk.
 
 The granularity floor is:
 
-- one physical column,
+- one column,
 - of one chunk,
 - of one table.
 
@@ -221,11 +221,13 @@ An ordering guarantee between jobs or resolve jobs. The system is intentionally 
 
 ### Row
 
-An ephemeral row locator valid for the current job epoch only. It is not stable identity.
+An index into a chunk of a table. In scheduled mode it is an ephemeral locator valid for the
+current job epoch only, not stable identity.
 
 ### Key
 
-An opt-in managed stable identity for keyed tables.
+An opt-in stable identity datum. Storage primitives treat `Key` like any other column; the
+`Keys` resource later synchronizes tables that choose to store it.
 
 ## Storage Model
 
@@ -235,20 +237,20 @@ The rewrite keeps table-based organization, but the storage core changes from "o
 
 The first rewrite should keep a strong distinction between:
 
-- logical schema metadata,
+- `Meta` descriptors,
 - table runtime state,
 - chunk memory,
-- optional identity side data.
+- optional identity extension data.
 
 Tables are keyless by default.
 
 ## Chunk Capacity
 
-Chunk capacity is derived from a configurable target byte budget and the table's inline physical row width.
+Chunk capacity is derived from a configurable target byte budget and the table's inline row width.
 
 Definitions:
 
-- `inline_row_bytes = sum(size_of(all inline physical columns for one row))`
+- `inline_row_bytes = sum(size_of(all inline columns for one row))`
 - `target_chunk_bytes = tunable configuration value, intentionally easy to benchmark`
 - `raw_target_rows = max(1, floor(target_chunk_bytes / max(1, inline_row_bytes)))`
 - `target_chunk_rows = previous_power_of_two(raw_target_rows)`, with a minimum of `1`
@@ -286,7 +288,7 @@ Each chunk should use one allocation, not one allocation per column.
 The allocation layout should be:
 
 - chunk header and small metadata,
-- then one aligned region per physical column,
+- then one aligned region per column,
 - with precomputed column offsets,
 - with all row storage densely packed from `0..count`.
 
@@ -315,25 +317,25 @@ This is not an optimization detail. It is a core invariant.
 
 The planner and scheduler reason about resources at the following minimum scope:
 
-- physical column x chunk x table x store.
+- column x chunk x table x store.
 
 This is deliberate.
 
 It means:
 
 - `Position` and `Velocity` in the same chunk are different resources,
-- future subcolumn decomposition can become separate resources,
+- a future decomposition design could introduce finer resources later,
 - one hot chunk does not force whole-table serialization.
 
 It also means the dependency model is hierarchical rather than leaf-only.
 
 Examples:
 
-- writing one physical column in one chunk requires dependencies like:
+- writing one column in one chunk requires dependencies like:
   - `Read(store)`
   - `Read(table)`
   - `Read(chunk)`
-  - `Write(physical_column)`
+  - `Write(column)`
 - writing a whole chunk for structural work can instead request:
   - `Read(store)`
   - `Read(table)`
@@ -620,7 +622,7 @@ The default table mode is keyless.
 
 Keyless tables do not maintain:
 
-- engine-managed keys,
+- `Key` columns,
 - reverse slot maps,
 - per-row stable identity.
 
@@ -652,22 +654,26 @@ Planned properties:
 - cross-frame identity,
 - post-resolution assumptions that the same row still names the same logical object.
 
-## Managed Keys
+## `Key` Columns And `Keys` Extension
 
 Stable identity is opt-in.
 
-Selected direction for keyed tables:
+Selected direction:
 
-- keyed tables carry an inline `Key` column,
-- queries can request `&[Key]` directly,
-- a global `Keys` resource maintains `Key -> Row` mapping,
-- the inline column provides the cheap `Row -> Key` direction.
+- storage primitives stay agnostic to whether a table carries a `Key` column,
+- a table that declares `Key` stores it like any other column,
+- the existence of a `Key` column implies participation of the `Keys` resource,
+- queries can request `&[Key]` directly because it is just another chunk slice,
+- a global `Keys` resource discovers tables with `Key` columns and maintains `Key -> Row`
+  mapping,
+- the `Key` column provides the cheap `Row -> Key` direction.
 
-This is the cleanest way to preserve:
+This preserves:
 
 - cheap query-time key access,
 - reverse lookup,
-- stable identity through row movement.
+- stable identity through row movement,
+- and a clean separation between storage primitives and identity extensions.
 
 User-keyed tables are intentionally deferred.
 
@@ -676,7 +682,7 @@ User-keyed tables are intentionally deferred.
 Two identity-related extensions remain intentionally outside the MVP:
 
 - user-keyed tables,
-- the `Families` resource layered on managed keys.
+- the `Families` resource layered on `Keys`.
 
 User-keyed tables matter for rows whose stable identity exists but should not be engine-generated.
 
@@ -688,7 +694,7 @@ User-keyed tables matter for rows whose stable identity exists but should not be
 
 The selected direction is:
 
-- first make keyless and managed-key tables correct,
+- first make the keyless core and `Key`-column `Keys` extension correct,
 - then add user-keyed and relationship-oriented identity layers afterward.
 
 ## Globals And Singletons
@@ -716,9 +722,9 @@ Optional decomposition remains part of the long-term direction, but not the MVP.
 
 Current intended stance:
 
-- by default, one logical datum becomes one physical column,
-- future decomposition may split POD-like types into multiple physical columns,
-- future resource IDs and query descriptors must leave room for subcolumn access,
+- by default, one datum becomes one column,
+- future decomposition may later split a datum into several columns,
+- future resource IDs and query descriptors may need to grow when that design actually exists,
 - recursive or heap-rich decomposition is deferred.
 
 This is a design constraint on the storage metadata, not an immediate implementation requirement.
@@ -751,7 +757,7 @@ Tasks `00` through `10` define the first coherent rewrite milestone:
 - schedule building,
 - executor runtime,
 - command buffers and resolve jobs,
-- managed keys,
+- `Keys` extension support over ordinary `Key` columns,
 - table-backed globals,
 - validation and migration discipline.
 

@@ -18,7 +18,7 @@ Implement global settings, resources, and singleton-like data as normal tables, 
 
 ## Selected Model
 
-There is no separate physical resource map in the first rewrite.
+There is no separate global resource map in the first rewrite.
 
 Instead:
 
@@ -54,7 +54,7 @@ query::one(query::write::<Physics>())
 
 Intended semantics:
 
-- exactly one logical row is expected,
+- exactly one row is expected,
 - the query layer produces a single view rather than a chunk stream,
 - scheduling and conflict analysis still treat the access through the same table model.
 

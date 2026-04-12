@@ -77,7 +77,7 @@ Every supported struct datum is recursively flattened into leaves.
 - Too complex for a first redesign.
 - Terrible fit for arbitrary Rust types.
 - Hard to keep the API intuitive.
-- Hard to preserve event/type semantics when one logical datum becomes many physical columns.
+- Hard to preserve event and type semantics when one stored type becomes many columns.
 
 ### Verdict
 

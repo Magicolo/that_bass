@@ -71,7 +71,7 @@ pub struct Resolve {
 pub struct DenseScan {
     pub visited_chunk_count: usize,
     pub visited_row_count: usize,
-    pub visited_physical_column_count: usize,
+    pub visited_column_count: usize,
     pub elapsed: Duration,
 }
 

@@ -49,9 +49,10 @@ If this task is skipped, later tasks will drift and the rewrite will become hard
    - insert/remove resolve cost,
    - dense scan throughput.
 5. A glossary module or top-level docs page that defines:
-   - schema,
+   - meta,
    - table,
    - chunk,
+   - column,
    - row,
    - key,
    - job,
@@ -140,7 +141,7 @@ This matters because the chunk-sizing formula is width-sensitive by design.
 These rules should be written down before later tasks begin:
 
 1. Do not optimize singletons specially in the first pass.
-2. Do not add user-keyed tables until managed-keyed tables are stable.
+2. Do not add user-keyed tables until the `Keys` extension over ordinary `Key` columns is stable.
 3. Do not promise arbitrary live nested queries in the MVP.
 4. Do not hide row movement; document `swap_remove` semantics clearly.
 5. Do not hardcode one chunk byte size as if it were proven.
@@ -152,7 +153,7 @@ This task should also define the major gates that later tasks must pass:
 
 ### Gate A: Storage Skeleton
 
-- schemas/tables/chunks compile,
+- metas/tables/chunks compile,
 - chunk sizes derive from row width,
 - memory layout is inspectable.
 
@@ -177,7 +178,7 @@ This task should also define the major gates that later tasks must pass:
 ### Gate E: Identity Layer
 
 - keyless tables work,
-- managed-key tables work,
+- tables with `Key` columns work with the `Keys` extension,
 - keyed queries can request chunk `Key` slices.
 
 ## Pseudo-Code Sketch

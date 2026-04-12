@@ -38,7 +38,7 @@ Required rules:
 Examples:
 
 - prefer `target_chunk_capacity` over `cap`,
-- prefer `physical_column_index` over `column_index` when both logical and physical columns exist,
+- prefer `column_index` over a longer alternative when there is only one column concept,
 - prefer `resolve_result` over `result` when several results exist in scope.
 - prefer `Store` over `World`,
 - prefer `Configuration` over `WorldConfiguration`,
@@ -303,9 +303,9 @@ The existing code treats ordering and uniqueness as semantic invariants:
 
 Carry that forward. Do not treat those properties as incidental optimizations.
 
-### Schema-Level Reasoning Beats Ad Hoc Branching
+### Table-And-Meta Reasoning Beats Ad Hoc Branching
 
-The current code consistently reasons in terms of schemas, tables, columns, and declared access rather than type-by-type special cases.
+The current code consistently reasons in terms of table shape, metadata, columns, and declared access rather than type-by-type special cases.
 
 Preserve that style in the rewrite.
 

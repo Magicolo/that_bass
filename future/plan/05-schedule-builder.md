@@ -74,7 +74,7 @@ Examples:
 - `write(Position)` vs `read(Position)`: conflict.
 - `write(Position)` vs `write(Position)`: conflict.
 - `write(store)` vs any table/chunk/column access in that store: conflict.
-- `write(chunk)` vs any physical-column access in that chunk: conflict.
+- `write(chunk)` vs any column access in that chunk: conflict.
 - `insert into Table<Position, Velocity>` vs later `read(Position)` on that table: conflict through visibility and chunk creation.
 - `remove rows from table T` vs later query over those chunks: conflict through row movement and visibility.
 

@@ -2,13 +2,13 @@
 
 This task implements the advanced layout path that the rewrite deliberately postpones until the core is stable.
 
-Read this file together with `future/plan/specification.md` and `future/plan/standards.md`. The proposals explored increasingly granular storage layouts, but the selected direction was to postpone them until after chunking, scheduling, and identity policy are working well.
+Read this file together with `future/plan/specification.md` and `future/plan/standards.md`. The proposals explored increasingly granular storage layouts, but the selected direction was to postpone them until after chunking, scheduling, and the core identity extensions are working well.
 
 ## Purpose
 
 Add optional layout specialization such as:
 
-- datum decomposition into multiple physical columns,
+- datum decomposition into multiple columns,
 - subcolumn query access,
 - more selective scheduler conflicts,
 - better SIMD opportunities for suitable data.
@@ -26,9 +26,9 @@ This is an opt-in expert feature, not the default storage path.
 
 Default rule remains:
 
-- one logical datum maps to one physical column.
+- one datum maps to one column.
 
-This task adds the optional ability to split suitable logical datums into several physical columns.
+This task adds the optional ability to split suitable datums into several columns.
 
 ## Canonical Example
 
@@ -64,7 +64,7 @@ depending on the final API design.
 
 It adds real power, but also multiplies complexity:
 
-- logical-to-physical mapping becomes richer,
+- the simple one-column model needs a richer replacement,
 - scheduler resource analysis becomes finer,
 - derive or declaration macros become more involved,
 - chunk layout code gets more complicated,
@@ -94,9 +94,9 @@ Example:
 - one job writing `Position::Y`,
 - another reading `Position::X`,
 
-may no longer conflict if the physical columns are distinct.
+may no longer conflict if the decomposed columns are distinct.
 
-This is one of the main reasons Task 01 had to distinguish logical datums from physical columns from the start.
+This is one reason the metadata layer must be revisited carefully if decomposition is added later.
 
 ## Query API Requirements
 
@@ -123,7 +123,7 @@ This task only justifies itself if it wins on real workloads.
 ## Implementation Checklist
 
 1. Add an opt-in decomposition declaration path.
-2. Extend metadata and descriptors to enumerate decomposed physical columns.
+2. Extend metadata and descriptors to enumerate decomposed columns.
 3. Extend chunk layout code to store them.
 4. Extend query descriptors for subcolumn access.
 5. Extend scheduler resource conflict logic accordingly.
@@ -137,7 +137,7 @@ That would front-load too much complexity onto ordinary users.
 
 ### Pitfall: Allowing decomposition to outpace the query API design
 
-The physical layout and the surface API must stay coherent.
+The column layout and the surface API must stay coherent.
 
 ### Pitfall: Assuming finer storage is automatically faster
 

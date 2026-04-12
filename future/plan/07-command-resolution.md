@@ -35,7 +35,7 @@ Implement deferred structural mutation through:
 5. Resolution should be batch-oriented.
 6. Remove is semantically heavier than insert because remove moves rows.
 7. The default resolve granularity is function-level batching over all command buffers produced by that function, not one resolve job per source chunk.
-8. Structural resolution may request broader scheduler dependencies than ordinary leaf-column iteration, for example `Write(chunk)` or `Write(table)` rather than one `Write(column)` per physical column.
+8. Structural resolution may request broader scheduler dependencies than ordinary leaf-column iteration, for example `Write(chunk)` or `Write(table)` rather than one `Write(column)` per column.
 
 ## Command Buffer Ownership
 
@@ -56,7 +56,7 @@ The resolver can merge buffers later by:
 - command kind,
 - target table,
 - target chunk,
-- target identity policy.
+- presence of extension-managed identity data such as `Key`.
 
 Important design change:
 

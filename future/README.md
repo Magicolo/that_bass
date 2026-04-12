@@ -57,7 +57,7 @@ The strongest long-term direction is not "slightly better locking". It is:
 
 - keep an archetype/table mental model,
 - split storage into fixed-size chunks,
-- make row identity optional: managed key, user key, or no key,
+- make row identity optional: no key by default, ordinary `Key` columns when stable identity is needed, and later user keys,
 - add a scheduler/runtime that turns most frame execution into readonly iteration plus deferred command buffers,
 - make queries and systems cacheable and schedulable,
 - optionally add finer-grained field-level storage for hot POD-style data.

@@ -33,7 +33,7 @@ Chunk capacity is derived from row width and a tunable byte budget.
 Definitions:
 
 ```text
-inline_row_bytes = sum(inline physical column sizes for one row)
+inline_row_bytes = sum(inline column sizes for one row)
 raw_target_rows = floor(target_chunk_bytes / max(1, inline_row_bytes))
 target_chunk_rows = max(1, previous_power_of_two(raw_target_rows))
 ```
@@ -107,7 +107,7 @@ That is a good trade for this project.
 
 ## Alignment Rules
 
-Each physical column region must satisfy its own alignment requirements.
+Each column region must satisfy its own alignment requirements.
 
 The implementation must:
 
@@ -192,7 +192,7 @@ table=PhysicsSettings inline_row_bytes=128 target_chunk_bytes=32768 target_rows=
 
 This task should assume:
 
-- inline physical column width is whatever the column actually stores inline.
+- inline column width is whatever the column actually stores inline.
 
 That means:
 

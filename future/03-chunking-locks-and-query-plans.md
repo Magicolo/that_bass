@@ -34,7 +34,7 @@ That is exactly what happens in many real games:
 
 Each logical table becomes:
 
-- schema metadata,
+- table metadata,
 - many chunks,
 - each chunk holding a fixed number of rows,
 - per-chunk keys and per-chunk column slices.

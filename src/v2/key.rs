@@ -1,9 +1,10 @@
-//! Managed-key vocabulary for `v2`.
+//! Stable-key vocabulary for `v2`.
 //!
-//! Keyless tables are the default in the rewrite. This module only defines the opt-in stable
-//! identity type that later tasks will connect to keyed tables and reverse mappings.
+//! Storage primitives in the rewrite are agnostic to whether a table carries a `Key` column.
+//! This module only defines the datum that later extension tasks will connect to the `Keys`
+//! resource and reverse mappings.
 
-/// An opt-in stable identity for tables that explicitly request managed keys.
+/// A stable identity datum that later extension tasks synchronize through the `Keys` resource.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Key {
     slot_index: u32,

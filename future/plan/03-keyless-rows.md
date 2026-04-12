@@ -171,7 +171,7 @@ The documentation for `Row<'job>` must say this clearly.
 
 Keyed tables are handled later in Task 08.
 
-This task should not mix managed-key behavior into the keyless path.
+This task should not mix `Keys`-extension behavior into the keyless path.
 
 The point of this task is precisely to make the zero-identity path honest and efficient.
 

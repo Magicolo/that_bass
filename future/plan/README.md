@@ -24,7 +24,7 @@ Before reading these files, use:
 - [00-foundation.md](/home/goulade/Projects/rust/that_bass/future/plan/00-foundation.md)
   - Rewrite lane, benchmarks, instrumentation, and guardrails.
 - [01-identity-and-metadata.md](/home/goulade/Projects/rust/that_bass/future/plan/01-identity-and-metadata.md)
-  - Schema, table, physical column, and scheduler resource identity.
+  - `Meta`, `Row`, `Column`, `Chunk`, `Table`, and scheduler resource identity.
 - [02-chunk-layout.md](/home/goulade/Projects/rust/that_bass/future/plan/02-chunk-layout.md)
   - Chunk sizing, growth, and single-allocation layout.
 - [03-keyless-rows.md](/home/goulade/Projects/rust/that_bass/future/plan/03-keyless-rows.md)
@@ -38,7 +38,7 @@ Before reading these files, use:
 - [07-command-resolution.md](/home/goulade/Projects/rust/that_bass/future/plan/07-command-resolution.md)
   - Command buffers, batched resolution, and visibility.
 - [08-managed-keys.md](/home/goulade/Projects/rust/that_bass/future/plan/08-managed-keys.md)
-  - Managed keys, inline `Key` columns, and reverse mapping.
+  - `Keys` resource, `Key` columns, and reverse mapping.
 - [09-global-tables.md](/home/goulade/Projects/rust/that_bass/future/plan/09-global-tables.md)
   - Table-backed globals and `query::one(...)`.
 - [10-validation-and-migration.md](/home/goulade/Projects/rust/that_bass/future/plan/10-validation-and-migration.md)

@@ -58,7 +58,7 @@ Some patterns are not best expressed as live mutable overlap.
 Examples:
 
 - read one chunk,
-- compute updates for another or the same logical datum,
+- compute updates for another or the same datum,
 - apply those updates later through an explicit command buffer.
 
 Possible API directions:

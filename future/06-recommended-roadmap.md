@@ -9,7 +9,7 @@ If I were steering `that_bass` toward its stated goals, this is the path I would
 Recommended target architecture:
 
 - chunked archetype storage,
-- multiple identity modes: managed keys, user keys, and keyless rows,
+- keyless storage primitives plus identity extensions such as ordinary `Key` columns, `Keys`, and later user keys,
 - scheduler-backed frame execution,
 - deferred structural commands with sync points,
 - optional hot/cold and fine-grained storage classes,
@@ -66,7 +66,7 @@ Why first:
 
 Turn today's table into:
 
-- schema metadata,
+- table metadata,
 - many fixed-size chunks.
 
 Do in this phase:
@@ -75,10 +75,10 @@ Do in this phase:
 - chunk-local counts and key slices,
 - chunk-level create/modify/destroy resolution,
 - chunk-aware key slots,
-- identity classes for chunks/tables:
-  - engine-managed keys,
-  - user-provided keys,
-  - keyless rows,
+- optional identity extensions:
+  - ordinary `Key` columns plus the `Keys` resource,
+  - later user-provided keys,
+  - keyless rows as the default,
 - benchmark different chunk sizes.
 
 Expected result:
@@ -199,7 +199,7 @@ The project should become two-tiered.
 Like today:
 
 - explicit `create`, `query`, `add`, `remove`, `destroy`,
-- plus future table identity policy selection where relevant,
+- plus future identity extensions where relevant,
 - direct access from tools/tests/one-off code,
 - flexible, lower ceremony.
 

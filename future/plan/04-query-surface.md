@@ -95,12 +95,12 @@ This keeps the execution model simple:
 
 ## Access Analysis Model
 
-Every query item compiles into an access descriptor over physical columns.
+Every query item compiles into an access descriptor over columns.
 
 Examples:
 
-- `read::<Position>()` -> shared access to physical `Position` columns,
-- `write::<Position>()` -> exclusive access to physical `Position` columns,
+- `read::<Position>()` -> shared access to the `Position` column,
+- `write::<Position>()` -> exclusive access to the `Position` column,
 - `rows()` -> no conflicting data access, but requires row-handle materialization,
 - `one(read::<Physics>())` -> shared access with a cardinality constraint.
 
@@ -120,7 +120,7 @@ query::all((query::write::<Position>(), query::read::<Position>()))
 
 Reason:
 
-- same logical datum,
+- same column,
 - one mutable side,
 - no disjointness proof.
 
@@ -136,7 +136,7 @@ Reason:
 Reason:
 
 - same written datum,
-- but the planner can prove table-level disjointness if schema membership is used as the partition.
+- but the planner can prove table-level disjointness if table-shape membership is used as the partition.
 
 This proof system should start small and conservative.
 

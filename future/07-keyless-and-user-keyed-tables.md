@@ -4,6 +4,12 @@ This document proposes a major change to one of the current library assumptions:
 
 > not every row should be forced to have a database-managed key.
 
+Historical note:
+
+- the selected rewrite plan in `future/plan/specification.md` keeps the spirit of this proposal,
+- but refines "managed key tables" into a cleaner extension model where storage primitives stay
+  agnostic and ordinary `Key` columns are synchronized by a `Keys` resource.
+
 For many realtime workloads, row identity is not a feature. It is overhead.
 
 Examples:
@@ -378,7 +384,7 @@ Mitigation:
 
 ## Risk 2: Query Generic Explosion
 
-If every query must be generic over identity policy, internals get noisy.
+If every query must be generic over identity mode, internals get noisy.
 
 Mitigation:
 
@@ -393,14 +399,14 @@ Some users may choose keyless where they later need stable handles.
 Mitigation:
 
 - make conversion paths exist:
-  - rebuild keyless table into managed-key table,
+  - rebuild keyless table into a table with `Key` columns plus `Keys`,
   - derive indexed view from keyless source,
   - materialize user-key index on demand.
 
 ## Recommended Adoption Order
 
-1. Add the concept of identity policy to internal table/chunk metadata.
-2. Support managed-key and keyless first.
+1. Keep storage primitives key-agnostic and expose generic metadata for extension discovery.
+2. Support ordinary `Key` columns plus `Keys`, and keyless tables first.
 3. Make query and event APIs explicitly conditional on identity support.
 4. Add user-keyed indexed tables after chunking is stable.
 5. Teach the scheduler to default temporary frame products to keyless tables.
@@ -409,11 +415,11 @@ Mitigation:
 
 This proposal is high leverage.
 
-The current managed-key design is valuable, but it should become one mode among several, not the mandatory cost every row pays.
+The current stable-key design is valuable, but it should become one mode among several, not the mandatory cost every row pays.
 
 If `that_bass` wants to maximize throughput, it should support:
 
-- managed-key rows for stable entities,
+- `Key`-column rows plus `Keys` for stable entities,
 - user-keyed rows for externally identified data,
 - keyless rows for pure bag-like, scan-heavy, rebuild-friendly state.
 

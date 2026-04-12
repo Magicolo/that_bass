@@ -1,14 +1,11 @@
 use checkito::Check;
-use core::{
-    any::type_name,
-    mem::{align_of, size_of},
-};
+use core::any::type_name;
 use that_bass::v2::{
+    key::Key,
     query::Access,
     schema::{
-        Catalog, ChunkIndex, ColumnOwner, DefinitionError, Dependency, Identity,
-        LogicalColumnDeclaration, PhysicalColumnDeclaration, Resource, Storage, StoreIndex,
-        TableDeclaration,
+        Catalog, ChunkIndex, Column, DefinitionError, Dependency, Meta, Resource, RowLayout,
+        Storage, StoreIndex, TableIndex,
     },
     Configuration,
 };
@@ -26,192 +23,121 @@ struct Velocity {
 }
 
 #[test]
-fn catalog_interns_equivalent_schemas_even_when_declarations_are_reordered() {
+fn catalog_interns_equivalent_table_shapes_even_when_meta_declarations_are_reordered() {
     let mut catalog = Catalog::new();
 
-    let first_schema = catalog
-        .register_schema([
-            LogicalColumnDeclaration::of::<Velocity>(),
-            LogicalColumnDeclaration::of::<Position>(),
-        ])
-        .expect("schema registration should succeed");
-    let second_schema = catalog
-        .register_schema([
-            LogicalColumnDeclaration::of::<Position>(),
-            LogicalColumnDeclaration::of::<Velocity>(),
-        ])
-        .expect("equivalent schema registration should succeed");
+    catalog
+        .register_table(
+            [Meta::of::<Velocity>(), Meta::of::<Position>()],
+            Configuration::default(),
+        )
+        .expect("first table registration should succeed");
+    catalog
+        .register_table(
+            [Meta::of::<Position>(), Meta::of::<Velocity>()],
+            Configuration::default(),
+        )
+        .expect("equivalent table registration should succeed");
 
-    assert_eq!(catalog.schema_count(), 1);
-    assert_eq!(first_schema.index(), second_schema.index());
-    assert_eq!(
-        first_schema
-            .logical_column_for::<Position>()
-            .expect("schema should contain Position")
-            .name(),
-        type_name::<Position>()
-    );
-    assert_eq!(
-        first_schema
-            .logical_column_for::<Velocity>()
-            .expect("schema should contain Velocity")
-            .name(),
-        type_name::<Velocity>()
-    );
+    assert_eq!(catalog.table_shape_count(), 1);
 }
 
 #[test]
-fn table_preserves_physical_column_order_and_maps_logical_access_to_that_order() {
+fn table_keeps_meta_order_sorted_by_type_identifier_and_maps_access_by_type() {
     let mut catalog = Catalog::new();
     let table = catalog
         .register_table(
-            TableDeclaration::new([
-                LogicalColumnDeclaration::of::<Position>(),
-                LogicalColumnDeclaration::of::<Velocity>(),
-            ])
-            .with_physical_columns([
-                PhysicalColumnDeclaration::inline::<Velocity>(),
-                PhysicalColumnDeclaration::inline::<Position>(),
-            ]),
+            [Meta::of::<Position>(), Meta::of::<Velocity>()],
             Configuration::default(),
         )
         .expect("table registration should succeed");
 
-    assert_eq!(table.physical_columns()[0].name(), type_name::<Velocity>());
-    assert_eq!(table.physical_columns()[1].name(), type_name::<Position>());
-
-    let physical_access_set = table
+    let position_access = table
         .map_access::<Position>(Access::Write)
         .expect("table should map Position access");
 
-    assert_eq!(physical_access_set.access(), Access::Write);
-    assert_eq!(physical_access_set.physical_column_indices().len(), 1);
-    assert_eq!(physical_access_set.physical_column_indices()[0].value(), 1);
-}
-
-#[test]
-fn managed_key_tables_append_the_managed_key_column_and_record_the_policy() {
-    let mut catalog = Catalog::new();
-    let table = catalog
-        .register_table(
-            TableDeclaration::new([LogicalColumnDeclaration::of::<Position>()])
-                .with_identity(Identity::ManagedKeys),
-            Configuration::default(),
-        )
-        .expect("managed-key table registration should succeed");
-
-    assert_eq!(table.identity(), Identity::ManagedKeys);
-    assert_eq!(table.layout().physical_column_count(), 2);
+    assert_eq!(table.metas().len(), 2);
+    assert_eq!(position_access.access(), Access::Write);
     assert_eq!(
         table
-            .managed_key_physical_column()
-            .expect("managed-key table should expose the managed key column")
-            .value(),
-        1
-    );
-    assert_eq!(table.physical_columns()[1].owner(), ColumnOwner::ManagedKey);
-    assert_eq!(
-        table.row_address_layout().row_index_bit_count()
-            + table.row_address_layout().chunk_index_bit_count(),
-        32
+            .meta(position_access.column_index())
+            .expect("table should expose the mapped meta")
+            .identifier(),
+        core::any::TypeId::of::<Position>()
     );
 }
 
 #[test]
-fn resource_generation_follows_the_table_chunk_and_physical_column_identity_model(
-) -> Result<(), String> {
+fn tables_treat_key_meta_as_ordinary_type_metadata() {
     let mut catalog = Catalog::new();
     let table = catalog
         .register_table(
-            TableDeclaration::new([LogicalColumnDeclaration::of::<Position>()])
-                .with_physical_columns([
-                    PhysicalColumnDeclaration::for_logical_column::<Position>(
-                        "Position::x",
-                        size_of::<f64>(),
-                        align_of::<f64>(),
-                        Storage::Inline,
-                    ),
-                    PhysicalColumnDeclaration::for_logical_column::<Position>(
-                        "Position::y",
-                        size_of::<f64>(),
-                        align_of::<f64>(),
-                        Storage::Inline,
-                    ),
-                ]),
+            [Meta::of::<Position>(), Meta::of::<Key>()],
             Configuration::default(),
         )
-        .expect("decomposed table registration should succeed");
+        .expect("table registration with Key metadata should succeed");
+
+    let key_meta = table.meta_for::<Key>().expect("table should contain Key");
+
+    assert_eq!(table.layout().column_count(), 2);
+    assert_eq!(key_meta.name(), type_name::<Key>());
+    assert_eq!(
+        table.row_layout().row_index_bit_count() + table.row_layout().chunk_index_bit_count(),
+        32
+    );
+    assert_eq!(
+        table
+            .map_access::<Key>(Access::Read)
+            .expect("Key access should map like any other column")
+            .column_index(),
+        table
+            .map_access_for_identifier(key_meta.identifier(), Access::Read)
+            .expect("identifier-based access should match typed access")
+            .column_index(),
+    );
+}
+
+#[test]
+fn resource_generation_follows_the_table_chunk_and_column_identity_model() -> Result<(), String> {
+    let mut catalog = Catalog::new();
+    let table = catalog
+        .register_table([Meta::of::<Position>()], Configuration::default())
+        .expect("table registration should succeed");
 
     let store_index = StoreIndex::new(0);
     let chunk_index_value_generator = 0u32..1024u32;
 
     chunk_index_value_generator
         .check(|chunk_index_value| {
-            let physical_access_set = table
+            let column_access = table
                 .map_access::<Position>(Access::Read)
-                .expect("table should map decomposed Position access");
-            let resources: Vec<_> = physical_access_set
-                .resources(store_index, ChunkIndex::new(chunk_index_value))
-                .collect();
+                .expect("table should map Position access");
+            let resource = column_access.resource(store_index, ChunkIndex::new(chunk_index_value));
 
-            assert_eq!(resources.len(), 2);
-            assert_eq!(resources[0].store_index(), store_index);
-            assert_eq!(resources[0].table_index(), Some(table.index()));
+            assert_eq!(resource.store_index(), store_index);
+            assert_eq!(resource.table_index(), Some(table.index()));
             assert_eq!(
-                resources[0].chunk_index(),
+                resource.chunk_index(),
                 Some(ChunkIndex::new(chunk_index_value))
             );
-            assert_eq!(
-                resources[0]
-                    .physical_column_index()
-                    .expect("resource should be a physical column")
-                    .value(),
-                0
-            );
-            assert_eq!(
-                resources[1]
-                    .physical_column_index()
-                    .expect("resource should be a physical column")
-                    .value(),
-                1
-            );
+            assert_eq!(resource.column_index(), Some(column_access.column_index()));
         })
         .map_or(Ok(()), |failure| Err(format!("{failure:?}")))
 }
 
 #[test]
-fn dependencies_for_physical_column_access_include_read_ancestors_and_write_leaves() {
+fn dependencies_for_column_access_include_read_ancestors_and_write_leaf() {
     let mut catalog = Catalog::new();
     let table = catalog
-        .register_table(
-            TableDeclaration::new([LogicalColumnDeclaration::of::<Position>()])
-                .with_physical_columns([
-                    PhysicalColumnDeclaration::for_logical_column::<Position>(
-                        "Position::x",
-                        size_of::<f64>(),
-                        align_of::<f64>(),
-                        Storage::Inline,
-                    ),
-                    PhysicalColumnDeclaration::for_logical_column::<Position>(
-                        "Position::y",
-                        size_of::<f64>(),
-                        align_of::<f64>(),
-                        Storage::Inline,
-                    ),
-                ]),
-            Configuration::default(),
-        )
-        .expect("decomposed table registration should succeed");
-
-    let dependencies: Vec<_> = table
+        .register_table([Meta::of::<Position>()], Configuration::default())
+        .expect("table registration should succeed");
+    let column_access = table
         .map_access::<Position>(Access::Write)
-        .expect("table should map Position access")
-        .dependencies(StoreIndex::new(0), ChunkIndex::new(2))
-        .collect();
+        .expect("table should map Position access");
 
     assert_eq!(
-        dependencies,
-        vec![
+        column_access.dependencies(StoreIndex::new(0), ChunkIndex::new(2)),
+        [
             Dependency::read(Resource::store(StoreIndex::new(0))),
             Dependency::read(Resource::table(StoreIndex::new(0), table.index())),
             Dependency::read(Resource::chunk(
@@ -219,17 +145,11 @@ fn dependencies_for_physical_column_access_include_read_ancestors_and_write_leav
                 table.index(),
                 ChunkIndex::new(2)
             )),
-            Dependency::write(Resource::physical_column(
+            Dependency::write(Resource::column(
                 StoreIndex::new(0),
                 table.index(),
                 ChunkIndex::new(2),
-                table.physical_columns()[0].index(),
-            )),
-            Dependency::write(Resource::physical_column(
-                StoreIndex::new(0),
-                table.index(),
-                ChunkIndex::new(2),
-                table.physical_columns()[1].index(),
+                column_access.column_index(),
             )),
         ]
     );
@@ -239,10 +159,7 @@ fn dependencies_for_physical_column_access_include_read_ancestors_and_write_leav
 fn metadata_can_name_broader_store_table_and_chunk_dependencies() {
     let mut catalog = Catalog::new();
     let table = catalog
-        .register_table(
-            TableDeclaration::new([LogicalColumnDeclaration::of::<Position>()]),
-            Configuration::default(),
-        )
+        .register_table([Meta::of::<Position>()], Configuration::default())
         .expect("table registration should succeed");
 
     let store_index = StoreIndex::new(0);
@@ -270,43 +187,74 @@ fn metadata_can_name_broader_store_table_and_chunk_dependencies() {
 }
 
 #[test]
-fn table_registration_rejects_logical_columns_without_physical_coverage() {
+fn table_registration_rejects_duplicate_meta() {
     let mut catalog = Catalog::new();
     let error = catalog
         .register_table(
-            TableDeclaration::new([
-                LogicalColumnDeclaration::of::<Position>(),
-                LogicalColumnDeclaration::of::<Velocity>(),
-            ])
-            .with_physical_columns([PhysicalColumnDeclaration::inline::<Position>()]),
+            [Meta::of::<Position>(), Meta::of::<Position>()],
             Configuration::default(),
         )
-        .expect_err("table registration should reject uncovered logical columns");
+        .expect_err("table registration should reject duplicate metadata");
 
     assert_eq!(
         error,
-        DefinitionError::MissingPhysicalColumnsForLogicalColumn {
-            logical_column_name: type_name::<Velocity>(),
+        DefinitionError::DuplicateMeta {
+            meta_name: type_name::<Position>(),
         }
     );
 }
 
 #[test]
-fn table_registration_rejects_orphan_physical_columns() {
+fn sidecar_meta_does_not_contribute_to_row_width() {
     let mut catalog = Catalog::new();
-    let error = catalog
+    let table = catalog
         .register_table(
-            TableDeclaration::new([LogicalColumnDeclaration::of::<Position>()])
-                .with_physical_columns([PhysicalColumnDeclaration::inline::<Velocity>()]),
+            [Meta::of::<Position>(), Meta::sidecar::<Velocity>()],
             Configuration::default(),
         )
-        .expect_err("table registration should reject orphan physical columns");
+        .expect("table registration should succeed");
 
+    assert_eq!(table.layout().row_width(), core::mem::size_of::<Position>());
+    assert_eq!(table.layout().column_count(), 2);
     assert_eq!(
-        error,
-        DefinitionError::MissingLogicalColumnForPhysicalColumn {
-            physical_column_name: type_name::<Velocity>(),
-            logical_column_name: type_name::<Velocity>(),
-        }
+        table
+            .meta_for::<Velocity>()
+            .expect("table should contain Velocity")
+            .storage(),
+        Storage::Sidecar
     );
+}
+
+#[test]
+fn row_layout_packs_and_unpacks_chunk_and_row_indices() {
+    let row_layout = RowLayout::for_chunk_capacity(256);
+    let row = row_layout.row(TableIndex::new(7), ChunkIndex::new(19), 42);
+
+    assert_eq!(row.table_index(), TableIndex::new(7));
+    assert_eq!(row_layout.chunk_index(row), ChunkIndex::new(19));
+    assert_eq!(row_layout.row_index(row), 42);
+}
+
+#[test]
+#[should_panic(expected = "chunk capacity must be a power of two")]
+fn row_layout_rejects_non_power_of_two_chunk_capacity() {
+    let _ = RowLayout::for_chunk_capacity(3);
+}
+
+#[test]
+#[should_panic(expected = "row index exceeds the configured row bit budget")]
+fn row_layout_rejects_row_index_that_exceeds_the_available_bits() {
+    let row_layout = RowLayout::for_chunk_capacity(256);
+    let _ = row_layout.row(TableIndex::new(0), ChunkIndex::new(0), 256);
+}
+
+#[test]
+fn column_wrapper_pairs_pointer_and_meta() {
+    let mut bytes = 13u32;
+    let pointer = core::ptr::NonNull::from(&mut bytes).cast::<u8>();
+    let meta = Meta::of::<u32>();
+    let column = Column::new(pointer, &meta);
+
+    assert_eq!(column.pointer(), pointer);
+    assert_eq!(column.meta().identifier(), core::any::TypeId::of::<u32>());
 }

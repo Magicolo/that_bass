@@ -11,7 +11,7 @@ pub fn run() {
     let remove_command_kind = Kind::Remove;
     let resolve_strategy = Strategy::FunctionLevelBatch;
     let default_ordering = Ordering::ImplicitDeclarationOrder;
-    let managed_key = Key::new(12, 3);
+    let key = Key::new(12, 3);
 
     println!("Vocabulary snapshot");
     println!("  query access: position={position_access:?}, velocity={velocity_access:?}");
@@ -19,8 +19,8 @@ pub fn run() {
     println!("  resolve strategy: {resolve_strategy:?}");
     println!("  default ordering: {default_ordering:?}");
     println!(
-        "  managed key example: slot_index={}, generation={}",
-        managed_key.slot_index(),
-        managed_key.generation()
+        "  key datum example: slot_index={}, generation={}",
+        key.slot_index(),
+        key.generation()
     );
 }
