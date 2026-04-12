@@ -1,3 +1,4 @@
+mod chunk_layout;
 mod instrumentation;
 mod metadata;
 mod store_planning;
@@ -11,6 +12,9 @@ fn main() {
     println!();
 
     metadata::run();
+    println!();
+
+    chunk_layout::run();
     println!();
 
     vocabulary::run();

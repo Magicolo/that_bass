@@ -227,8 +227,11 @@ fn sidecar_meta_does_not_contribute_to_row_width() {
 
 #[test]
 fn row_layout_packs_and_unpacks_chunk_and_row_indices() {
-    let row_layout = RowLayout::for_chunk_capacity(256);
-    let row = row_layout.row(TableIndex::new(7), ChunkIndex::new(19), 42);
+    let row_layout =
+        RowLayout::try_for_chunk_capacity(256).expect("power-of-two chunk capacities are valid");
+    let row = row_layout
+        .row(TableIndex::new(7), ChunkIndex::new(19), 42)
+        .expect("row values within the configured bit budget should be valid");
 
     assert_eq!(row.table_index(), TableIndex::new(7));
     assert_eq!(row_layout.chunk_index(row), ChunkIndex::new(19));
@@ -236,16 +239,56 @@ fn row_layout_packs_and_unpacks_chunk_and_row_indices() {
 }
 
 #[test]
-#[should_panic(expected = "chunk capacity must be a power of two")]
 fn row_layout_rejects_non_power_of_two_chunk_capacity() {
-    let _ = RowLayout::for_chunk_capacity(3);
+    assert_eq!(
+        RowLayout::try_for_chunk_capacity(3),
+        Err(that_bass::v2::schema::DefinitionError::InvalidChunkCapacity { capacity: 3 })
+    );
 }
 
 #[test]
-#[should_panic(expected = "row index exceeds the configured row bit budget")]
+fn row_layout_supports_a_full_u32_row_partition_when_the_platform_can_represent_it() {
+    let Some(chunk_capacity) = 1usize.checked_shl(u32::BITS) else {
+        return;
+    };
+
+    let row_layout = RowLayout::try_for_chunk_capacity(chunk_capacity)
+        .expect("a full-row partition should be valid when the platform can represent it");
+    let row = row_layout
+        .row(TableIndex::new(9), ChunkIndex::new(0), u32::MAX)
+        .expect("the full u32 row range should pack successfully");
+
+    assert_eq!(row.table_index(), TableIndex::new(9));
+    assert_eq!(row_layout.chunk_index(row), ChunkIndex::new(0));
+    assert_eq!(row_layout.row_index(row), u32::MAX);
+}
+
+#[test]
+fn row_layout_rejects_chunk_capacity_that_exceeds_the_packed_row_encoding() {
+    let Some(excessive_chunk_capacity) = 1usize.checked_shl(u32::BITS + 1) else {
+        return;
+    };
+
+    assert_eq!(
+        RowLayout::try_for_chunk_capacity(excessive_chunk_capacity),
+        Err(DefinitionError::InvalidChunkCapacity {
+            capacity: excessive_chunk_capacity
+        })
+    );
+}
+
+#[test]
 fn row_layout_rejects_row_index_that_exceeds_the_available_bits() {
-    let row_layout = RowLayout::for_chunk_capacity(256);
-    let _ = row_layout.row(TableIndex::new(0), ChunkIndex::new(0), 256);
+    let row_layout =
+        RowLayout::try_for_chunk_capacity(256).expect("power-of-two chunk capacities are valid");
+
+    assert_eq!(
+        row_layout.row(TableIndex::new(0), ChunkIndex::new(0), 256),
+        Err(that_bass::v2::schema::ChunkError::RowIndexOutOfBounds {
+            row_index: 256,
+            capacity: 256
+        })
+    );
 }
 
 #[test]

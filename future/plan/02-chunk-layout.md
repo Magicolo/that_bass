@@ -235,3 +235,64 @@ This task is done when:
 - dense prefix slice access is possible,
 - growth behavior is tested,
 - chunk byte targets can be benchmarked by changing configuration instead of patching storage internals.
+
+## Implementation Review
+
+The current repository now implements this task in `src/v2/schema.rs` with:
+
+- precomputed `ChunkLayout` values for every bootstrap capacity from `1` up to the table's full
+  target capacity,
+- one-allocation chunk creation with one pointer per column and per-column aligned offsets,
+- the chunk header kept in the Rust `Chunk` object while the single allocation stores the column
+  regions only,
+- `Chunk` ownership of:
+  - base allocation pointer,
+  - count,
+  - capacity,
+  - chunk index,
+  - per-column pointers,
+- dense-prefix direct operations for the rewrite lane's low-level exclusive path:
+  - raw typed writes,
+  - explicit initialized-prefix declaration,
+  - typed chunk slices,
+  - row-level `swap_remove`,
+- `Table` growth behavior that allocates chunk capacities as:
+  - `1`,
+  - `2`,
+  - `4`,
+  - ...
+  - `target`,
+  - then repeats `target`,
+- benchmark coverage in `benches/v2/foundation.rs` for both:
+  - chunk-capacity planning,
+  - and chunk allocation/growth.
+
+One important implementation consequence is that `Catalog` no longer stores live tables. It now
+interns table shapes and constructs mutable `Table` values that own their `Chunk` storage directly.
+
+## Actions Taken In The Repository
+
+The following concrete actions were taken to satisfy this task:
+
+- refactored `src/v2/schema.rs` so `Table` owns real `Chunk` storage rather than placeholder
+  pointer lists,
+- added `ChunkLayout` and `ColumnLayout` so layout computation is explicit and testable,
+- implemented one-allocation chunk creation with aligned per-column offsets,
+- made zero-sized or sidecar columns use aligned dangling sentinels instead of fake inline
+  allocations,
+- added direct low-level exclusive operations on `Table` and `Chunk` so Task 02 behavior is
+  runnable and benchmarkable through the public `v2` API,
+- added `tests/v2/chunk_layout.rs` to cover:
+  - bootstrap layout generation,
+  - offset monotonicity,
+  - alignment correctness,
+  - chunk growth behavior,
+  - dense-prefix slices,
+  - and `swap_remove` semantics,
+- added `examples/v2/chunk_layout.rs` so newcomers can see the Task 02 surface in runnable form,
+- extended `benches/v2/foundation.rs` with chunk-allocation and bootstrap-growth benchmarks,
+- updated `AGENTS.md` and the `v2` module docs to point at the new chunk-layout surface.
+
+## Current Status
+
+- implemented in the current repository layout.

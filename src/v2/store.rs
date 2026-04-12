@@ -7,7 +7,7 @@
 //! - a chunk-capacity planner that follows the selected specification.
 
 use crate::v2::instrumentation::{NoopSink, Sink};
-use crate::v2::schema::Table;
+use crate::v2::schema::{Table, TableIndex};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -56,6 +56,18 @@ impl Store {
 
     pub fn tables(&self) -> &[Table] {
         &self.tables
+    }
+
+    pub fn table_count(&self) -> usize {
+        self.tables.len()
+    }
+
+    pub fn table(&self, table_index: TableIndex) -> Option<&Table> {
+        self.tables.get(table_index.value() as usize)
+    }
+
+    pub fn table_mut(&mut self, table_index: TableIndex) -> Option<&mut Table> {
+        self.tables.get_mut(table_index.value() as usize)
     }
 
     pub fn plan_chunk_capacity_for_row_width(&self, inline_row_width: usize) -> ChunkPlan {

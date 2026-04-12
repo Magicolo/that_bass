@@ -1,4 +1,4 @@
-//! Table metadata and scheduler-resource model for the rewrite lane.
+//! Table metadata, chunk layout, and scheduler-resource model for the rewrite lane.
 //!
 //! The current `v2` terminology is intentionally aligned with the selected storage vocabulary:
 //!
@@ -9,8 +9,13 @@
 //! - `Table` owns `Meta` descriptors and `Chunk` storage,
 //! - `Store` later owns tables.
 //!
-//! This module does not yet implement full chunk allocation or row iteration. It establishes the
-//! names, indices, metadata, and scheduler dependencies that later tasks will build on.
+//! Task 01 established the names and resource identifiers. Task 02 turns those names into a real
+//! chunk layout with:
+//!
+//! - precomputed single-allocation chunk layouts,
+//! - geometric bootstrap chunk growth,
+//! - dense inhabited prefixes,
+//! - and low-level direct table/chunk operations that later tasks can build on.
 
 use crate::v2::{
     query::Access,
@@ -20,10 +25,14 @@ use core::{
     alloc::Layout,
     any::{type_name, TypeId},
     marker::PhantomData,
-    mem::{align_of, size_of},
+    mem::{align_of, needs_drop, size_of},
     ptr::NonNull,
+    slice::{from_raw_parts, from_raw_parts_mut},
 };
-use std::{collections::BTreeMap, rc::Rc};
+use std::{
+    alloc::{alloc, dealloc, handle_alloc_error},
+    collections::BTreeMap,
+};
 
 /// The storage class selected for one stored type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -230,6 +239,61 @@ impl Dependency {
     }
 }
 
+/// Metadata-registration failures for tables and chunk layouts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefinitionError {
+    DuplicateMeta {
+        meta_name: &'static str,
+    },
+    InvalidChunkCapacity {
+        capacity: usize,
+    },
+    TooManyTables,
+    TooManyColumns,
+    AllocationLayoutOverflow {
+        meta_name: &'static str,
+        capacity: usize,
+    },
+}
+
+/// Direct chunk/table storage access failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkError {
+    MissingChunk {
+        chunk_index: ChunkIndex,
+    },
+    MissingColumnForType {
+        type_name: &'static str,
+    },
+    ChunkIndexOutOfBounds {
+        chunk_index: usize,
+        capacity: usize,
+    },
+    ColumnIndexOutOfBounds {
+        column_index: ColumnIndex,
+        column_count: usize,
+    },
+    ColumnNotInline {
+        meta_name: &'static str,
+    },
+    ColumnTypeMismatch {
+        column_name: &'static str,
+        requested_type_name: &'static str,
+    },
+    CountExceedsCapacity {
+        count: usize,
+        capacity: usize,
+    },
+    RowIndexOutOfBounds {
+        row_index: usize,
+        capacity: usize,
+    },
+    RowIndexOutsideInitializedPrefix {
+        row_index: usize,
+        count: usize,
+    },
+}
+
 /// The bit partition used by the packed `Row<'job>` representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowLayout {
@@ -238,23 +302,28 @@ pub struct RowLayout {
 }
 
 impl RowLayout {
-    pub fn for_chunk_capacity(target_chunk_capacity: usize) -> Self {
-        assert!(
-            target_chunk_capacity >= 1,
-            "chunk capacity must be at least one row"
-        );
-        assert!(
-            target_chunk_capacity.is_power_of_two(),
-            "chunk capacity must be a power of two so row bits remain configurable"
-        );
+    pub fn try_for_chunk_capacity(target_chunk_capacity: usize) -> Result<Self, DefinitionError> {
+        if target_chunk_capacity < 1 || !target_chunk_capacity.is_power_of_two() {
+            return Err(DefinitionError::InvalidChunkCapacity {
+                capacity: target_chunk_capacity,
+            });
+        }
 
-        let row_index_bit_count = target_chunk_capacity.max(1).ilog2() as u8;
+        if let Some(maximum_row_capacity) = 1usize.checked_shl(u32::BITS) {
+            if target_chunk_capacity > maximum_row_capacity {
+                return Err(DefinitionError::InvalidChunkCapacity {
+                    capacity: target_chunk_capacity,
+                });
+            }
+        }
+
+        let row_index_bit_count = target_chunk_capacity.ilog2() as u8;
         let chunk_index_bit_count = 32u8.saturating_sub(row_index_bit_count);
 
-        Self {
+        Ok(Self {
             row_index_bit_count,
             chunk_index_bit_count,
-        }
+        })
     }
 
     pub const fn row_index_bit_count(self) -> u8 {
@@ -270,26 +339,40 @@ impl RowLayout {
         table_index: TableIndex,
         chunk_index: ChunkIndex,
         row_index: u32,
-    ) -> Row<'job> {
-        assert!(
-            row_index <= self.maximum_row_index(),
-            "row index exceeds the configured row bit budget"
-        );
-        assert!(
-            chunk_index.value() <= self.maximum_chunk_index(),
-            "chunk index exceeds the configured chunk bit budget"
-        );
-
-        Row {
-            table_index,
-            packed_chunk_and_row_index: (chunk_index.value() << self.row_index_bit_count)
-                | row_index,
-            marker: PhantomData,
+    ) -> Result<Row<'job>, ChunkError> {
+        if row_index > self.maximum_row_index() {
+            return Err(ChunkError::RowIndexOutOfBounds {
+                row_index: row_index as usize,
+                capacity: self.maximum_row_index() as usize + 1,
+            });
         }
+
+        if chunk_index.value() > self.maximum_chunk_index() {
+            return Err(ChunkError::ChunkIndexOutOfBounds {
+                chunk_index: chunk_index.value() as usize,
+                capacity: self.maximum_chunk_index() as usize + 1,
+            });
+        }
+
+        let packed_chunk_and_row_index = if self.row_index_bit_count == 32 {
+            row_index
+        } else {
+            (chunk_index.value() << self.row_index_bit_count) | row_index
+        };
+
+        Ok(Row {
+            table_index,
+            packed_chunk_and_row_index,
+            marker: PhantomData,
+        })
     }
 
     pub const fn chunk_index<'job>(self, row: Row<'job>) -> ChunkIndex {
-        ChunkIndex::new(row.packed_chunk_and_row_index >> self.row_index_bit_count)
+        if self.chunk_index_bit_count == 0 {
+            ChunkIndex::new(0)
+        } else {
+            ChunkIndex::new(row.packed_chunk_and_row_index >> self.row_index_bit_count)
+        }
     }
 
     pub const fn row_index<'job>(self, row: Row<'job>) -> u32 {
@@ -319,7 +402,13 @@ impl RowLayout {
     }
 
     const fn row_index_mask(self) -> u32 {
-        (1u32 << self.row_index_bit_count) - 1
+        if self.row_index_bit_count == 32 {
+            u32::MAX
+        } else if self.row_index_bit_count == 0 {
+            0
+        } else {
+            (1u32 << self.row_index_bit_count) - 1
+        }
     }
 }
 
@@ -373,8 +462,8 @@ pub struct Meta {
     element_size: usize,
     element_alignment: usize,
     storage: Storage,
-    drop_value: unsafe fn(*mut u8),
-    copy_value: unsafe fn(*const u8, *mut u8),
+    drop_value: Option<unsafe fn(*mut u8)>,
+    copy_value: Option<unsafe fn(*const u8, *mut u8)>,
 }
 
 impl Meta {
@@ -389,8 +478,16 @@ impl Meta {
             element_size: size_of::<T>(),
             element_alignment: align_of::<T>(),
             storage: Storage::Inline,
-            drop_value: drop_value::<T>,
-            copy_value: copy_value::<T>,
+            drop_value: if needs_drop::<T>() {
+                Some(drop_value::<T>)
+            } else {
+                None
+            },
+            copy_value: if size_of::<T>() > 0 {
+                Some(copy_value::<T>)
+            } else {
+                None
+            },
         }
     }
 
@@ -426,11 +523,11 @@ impl Meta {
             .expect("meta layout must be valid")
     }
 
-    pub const fn drop_value(self) -> unsafe fn(*mut u8) {
+    pub const fn drop_value(self) -> Option<unsafe fn(*mut u8)> {
         self.drop_value
     }
 
-    pub const fn copy_value(self) -> unsafe fn(*const u8, *mut u8) {
+    pub const fn copy_value(self) -> Option<unsafe fn(*const u8, *mut u8)> {
         self.copy_value
     }
 }
@@ -484,43 +581,432 @@ impl<'a> Column<'a> {
     }
 }
 
+/// The precomputed region information for one column inside one chunk capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnLayout {
+    offset: Option<usize>,
+    region_size: usize,
+    alignment: usize,
+    storage: Storage,
+}
+
+impl ColumnLayout {
+    const fn new(
+        offset: Option<usize>,
+        region_size: usize,
+        alignment: usize,
+        storage: Storage,
+    ) -> Self {
+        Self {
+            offset,
+            region_size,
+            alignment,
+            storage,
+        }
+    }
+
+    pub const fn offset(self) -> Option<usize> {
+        self.offset
+    }
+
+    pub const fn region_size(self) -> usize {
+        self.region_size
+    }
+
+    pub const fn alignment(self) -> usize {
+        self.alignment
+    }
+
+    pub const fn storage(self) -> Storage {
+        self.storage
+    }
+
+    pub const fn has_inline_region(self) -> bool {
+        self.offset.is_some()
+    }
+}
+
+/// The precomputed allocation layout for one concrete chunk capacity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkLayout {
+    capacity: usize,
+    allocation_size: usize,
+    allocation_alignment: usize,
+    columns: Box<[ColumnLayout]>,
+}
+
+impl ChunkLayout {
+    fn new(metas: &[Meta], capacity: usize) -> Result<Self, DefinitionError> {
+        if capacity < 1 || !capacity.is_power_of_two() {
+            return Err(DefinitionError::InvalidChunkCapacity { capacity });
+        }
+
+        let mut allocation_layout = Layout::from_size_align(0, 1).expect("zero layout is valid");
+        let mut columns = Vec::with_capacity(metas.len());
+
+        for meta in metas {
+            match region_layout_for_meta(*meta, capacity)? {
+                Some(region_layout) => {
+                    let (combined_layout, offset) = allocation_layout
+                        .extend(region_layout)
+                        .map_err(|_| DefinitionError::AllocationLayoutOverflow {
+                            meta_name: meta.name(),
+                            capacity,
+                        })?;
+                    allocation_layout = combined_layout;
+                    columns.push(ColumnLayout::new(
+                        Some(offset),
+                        region_layout.size(),
+                        region_layout.align(),
+                        meta.storage(),
+                    ));
+                }
+                None => {
+                    columns.push(ColumnLayout::new(
+                        None,
+                        0,
+                        meta.element_alignment(),
+                        meta.storage(),
+                    ));
+                }
+            }
+        }
+
+        let allocation_layout = allocation_layout.pad_to_align();
+
+        Ok(Self {
+            capacity,
+            allocation_size: allocation_layout.size(),
+            allocation_alignment: allocation_layout.align(),
+            columns: columns.into_boxed_slice(),
+        })
+    }
+
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub const fn allocation_size(&self) -> usize {
+        self.allocation_size
+    }
+
+    pub const fn allocation_alignment(&self) -> usize {
+        self.allocation_alignment
+    }
+
+    pub fn columns(&self) -> &[ColumnLayout] {
+        &self.columns
+    }
+
+    pub fn column(&self, column_index: ColumnIndex) -> Option<&ColumnLayout> {
+        self.columns.get(usize::from(column_index.value()))
+    }
+
+    fn allocation_layout(&self) -> Layout {
+        Layout::from_size_align(self.allocation_size, self.allocation_alignment)
+            .expect("stored chunk layout must remain valid")
+    }
+}
+
 /// One chunk allocation described as a list of per-column pointers.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Chunk {
+    chunk_index: ChunkIndex,
+    count: usize,
+    capacity: usize,
+    allocation_pointer: NonNull<u8>,
+    allocation_size: usize,
+    allocation_alignment: usize,
+    meta_pointer: NonNull<Meta>,
+    meta_count: usize,
     pointers: Box<[NonNull<u8>]>,
 }
 
 impl Chunk {
-    pub fn new<I>(pointers: I) -> Self
-    where
-        I: IntoIterator<Item = NonNull<u8>>,
-    {
+    fn new(
+        chunk_index: ChunkIndex,
+        chunk_layout: &ChunkLayout,
+        meta_pointer: NonNull<Meta>,
+        meta_count: usize,
+    ) -> Self {
+        let allocation_layout = chunk_layout.allocation_layout();
+        let allocation_pointer = allocate_chunk_memory(allocation_layout);
+
+        let pointers = chunk_layout
+            .columns()
+            .iter()
+            .copied()
+            .map(|column_layout| {
+                column_layout.offset().map_or_else(
+                    || aligned_dangling_pointer(column_layout.alignment()),
+                    |offset| unsafe {
+                        NonNull::new_unchecked(allocation_pointer.as_ptr().add(offset))
+                    },
+                )
+            })
+            .collect();
+
         Self {
-            pointers: pointers.into_iter().collect(),
+            chunk_index,
+            count: 0,
+            capacity: chunk_layout.capacity(),
+            allocation_pointer,
+            allocation_size: chunk_layout.allocation_size(),
+            allocation_alignment: chunk_layout.allocation_alignment(),
+            meta_pointer,
+            meta_count,
+            pointers,
         }
+    }
+
+    pub const fn chunk_index(&self) -> ChunkIndex {
+        self.chunk_index
+    }
+
+    pub const fn count(&self) -> usize {
+        self.count
+    }
+
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn remaining_row_capacity(&self) -> usize {
+        self.capacity.saturating_sub(self.count)
+    }
+
+    pub const fn allocation_size(&self) -> usize {
+        self.allocation_size
+    }
+
+    pub const fn allocation_alignment(&self) -> usize {
+        self.allocation_alignment
+    }
+
+    pub const fn base_pointer(&self) -> NonNull<u8> {
+        self.allocation_pointer
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.count == self.capacity
     }
 
     pub fn pointers(&self) -> &[NonNull<u8>] {
         &self.pointers
     }
 
-    pub fn column<'a>(&self, column_index: ColumnIndex, metas: &'a [Meta]) -> Option<Column<'a>> {
+    pub fn metas(&self) -> &[Meta] {
+        // Safety: each chunk stores a pointer into its owning table's boxed meta slice. Tables drop
+        // chunks before dropping metas, so the pointer remains valid for the chunk lifetime.
+        unsafe { from_raw_parts(self.meta_pointer.as_ptr(), self.meta_count) }
+    }
+
+    pub fn column(&self, column_index: ColumnIndex) -> Option<Column<'_>> {
         let pointer = *self.pointers.get(usize::from(column_index.value()))?;
-        let meta = metas.get(usize::from(column_index.value()))?;
+        let meta = self.metas().get(usize::from(column_index.value()))?;
 
         Some(Column::new(pointer, meta))
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that writing `value` into `row_index` is valid for the current
+    /// initialized-prefix state of the chunk. In particular:
+    ///
+    /// - `row_index` must not name a live value that still needs to be dropped first,
+    /// - no other references may currently alias the written element,
+    /// - and the caller must later update the initialized prefix only after every written column
+    ///   for that row is initialized consistently.
+    pub unsafe fn write<T: 'static>(
+        &mut self,
+        column_index: ColumnIndex,
+        row_index: usize,
+        value: T,
+    ) -> Result<(), ChunkError> {
+        if row_index >= self.capacity {
+            return Err(ChunkError::RowIndexOutOfBounds {
+                row_index,
+                capacity: self.capacity,
+            });
+        }
+
+        let (_, pointer) = self.inline_meta_and_pointer::<T>(column_index)?;
+
+        // Safety: the caller promises that overwriting the target slot is correct for the current
+        // initialized-prefix state of the chunk.
+        unsafe {
+            pointer.as_ptr().cast::<T>().add(row_index).write(value);
+        }
+
+        Ok(())
+    }
+
+    /// # Safety
+    ///
+    /// The caller must guarantee that every row in `0..count` is fully initialized for every
+    /// inline column in the chunk according to the table metadata.
+    pub unsafe fn assume_initialized_count(&mut self, count: usize) -> Result<(), ChunkError> {
+        if count > self.capacity {
+            return Err(ChunkError::CountExceedsCapacity {
+                count,
+                capacity: self.capacity,
+            });
+        }
+
+        self.count = count;
+        Ok(())
+    }
+
+    pub fn slice<T: 'static>(&self, column_index: ColumnIndex) -> Result<&[T], ChunkError> {
+        let (_, pointer) = self.inline_meta_and_pointer::<T>(column_index)?;
+        debug_assert!(self.count <= self.capacity);
+
+        // Safety: `count` is the current initialized prefix length, and the type check above
+        // guarantees the requested `T` matches the stored column metadata.
+        Ok(unsafe { from_raw_parts(pointer.as_ptr().cast::<T>(), self.count) })
+    }
+
+    pub fn slice_mut<T: 'static>(
+        &mut self,
+        column_index: ColumnIndex,
+    ) -> Result<&mut [T], ChunkError> {
+        let (_, pointer) = self.inline_meta_and_pointer::<T>(column_index)?;
+        debug_assert!(self.count <= self.capacity);
+
+        // Safety: `&mut self` guarantees exclusive access to the chunk, and the type check above
+        // guarantees the requested `T` matches the stored column metadata.
+        Ok(unsafe { from_raw_parts_mut(pointer.as_ptr().cast::<T>(), self.count) })
+    }
+
+    pub fn swap_remove_row(&mut self, row_index: usize) -> Result<(), ChunkError> {
+        if row_index >= self.count {
+            return Err(ChunkError::RowIndexOutsideInitializedPrefix {
+                row_index,
+                count: self.count,
+            });
+        }
+
+        let last_row_index = self.count - 1;
+
+        for (meta, pointer) in self.metas().iter().zip(self.pointers.iter().copied()) {
+            if meta.storage() != Storage::Inline {
+                continue;
+            }
+
+            // Safety: `row_index` and `last_row_index` are both inside the initialized prefix.
+            unsafe {
+                if row_index == last_row_index {
+                    drop_value_at(*meta, pointer, row_index);
+                } else {
+                    drop_value_at(*meta, pointer, row_index);
+                    copy_value_between(*meta, pointer, last_row_index, row_index);
+                }
+            }
+        }
+
+        self.count -= 1;
+        Ok(())
+    }
+
+    fn meta_and_pointer(
+        &self,
+        column_index: ColumnIndex,
+    ) -> Result<(&Meta, NonNull<u8>), ChunkError> {
+        let column_count = self.pointers.len();
+        let pointer = *self.pointers.get(usize::from(column_index.value())).ok_or(
+            ChunkError::ColumnIndexOutOfBounds {
+                column_index,
+                column_count,
+            },
+        )?;
+        let meta = self.metas().get(usize::from(column_index.value())).ok_or(
+            ChunkError::ColumnIndexOutOfBounds {
+                column_index,
+                column_count,
+            },
+        )?;
+
+        Ok((meta, pointer))
+    }
+
+    fn inline_meta_and_pointer<T: 'static>(
+        &self,
+        column_index: ColumnIndex,
+    ) -> Result<(&Meta, NonNull<u8>), ChunkError> {
+        let (meta, pointer) = self.meta_and_pointer(column_index)?;
+
+        if meta.storage() != Storage::Inline {
+            return Err(ChunkError::ColumnNotInline {
+                meta_name: meta.name(),
+            });
+        }
+
+        if meta.identifier() != TypeId::of::<T>() {
+            return Err(ChunkError::ColumnTypeMismatch {
+                column_name: meta.name(),
+                requested_type_name: type_name::<T>(),
+            });
+        }
+
+        Ok((meta, pointer))
+    }
+
+    fn drop_inhabited_rows(&mut self) {
+        let initialized_count = self.count;
+        if initialized_count == 0 {
+            return;
+        }
+
+        for (meta, pointer) in self.metas().iter().zip(self.pointers.iter().copied()) {
+            if meta.storage() != Storage::Inline {
+                continue;
+            }
+
+            for row_index in 0..initialized_count {
+                // Safety: `row_index` is inside the initialized prefix and the chunk owns the
+                // corresponding storage region exclusively during drop.
+                unsafe {
+                    drop_value_at(*meta, pointer, row_index);
+                }
+            }
+        }
+
+        self.count = 0;
+    }
+}
+
+impl Drop for Chunk {
+    fn drop(&mut self) {
+        self.drop_inhabited_rows();
+
+        if self.allocation_size > 0 {
+            let allocation_layout =
+                Layout::from_size_align(self.allocation_size, self.allocation_alignment)
+                    .expect("stored chunk allocation layout must remain valid");
+
+            // Safety: `allocation_pointer` was allocated with `allocation_layout` in `Chunk::new`
+            // and has not been deallocated since.
+            unsafe {
+                dealloc(self.allocation_pointer.as_ptr(), allocation_layout);
+            }
+        }
     }
 }
 
 /// A table descriptor that owns stored-type metadata and chunk storage.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Table {
     index: TableIndex,
-    metas: Box<[Meta]>,
     chunks: Vec<Chunk>,
+    metas: Box<[Meta]>,
     row_layout: RowLayout,
     chunk_plan: ChunkPlan,
     layout: TableLayout,
+    chunk_layouts: Box<[ChunkLayout]>,
 }
 
 impl Table {
@@ -550,6 +1036,69 @@ impl Table {
         &self.chunks
     }
 
+    pub fn chunk(&self, chunk_index: ChunkIndex) -> Option<&Chunk> {
+        self.chunks.get(chunk_index.value() as usize)
+    }
+
+    pub fn chunk_mut(&mut self, chunk_index: ChunkIndex) -> Option<&mut Chunk> {
+        self.chunks.get_mut(chunk_index.value() as usize)
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn chunk_layouts(&self) -> &[ChunkLayout] {
+        &self.chunk_layouts
+    }
+
+    pub fn chunk_layout_for_capacity(&self, capacity: usize) -> Option<&ChunkLayout> {
+        self.chunk_layouts
+            .binary_search_by_key(&capacity, |chunk_layout| chunk_layout.capacity())
+            .ok()
+            .map(|chunk_layout_index| &self.chunk_layouts[chunk_layout_index])
+    }
+
+    pub fn full_chunk_layout(&self) -> &ChunkLayout {
+        self.chunk_layouts
+            .last()
+            .expect("tables always precompute at least one chunk layout")
+    }
+
+    pub fn next_chunk_capacity(&self) -> usize {
+        self.chunks
+            .last()
+            .map(|chunk| {
+                if chunk.capacity() < self.chunk_plan.target_chunk_capacity() {
+                    (chunk.capacity() * 2).min(self.chunk_plan.target_chunk_capacity())
+                } else {
+                    self.chunk_plan.target_chunk_capacity()
+                }
+            })
+            .unwrap_or(1)
+    }
+
+    pub fn push_chunk(&mut self) -> ChunkIndex {
+        let next_chunk_capacity = self.next_chunk_capacity();
+        let next_chunk_layout = self
+            .chunk_layout_for_capacity(next_chunk_capacity)
+            .expect("table must precompute every bootstrap chunk layout");
+        debug_assert!(self.chunks.len() < u32::MAX as usize);
+        let chunk_index = ChunkIndex::new(
+            u32::try_from(self.chunks.len()).expect("table chunk count must fit in row encoding"),
+        );
+        let meta_pointer = meta_pointer_from_slice(&self.metas);
+
+        self.chunks.push(Chunk::new(
+            chunk_index,
+            next_chunk_layout,
+            meta_pointer,
+            self.metas.len(),
+        ));
+
+        chunk_index
+    }
+
     pub fn map_access_for_identifier(
         &self,
         identifier: TypeId,
@@ -559,7 +1108,7 @@ impl Table {
             .metas
             .iter()
             .position(|meta| meta.identifier() == identifier)
-            .map(column_index_value)?;
+            .and_then(column_index_value)?;
 
         Some(ColumnAccess::new(
             self.index,
@@ -653,6 +1202,89 @@ impl Table {
             access,
         )
     }
+
+    /// # Safety
+    ///
+    /// This is the table-level forwarding form of `Chunk::write`. The caller must ensure that
+    /// writing `value` into `row_index` is valid for the chunk's current initialized-prefix state
+    /// and that no conflicting references to the same element exist.
+    pub unsafe fn write<T: 'static>(
+        &mut self,
+        chunk_index: ChunkIndex,
+        row_index: usize,
+        value: T,
+    ) -> Result<(), ChunkError> {
+        let column_index = self.column_index_for_type::<T>()?;
+        let chunk = self
+            .chunk_mut(chunk_index)
+            .ok_or(ChunkError::MissingChunk { chunk_index })?;
+
+        unsafe { chunk.write::<T>(column_index, row_index, value) }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must guarantee that every row in `0..count` is fully initialized for every
+    /// inline column in the addressed chunk.
+    pub unsafe fn assume_initialized_prefix(
+        &mut self,
+        chunk_index: ChunkIndex,
+        count: usize,
+    ) -> Result<(), ChunkError> {
+        let chunk = self
+            .chunk_mut(chunk_index)
+            .ok_or(ChunkError::MissingChunk { chunk_index })?;
+
+        unsafe { chunk.assume_initialized_count(count) }
+    }
+
+    pub fn slice<T: 'static>(&self, chunk_index: ChunkIndex) -> Result<&[T], ChunkError> {
+        let column_index = self.column_index_for_type::<T>()?;
+        let chunk = self
+            .chunk(chunk_index)
+            .ok_or(ChunkError::MissingChunk { chunk_index })?;
+
+        chunk.slice::<T>(column_index)
+    }
+
+    pub fn slice_mut<T: 'static>(
+        &mut self,
+        chunk_index: ChunkIndex,
+    ) -> Result<&mut [T], ChunkError> {
+        let column_index = self.column_index_for_type::<T>()?;
+        let chunk = self
+            .chunk_mut(chunk_index)
+            .ok_or(ChunkError::MissingChunk { chunk_index })?;
+
+        chunk.slice_mut::<T>(column_index)
+    }
+
+    pub fn swap_remove_row(
+        &mut self,
+        chunk_index: ChunkIndex,
+        row_index: usize,
+    ) -> Result<(), ChunkError> {
+        let chunk = self
+            .chunk_mut(chunk_index)
+            .ok_or(ChunkError::MissingChunk { chunk_index })?;
+
+        chunk.swap_remove_row(row_index)
+    }
+
+    fn column_index_for_type<T: 'static>(&self) -> Result<ColumnIndex, ChunkError> {
+        self.map_access::<T>(Access::Read)
+            .map(ColumnAccess::column_index)
+            .ok_or(ChunkError::MissingColumnForType {
+                type_name: type_name::<T>(),
+            })
+    }
+}
+
+impl Drop for Table {
+    fn drop(&mut self) {
+        // Chunks keep raw pointers into `self.metas`, so they must be dropped before the meta slice.
+        self.chunks.clear();
+    }
 }
 
 /// One column access mapped through one table.
@@ -715,18 +1347,12 @@ impl ColumnAccess {
     }
 }
 
-/// Metadata-registration failures for tables.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DefinitionError {
-    DuplicateMeta { meta_name: &'static str },
-}
-
-/// A metadata catalog that interns table shapes and registers tables.
+/// A metadata catalog that interns table shapes and issues new table indices.
 #[derive(Debug, Default)]
 pub struct Catalog {
     table_shape_indices_by_signature: BTreeMap<Box<[MetaSignature]>, u32>,
     table_shape_count: usize,
-    tables: Vec<Rc<Table>>,
+    next_table_index: u32,
 }
 
 impl Catalog {
@@ -739,24 +1365,21 @@ impl Catalog {
     }
 
     pub fn table_count(&self) -> usize {
-        self.tables.len()
-    }
-
-    pub fn table(&self, table_index: TableIndex) -> Option<&Table> {
-        self.tables
-            .get(table_index.value() as usize)
-            .map(AsRef::as_ref)
+        self.next_table_index as usize
     }
 
     pub fn register_table<I>(
         &mut self,
         metas: I,
         configuration: Configuration,
-    ) -> Result<Rc<Table>, DefinitionError>
+    ) -> Result<Table, DefinitionError>
     where
         I: IntoIterator<Item = Meta>,
     {
         let mut metas: Vec<_> = metas.into_iter().collect();
+        if metas.len() > u16::MAX as usize {
+            return Err(DefinitionError::TooManyColumns);
+        }
         metas.sort_unstable_by_key(|meta| meta.identifier());
 
         for meta_pair in metas.windows(2) {
@@ -777,8 +1400,8 @@ impl Catalog {
             .table_shape_indices_by_signature
             .contains_key(&table_shape_signature)
         {
-            let next_table_shape_index =
-                u32::try_from(self.table_shape_count).expect("table shape count must fit in u32");
+            let next_table_shape_index = u32::try_from(self.table_shape_count)
+                .map_err(|_| DefinitionError::TooManyTables)?;
             self.table_shape_indices_by_signature
                 .insert(table_shape_signature, next_table_shape_index);
             self.table_shape_count += 1;
@@ -791,28 +1414,161 @@ impl Catalog {
             .sum();
         let layout = TableLayout::new(row_width, metas.len());
         let chunk_plan = configuration.plan_chunk_capacity_for_row_width(layout.row_width());
-        let row_layout = RowLayout::for_chunk_capacity(chunk_plan.target_chunk_capacity());
-        let table_index = TableIndex::new(table_index_value(self.tables.len()));
+        let row_layout = RowLayout::try_for_chunk_capacity(chunk_plan.target_chunk_capacity())?;
+        let chunk_layouts =
+            chunk_layouts_for_target_capacity(&metas, chunk_plan.target_chunk_capacity())?;
+        let table_index = TableIndex::new(self.next_table_index);
+        self.next_table_index = self
+            .next_table_index
+            .checked_add(1)
+            .ok_or(DefinitionError::TooManyTables)?;
 
-        let table = Rc::new(Table {
+        Ok(Table {
             index: table_index,
-            metas: metas.into_boxed_slice(),
             chunks: Vec::new(),
+            metas: metas.into_boxed_slice(),
             row_layout,
             chunk_plan,
             layout,
-        });
-
-        self.tables.push(table.clone());
-
-        Ok(table)
+            chunk_layouts,
+        })
     }
 }
 
-fn table_index_value(table_count: usize) -> u32 {
-    u32::try_from(table_count).expect("table count must fit in u32")
+fn region_layout_for_meta(meta: Meta, capacity: usize) -> Result<Option<Layout>, DefinitionError> {
+    if meta.storage() != Storage::Inline || meta.element_size() == 0 {
+        return Ok(None);
+    }
+
+    let region_size = meta.element_size().checked_mul(capacity).ok_or(
+        DefinitionError::AllocationLayoutOverflow {
+            meta_name: meta.name(),
+            capacity,
+        },
+    )?;
+
+    let region_layout =
+        Layout::from_size_align(region_size, meta.element_alignment()).map_err(|_| {
+            DefinitionError::AllocationLayoutOverflow {
+                meta_name: meta.name(),
+                capacity,
+            }
+        })?;
+
+    Ok(Some(region_layout))
 }
 
-fn column_index_value(column_count: usize) -> u16 {
-    u16::try_from(column_count).expect("column count must fit in u16")
+fn chunk_layouts_for_target_capacity(
+    metas: &[Meta],
+    target_chunk_capacity: usize,
+) -> Result<Box<[ChunkLayout]>, DefinitionError> {
+    chunk_capacities_for_target(target_chunk_capacity)?
+        .into_iter()
+        .map(|capacity| ChunkLayout::new(metas, capacity))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Vec::into_boxed_slice)
+}
+
+fn chunk_capacities_for_target(
+    target_chunk_capacity: usize,
+) -> Result<Vec<usize>, DefinitionError> {
+    if target_chunk_capacity < 1 || !target_chunk_capacity.is_power_of_two() {
+        return Err(DefinitionError::InvalidChunkCapacity {
+            capacity: target_chunk_capacity,
+        });
+    }
+
+    let mut capacities = Vec::new();
+    let mut current_capacity = 1usize;
+
+    loop {
+        capacities.push(current_capacity);
+        if current_capacity == target_chunk_capacity {
+            break;
+        }
+        current_capacity = (current_capacity * 2).min(target_chunk_capacity);
+    }
+
+    Ok(capacities)
+}
+
+fn allocate_chunk_memory(allocation_layout: Layout) -> NonNull<u8> {
+    if allocation_layout.size() == 0 {
+        return aligned_dangling_pointer(allocation_layout.align());
+    }
+
+    // Safety: `allocation_layout` is valid and non-zero sized.
+    let allocation_pointer = unsafe { alloc(allocation_layout) };
+    let Some(allocation_pointer) = NonNull::new(allocation_pointer) else {
+        handle_alloc_error(allocation_layout);
+    };
+
+    allocation_pointer
+}
+
+fn aligned_dangling_pointer(alignment: usize) -> NonNull<u8> {
+    debug_assert!(alignment >= 1);
+    debug_assert!(alignment.is_power_of_two());
+
+    // Safety: any non-zero power-of-two address is aligned for the corresponding alignment and is
+    // suitable as a dangling sentinel because it is never dereferenced when no inline region
+    // exists.
+    unsafe { NonNull::new_unchecked(alignment as *mut u8) }
+}
+
+fn meta_pointer_from_slice(metas: &[Meta]) -> NonNull<Meta> {
+    if metas.is_empty() {
+        NonNull::dangling()
+    } else {
+        // Safety: `metas.as_ptr()` is non-null for non-empty slices and remains stable because the
+        // table stores metas in a boxed slice.
+        unsafe { NonNull::new_unchecked(metas.as_ptr() as *mut Meta) }
+    }
+}
+
+unsafe fn drop_value_at(meta: Meta, pointer: NonNull<u8>, row_index: usize) {
+    let Some(drop_value) = meta.drop_value() else {
+        return;
+    };
+
+    let row_pointer = row_pointer(pointer, meta, row_index);
+    unsafe {
+        drop_value(row_pointer.as_ptr());
+    }
+}
+
+unsafe fn copy_value_between(
+    meta: Meta,
+    pointer: NonNull<u8>,
+    source_row_index: usize,
+    target_row_index: usize,
+) {
+    let Some(copy_value) = meta.copy_value() else {
+        return;
+    };
+
+    let source_row_pointer = row_pointer(pointer, meta, source_row_index);
+    let target_row_pointer = row_pointer(pointer, meta, target_row_index);
+
+    unsafe {
+        copy_value(source_row_pointer.as_ptr(), target_row_pointer.as_ptr());
+    }
+}
+
+fn row_pointer(pointer: NonNull<u8>, meta: Meta, row_index: usize) -> NonNull<u8> {
+    if meta.element_size() == 0 {
+        return pointer;
+    }
+
+    let byte_offset = row_index
+        .checked_mul(meta.element_size())
+        .expect("row offset must stay within the allocated chunk region");
+
+    // Safety: callers validate row indices against chunk capacity or initialized count before
+    // asking for a row pointer, and chunk layouts guarantee the region offset is in-bounds.
+    unsafe { NonNull::new_unchecked(pointer.as_ptr().add(byte_offset)) }
+}
+
+fn column_index_value(column_count: usize) -> Option<u16> {
+    u16::try_from(column_count).ok()
 }

@@ -24,7 +24,8 @@
 //! - `key`: stable-identity vocabulary used by later extension resources.
 //! - `query`: access vocabulary for future query declarations.
 //! - `schedule`: ordering vocabulary for future schedule construction.
-//! - `schema`: the metadata catalog, `Meta` descriptors, table descriptors, and resource mapping.
+//! - `schema`: the metadata catalog, `Meta` descriptors, chunk layouts, tables, chunks, and
+//!   resource mapping.
 //! - `store`: the foundation store boundary and chunk planning surface.
 //!
 //! Glossary:

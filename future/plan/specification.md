@@ -287,10 +287,17 @@ Each chunk should use one allocation, not one allocation per column.
 
 The allocation layout should be:
 
-- chunk header and small metadata,
-- then one aligned region per column,
+- one aligned region per column inside one chunk-owned allocation,
 - with precomputed column offsets,
 - with all row storage densely packed from `0..count`.
+
+The chunk header itself may live either:
+
+- inside that allocation,
+- or in the Rust `Chunk` object beside it.
+
+The selected `v2` implementation currently keeps the header in the `Chunk` object and uses the
+single allocation for column regions only.
 
 Benefits:
 

@@ -222,7 +222,7 @@ Task 01 should not add speculative complexity for that future.
 1. Define the core ID newtypes.
 2. Define the `Meta` descriptor.
 3. Define the `Row` packing model.
-4. Define the `Chunk` and `Column` placeholder types.
+4. Define the initial `Chunk` and `Column` runtime types.
 5. Define the table descriptor.
 6. Define the mapping from typed query request to column access.
 7. Define the functions that derive:
@@ -256,11 +256,11 @@ richer layout model only when there is a real design and benchmark reason.
 
 The current repository now implements this task in `src/v2/schema.rs` with:
 
-- a `Catalog` that interns table shapes and registers tables,
+- a `Catalog` that interns table shapes and constructs new mutable tables,
 - explicit index newtypes for stores, tables, chunks, and columns,
 - `Meta` descriptors for stored-type metadata,
 - `RowLayout` and `Row<'job>` for packed row identity,
-- `Column<'a>` and `Chunk` placeholders for the runtime storage vocabulary,
+- `Column<'a>` and `Chunk` runtime types for the storage vocabulary,
 - `Table` descriptors for row packing, chunk planning, and scheduler identity,
 - hierarchical `Resource` identifiers from store scope down to column scope,
 - `Dependency` generation for:
