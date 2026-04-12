@@ -28,7 +28,7 @@ pub enum Access {
 }
 
 impl Access {
-    const fn conflicts_with(self, other: Self) -> bool {
+    pub const fn conflicts_with(self, other: Self) -> bool {
         matches!(
             (self, other),
             (Self::Write, Self::Read | Self::Write) | (Self::Read, Self::Write)
@@ -611,7 +611,11 @@ pub trait Query {
 impl Query for RowsRequest {
     type Item<'table, 'job> = Rows<'job>;
 
-    fn collect_declared_accesses(&self, _declared_accesses: &mut Vec<DeclaredAccess>) {}
+    fn collect_declared_accesses(&self, _declared_accesses: &mut Vec<DeclaredAccess>) {
+        // Rows request doesn't declare static accesses against specific columns,
+        // but the query still structurally requires chunk read access.
+        // That logic is handled by `dynamic_dependencies` injecting table/chunk read dependencies.
+    }
 
     fn matches_table(&self, _table: &Table) -> bool {
         true
@@ -859,6 +863,91 @@ impl_query_tuple!(
     (Q0: q0, Q1: q1, Q2: q2, Q3: q3)
 );
 
+use crate::v2::schedule::{Dependency, Inject, Job, ResolveJob, Resource};
+use crate::v2::store::Store;
+use std::sync::Arc;
+
+impl<Q, F> Inject<Store> for All<Q, F>
+where
+    Q: QueryTuple + Clone + Send + Sync + 'static,
+    F: Filter + Clone + Send + Sync + 'static,
+{
+    // The Item returned must only borrow from 'job. Wait, `QueryTuple::Item<'table, 'job>`
+    // But `Inject<T>::Item<'job>` only has `'job`. So we can use `'job, 'job`.
+    // The executor in Task 06 will cast pointers appropriately.
+    type Item<'job> = Q::Item<'job, 'job>;
+
+    fn static_accesses(&self) -> Vec<DeclaredAccess> {
+        self.analysis.declared_accesses.to_vec()
+    }
+
+    fn generate_jobs<Func>(
+        &self,
+        data: &Store,
+        function_id: usize,
+        f: Arc<Func>,
+        jobs: &mut Vec<Job<Store>>,
+        _resolve_jobs: &mut Vec<ResolveJob<Store>>,
+    ) where
+        Func: Fn(Self::Item<'_>) + Send + Sync + 'static,
+    {
+        for table in data.tables() {
+            if !self.matches_table(table) {
+                continue;
+            }
+
+            let table_index = table.index();
+
+            for chunk_idx in 0..table.chunk_count() {
+                let chunk_index = ChunkIndex::new(chunk_idx as u32);
+                let mut deps = Vec::new();
+
+                deps.push(Dependency {
+                    resource: Resource::Store,
+                    access: Access::Read,
+                });
+                deps.push(Dependency {
+                    resource: Resource::Table(table_index),
+                    access: Access::Read,
+                });
+                deps.push(Dependency {
+                    resource: Resource::Chunk(table_index, chunk_index),
+                    access: Access::Read,
+                });
+
+                for access in self.analysis.declared_accesses.iter() {
+                    let type_id = access.identifier();
+
+                    deps.push(Dependency {
+                        resource: Resource::Column(table_index, chunk_index, type_id),
+                        access: access.access(),
+                    });
+                }
+
+                let f_clone = f.clone();
+                let query_clone = self.query.clone(); // Query needs to be accessible in the closure
+
+                jobs.push(Job {
+                    function_id,
+                    dependencies: deps,
+                    run: Box::new(move |store_ptr| {
+                        // Safety: The executor ensures jobs don't alias unlawfully.
+                        let store = unsafe { &mut *store_ptr };
+                        let table_ptr = store.table_mut(table_index).unwrap() as *mut Table;
+
+                        // We safely project using the query.
+                        let item =
+                            unsafe { query_clone.project_chunk(table_ptr, chunk_index).unwrap() };
+
+                        f_clone(item);
+                        false // Signal no updates for pure queries
+                    }),
+                });
+            }
+        }
+    }
+}
+
 impl<Q, F> All<Q, F>
 where
     Q: QueryTuple,
@@ -931,7 +1020,7 @@ where
     })
 }
 
-fn validate_declared_accesses(declared_accesses: &[DeclaredAccess]) -> Result<(), Error> {
+pub fn validate_declared_accesses(declared_accesses: &[DeclaredAccess]) -> Result<(), Error> {
     for (left_index, left_access) in declared_accesses.iter().enumerate() {
         for right_access in &declared_accesses[(left_index + 1)..] {
             if left_access.identifier == right_access.identifier
