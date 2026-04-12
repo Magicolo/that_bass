@@ -137,19 +137,15 @@ The scheduler must also support broader requests.
 Examples:
 
 - whole-store write:
-  - `Write(store_0)`
+  - `Dependency { access: Write, path: [store_0] }`
 - whole-chunk write:
-  - `Read(store_0)`
-  - `Read(table_3)`
-  - `Write(chunk_7)`
+  - `Dependency { access: Write, path: [store_0, table_3, chunk_7] }`
 - one-column write:
-  - `Read(store_0)`
-  - `Read(table_3)`
-  - `Read(chunk_7)`
-  - `Write(column_2)`
+  - `Dependency { access: Write, path: [store_0, table_3, chunk_7, column_2] }`
 
 To the scheduler, these only need to be identifiers plus access modes. The important rule is that
-descendant accesses carry the ancestor reads that let broad and narrow requests conflict correctly.
+broad and narrow requests use the same monotone path model and therefore conflict by shared prefix
+rather than by carrying implicit ancestor reads as separate dependencies.
 
 ## Why Resource Identity Must Exist Before The Scheduler
 
@@ -228,7 +224,7 @@ Task 01 should not add speculative complexity for that future.
 6. Define the mapping from typed query request to column access.
 7. Define the functions that derive:
    - scheduler resource IDs at every store/table/chunk/column scope,
-   - full hierarchical dependency lists for leaf accesses,
+   - monotone dependency paths for leaf accesses,
    - and broader dependencies for chunk/table/store-wide work.
 8. Add tests for:
    - table-shape equality,
@@ -264,9 +260,9 @@ The current repository now implements this task in `src/v2/schema.rs` with:
 - `Column<'a>` and `Chunk` runtime types for the storage vocabulary,
 - `Table` descriptors for row packing, chunk planning, and scheduler identity,
 - hierarchical `Resource` identifiers from store scope down to column scope,
-- `Dependency` generation for:
+- monotone `Dependency` generation for:
   - broad store/table/chunk requests,
-  - and leaf accesses that expand into read ancestors plus the requested leaf access,
+  - and leaf accesses that become one root-to-leaf path,
 - stable typed access mapping through `Table::map_access::<T>(...)`.
 
 The current implementation also deliberately treats `Key` as an ordinary stored type so the future
@@ -287,9 +283,9 @@ The following concrete actions were taken to satisfy this task:
 - kept the table-shape registry separate from table registration so equivalent meta sets can still
   be interned,
 - added hierarchical store/table/chunk/column resource identifiers,
-- added dependency generation so:
-  - broad store/table/chunk requests carry the required ancestor reads,
-  - and leaf accesses expand to ancestor reads plus leaf accesses,
+- added monotone dependency generation so:
+  - broad store/table/chunk requests become one root-to-target path,
+  - and leaf accesses also remain one root-to-leaf path,
 - kept `Key` as ordinary `Meta` rather than a primitive table policy so the future `Keys` resource
   can discover it through normal metadata inspection,
 - added `tests/v2/metadata.rs` to cover table-shape interning, `Meta` handling, `Key` handling,

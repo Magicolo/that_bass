@@ -37,6 +37,14 @@ The selected direction is:
 - same-frame visibility through scheduled resolve jobs and happens-before edges,
 - conservative rejection of overlapping conflicting live queries unless disjointness can be proven.
 
+Current implementation status in `src/v2/`:
+
+- Tasks `00` through `05` are implemented in the isolated rewrite lane.
+- The current `v2` surface now includes the foundation boundary, metadata and row vocabulary,
+  single-allocation chunk storage, keyless row views and remove buffers, the first typed query
+  surface, and reusable schedule-family planning with monotone dependency paths.
+- Tasks `06` and later remain planned work.
+
 ## Goals
 
 The rewrite exists to optimize for these goals:
@@ -703,9 +711,12 @@ Insert is relatively light:
 Selected refinement:
 
 - typed insert families such as `Insert<T>` should know their target table shape before execution,
-- that table can therefore be created eagerly before the first schedule run,
+- initialization should therefore get or create that table eagerly before the first schedule run,
+- the planned insert descriptor should store the resolved table index,
 - insert resolution then only has to allocate or fill chunks inside that known table,
-- and schedule/query setup can cache eligible tables at initialization time.
+- schedule/query setup can cache eligible tables at initialization time,
+- and the table-write dependency belongs to the resolve family rather than to the ordinary jobs
+  that only queue local insert commands.
 
 ## Remove Semantics
 

@@ -3,6 +3,7 @@ mod instrumentation;
 mod keyless_rows;
 mod metadata;
 mod query_surface;
+mod schedule_builder;
 mod store_planning;
 mod vocabulary;
 
@@ -23,6 +24,9 @@ fn main() {
     println!();
 
     query_surface::run();
+    println!();
+
+    schedule_builder::run();
     println!();
 
     vocabulary::run();

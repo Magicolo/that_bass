@@ -214,6 +214,10 @@ Selected refinement:
 
 - the schedule should try to know all relevant tables before the first execution,
 - especially for typed inserts such as `Insert<T>` where the target table is known from `T`,
+- initialization should therefore get or create the target table eagerly and store its table index
+  in the planned resolve metadata,
+- that target-table dependency belongs to the resolve family, not to the ordinary jobs that only
+  queue insert commands,
 - so mid-frame dynamism is primarily about chunk creation inside known tables rather than creation
   of entirely new tables.
 
@@ -302,3 +306,41 @@ This task is done when:
 - the schedule records conflict and ordering relationships,
 - resolve families are represented explicitly,
 - the plan is ready for per-frame expansion into concrete chunk jobs.
+
+## Implementation Review
+
+The current repository now implements this task in `src/v2/schedule.rs` with:
+
+- `Function`, `Resolve`, `Node`, and `Edge` descriptors for the reusable family graph,
+- monotone dependency-path planning based on the canonical `schema::Dependency` model,
+- explicit `conflict(...)`, `covers(...)`, and `conflicts_any(...)` helpers,
+- declaration-order edge construction from earlier resolve families to later function and resolve
+  families,
+- typed `Insert<T>` predeclaration through `Builder::add_insert(...)`,
+- typed insert initialization through catalog-backed `get_or_create_table(...)` planning,
+- and statically known table caching for query families.
+
+The supporting metadata layer in `src/v2/schema.rs` now exposes the monotone dependency paths that
+Task 05 expects, rather than the earlier "ancestor reads plus leaf write" representation.
+
+## Actions Taken In The Repository
+
+The following concrete actions were taken to satisfy this task:
+
+- replaced the placeholder `v2` schedule vocabulary with a real reusable `Schedule` object,
+- defined stable function and resolve family indices plus explicit family-level edges,
+- centralized dependency conflict and coverage logic so Task 06 can build on one canonical model,
+- added wildcard-chunk dependency templates for query families so runtime expansion can stay
+  chunk-dynamic without rebuilding the whole schedule,
+- added typed insert predeclaration so known target tables can be resolved before first execution,
+- added `tests/v2/schedule_builder.rs` to cover pure-read non-conflict, broad-versus-descendant
+  conflict, empty-path barriers, `covers(...)`, typed insert planning, resolve visibility edges,
+  and schedule stability across chunk-count changes,
+- added `examples/v2/schedule_builder.rs` so the public `v2` schedule surface is visible in the
+  runnable example set,
+- updated `AGENTS.md`, `src/v2/mod.rs`, and the metadata docs so the implemented dependency model
+  matches the selected design.
+
+Current status:
+
+- implemented in the current repository layout.

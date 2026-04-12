@@ -35,10 +35,9 @@ pub fn run() {
         .map_access::<Position>(Access::Write)
         .expect("example table should map Position access");
     let store_index = StoreIndex::new(0);
-    let resource = position_access.resource(store_index, ChunkIndex::new(7));
-    let dependencies = position_access.dependencies(store_index, ChunkIndex::new(7));
-    let chunk_write_dependencies =
-        table.chunk_dependencies(store_index, ChunkIndex::new(7), Access::Write);
+    let dependency = position_access.dependency(store_index, ChunkIndex::new(7));
+    let chunk_write_dependency =
+        table.chunk_dependency(store_index, ChunkIndex::new(7), Access::Write);
 
     println!("Metadata catalog");
     println!("  table shape count: {}", catalog.table_shape_count());
@@ -55,14 +54,10 @@ pub fn run() {
         table.row_layout().row_index_bit_count(),
         table.row_layout().chunk_index_bit_count()
     );
-    println!("  mapped Position resource for chunk 7: {:?}", resource);
+    println!("  mapped Position dependency for chunk 7: {:?}", dependency);
     println!(
-        "  full Position dependencies for chunk 7: {:?}",
-        dependencies
-    );
-    println!(
-        "  broad chunk write dependencies for chunk 7: {:?}",
-        chunk_write_dependencies
+        "  broad chunk write dependency for chunk 7: {:?}",
+        chunk_write_dependency
     );
 }
 

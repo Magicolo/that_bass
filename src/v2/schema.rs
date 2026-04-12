@@ -120,124 +120,122 @@ impl ColumnIndex {
     }
 }
 
-/// A scheduler-visible identifier at any scope of the store resource tree.
+/// A scheduler-visible concrete identifier for one resource instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ResourceId(usize);
+
+impl ResourceId {
+    pub const fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    pub const fn value(self) -> usize {
+        self.0
+    }
+}
+
+impl From<StoreIndex> for ResourceId {
+    fn from(store_index: StoreIndex) -> Self {
+        Self::new(store_index.value() as usize)
+    }
+}
+
+impl From<TableIndex> for ResourceId {
+    fn from(table_index: TableIndex) -> Self {
+        Self::new(table_index.value() as usize)
+    }
+}
+
+impl From<ChunkIndex> for ResourceId {
+    fn from(chunk_index: ChunkIndex) -> Self {
+        Self::new(chunk_index.value() as usize)
+    }
+}
+
+impl From<ColumnIndex> for ResourceId {
+    fn from(column_index: ColumnIndex) -> Self {
+        Self::new(column_index.value() as usize)
+    }
+}
+
+struct StoreKind;
+struct TableKind;
+struct ChunkKind;
+
+/// One segment of a scheduler dependency path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Resource {
-    Store(StoreIndex),
-    Table {
-        store_index: StoreIndex,
-        table_index: TableIndex,
-    },
-    Chunk {
-        store_index: StoreIndex,
-        table_index: TableIndex,
-        chunk_index: ChunkIndex,
-    },
-    Column {
-        store_index: StoreIndex,
-        table_index: TableIndex,
-        chunk_index: ChunkIndex,
-        column_index: ColumnIndex,
-    },
+pub struct Resource {
+    kind: TypeId,
+    identifier: Option<ResourceId>,
 }
 
 impl Resource {
-    pub const fn store(store_index: StoreIndex) -> Self {
-        Self::Store(store_index)
+    pub const fn new(kind: TypeId, identifier: Option<ResourceId>) -> Self {
+        Self { kind, identifier }
     }
 
-    pub const fn table(store_index: StoreIndex, table_index: TableIndex) -> Self {
-        Self::Table {
-            store_index,
-            table_index,
-        }
+    pub fn store(identifier: Option<ResourceId>) -> Self {
+        Self::new(TypeId::of::<StoreKind>(), identifier)
     }
 
-    pub const fn chunk(
-        store_index: StoreIndex,
-        table_index: TableIndex,
-        chunk_index: ChunkIndex,
-    ) -> Self {
-        Self::Chunk {
-            store_index,
-            table_index,
-            chunk_index,
-        }
+    pub fn table(identifier: Option<ResourceId>) -> Self {
+        Self::new(TypeId::of::<TableKind>(), identifier)
     }
 
-    pub const fn column(
-        store_index: StoreIndex,
-        table_index: TableIndex,
-        chunk_index: ChunkIndex,
-        column_index: ColumnIndex,
-    ) -> Self {
-        Self::Column {
-            store_index,
-            table_index,
-            chunk_index,
-            column_index,
-        }
+    pub fn chunk(identifier: Option<ResourceId>) -> Self {
+        Self::new(TypeId::of::<ChunkKind>(), identifier)
     }
 
-    pub const fn store_index(self) -> StoreIndex {
-        match self {
-            Self::Store(store_index)
-            | Self::Table { store_index, .. }
-            | Self::Chunk { store_index, .. }
-            | Self::Column { store_index, .. } => store_index,
-        }
+    pub fn column<T: 'static>(identifier: Option<ResourceId>) -> Self {
+        Self::new(TypeId::of::<T>(), identifier)
     }
 
-    pub const fn table_index(self) -> Option<TableIndex> {
-        match self {
-            Self::Table { table_index, .. }
-            | Self::Chunk { table_index, .. }
-            | Self::Column { table_index, .. } => Some(table_index),
-            Self::Store(_) => None,
-        }
+    pub const fn column_by_identifier(kind: TypeId, identifier: Option<ResourceId>) -> Self {
+        Self::new(kind, identifier)
     }
 
-    pub const fn chunk_index(self) -> Option<ChunkIndex> {
-        match self {
-            Self::Chunk { chunk_index, .. } | Self::Column { chunk_index, .. } => Some(chunk_index),
-            Self::Store(_) | Self::Table { .. } => None,
-        }
+    pub const fn kind(self) -> TypeId {
+        self.kind
     }
 
-    pub const fn column_index(self) -> Option<ColumnIndex> {
-        match self {
-            Self::Column { column_index, .. } => Some(column_index),
-            Self::Store(_) | Self::Table { .. } | Self::Chunk { .. } => None,
-        }
+    pub const fn identifier(self) -> Option<ResourceId> {
+        self.identifier
     }
 }
 
-/// One scheduler dependency request expressed as an access mode plus a resource identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// One monotone scheduler dependency path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Dependency {
-    resource: Resource,
     access: Access,
+    path: Box<[Resource]>,
 }
 
 impl Dependency {
-    pub const fn new(resource: Resource, access: Access) -> Self {
-        Self { resource, access }
+    pub fn new(access: Access, path: impl Into<Box<[Resource]>>) -> Self {
+        Self {
+            access,
+            path: path.into(),
+        }
     }
 
-    pub const fn read(resource: Resource) -> Self {
-        Self::new(resource, Access::Read)
+    pub fn read(path: impl Into<Box<[Resource]>>) -> Self {
+        Self::new(Access::Read, path)
     }
 
-    pub const fn write(resource: Resource) -> Self {
-        Self::new(resource, Access::Write)
+    pub fn write(path: impl Into<Box<[Resource]>>) -> Self {
+        Self::new(Access::Write, path)
     }
 
-    pub const fn resource(self) -> Resource {
-        self.resource
+    pub fn barrier() -> Self {
+        Self::write(Box::<[Resource]>::default())
     }
 
-    pub const fn access(self) -> Access {
+    pub const fn access(&self) -> Access {
         self.access
+    }
+
+    pub fn path(&self) -> &[Resource] {
+        &self.path
     }
 }
 
@@ -1365,10 +1363,16 @@ impl Table {
             .iter()
             .position(|meta| meta.identifier() == identifier)
             .and_then(column_index_value)?;
+        let meta = self
+            .metas
+            .get(usize::from(column_index))
+            .copied()
+            .expect("column index derived from metas should stay valid");
 
         Some(ColumnAccess::new(
             self.index,
             ColumnIndex::new(column_index),
+            meta.identifier(),
             access,
         ))
     }
@@ -1389,64 +1393,61 @@ impl Table {
         self.layout
     }
 
-    pub const fn store_resource(&self, store_index: StoreIndex) -> Resource {
-        Resource::store(store_index)
+    pub fn store_resource(&self, store_index: StoreIndex) -> Resource {
+        Resource::store(Some(store_index.into()))
     }
 
-    pub const fn table_resource(&self, store_index: StoreIndex) -> Resource {
-        Resource::table(store_index, self.index)
+    pub fn table_resource(&self, _store_index: StoreIndex) -> Resource {
+        Resource::table(Some(self.index.into()))
     }
 
-    pub const fn chunk_resource(
+    pub fn chunk_resource(&self, _store_index: StoreIndex, chunk_index: ChunkIndex) -> Resource {
+        Resource::chunk(Some(chunk_index.into()))
+    }
+
+    pub fn column_resource(
         &self,
-        store_index: StoreIndex,
-        chunk_index: ChunkIndex,
-    ) -> Resource {
-        Resource::chunk(store_index, self.index, chunk_index)
-    }
-
-    pub const fn column_resource(
-        &self,
-        store_index: StoreIndex,
-        chunk_index: ChunkIndex,
+        _store_index: StoreIndex,
+        _chunk_index: ChunkIndex,
         column_index: ColumnIndex,
     ) -> Resource {
-        Resource::column(store_index, self.index, chunk_index, column_index)
+        let meta = self
+            .meta(column_index)
+            .expect("table column resource should address an existing column");
+        Resource::column_by_identifier(meta.identifier(), Some(column_index.into()))
     }
 
-    pub const fn store_dependencies(
-        &self,
-        store_index: StoreIndex,
-        access: Access,
-    ) -> [Dependency; 1] {
-        [Dependency::new(self.store_resource(store_index), access)]
+    pub fn store_dependency(&self, store_index: StoreIndex, access: Access) -> Dependency {
+        Dependency::new(access, [self.store_resource(store_index)])
     }
 
-    pub const fn table_dependencies(
-        &self,
-        store_index: StoreIndex,
-        access: Access,
-    ) -> [Dependency; 2] {
-        [
-            Dependency::read(self.store_resource(store_index)),
-            Dependency::new(self.table_resource(store_index), access),
-        ]
+    pub fn table_dependency(&self, store_index: StoreIndex, access: Access) -> Dependency {
+        Dependency::new(
+            access,
+            [
+                self.store_resource(store_index),
+                self.table_resource(store_index),
+            ],
+        )
     }
 
-    pub const fn chunk_dependencies(
+    pub fn chunk_dependency(
         &self,
         store_index: StoreIndex,
         chunk_index: ChunkIndex,
         access: Access,
-    ) -> [Dependency; 3] {
-        [
-            Dependency::read(self.store_resource(store_index)),
-            Dependency::read(self.table_resource(store_index)),
-            Dependency::new(self.chunk_resource(store_index, chunk_index), access),
-        ]
+    ) -> Dependency {
+        Dependency::new(
+            access,
+            [
+                self.store_resource(store_index),
+                self.table_resource(store_index),
+                self.chunk_resource(store_index, chunk_index),
+            ],
+        )
     }
 
-    pub const fn column_dependency(
+    pub fn column_dependency(
         &self,
         store_index: StoreIndex,
         chunk_index: ChunkIndex,
@@ -1454,8 +1455,13 @@ impl Table {
         access: Access,
     ) -> Dependency {
         Dependency::new(
-            self.column_resource(store_index, chunk_index, column_index),
             access,
+            [
+                self.store_resource(store_index),
+                self.table_resource(store_index),
+                self.chunk_resource(store_index, chunk_index),
+                self.column_resource(store_index, chunk_index, column_index),
+            ],
         )
     }
 
@@ -1595,14 +1601,21 @@ impl Drop for Table {
 pub struct ColumnAccess {
     table_index: TableIndex,
     column_index: ColumnIndex,
+    identifier: TypeId,
     access: Access,
 }
 
 impl ColumnAccess {
-    pub const fn new(table_index: TableIndex, column_index: ColumnIndex, access: Access) -> Self {
+    pub const fn new(
+        table_index: TableIndex,
+        column_index: ColumnIndex,
+        identifier: TypeId,
+        access: Access,
+    ) -> Self {
         Self {
             table_index,
             column_index,
+            identifier,
             access,
         }
     }
@@ -1615,38 +1628,36 @@ impl ColumnAccess {
         self.column_index
     }
 
+    pub const fn identifier(self) -> TypeId {
+        self.identifier
+    }
+
     pub const fn access(self) -> Access {
         self.access
     }
 
-    pub const fn resource(self, store_index: StoreIndex, chunk_index: ChunkIndex) -> Resource {
-        Resource::column(
-            store_index,
-            self.table_index,
-            chunk_index,
-            self.column_index,
+    pub fn dependency(self, store_index: StoreIndex, chunk_index: ChunkIndex) -> Dependency {
+        Dependency::new(
+            self.access,
+            [
+                Resource::store(Some(store_index.into())),
+                Resource::table(Some(self.table_index.into())),
+                Resource::chunk(Some(chunk_index.into())),
+                Resource::column_by_identifier(self.identifier, Some(self.column_index.into())),
+            ],
         )
     }
 
-    pub const fn dependencies(
-        self,
-        store_index: StoreIndex,
-        chunk_index: ChunkIndex,
-    ) -> [Dependency; 4] {
-        [
-            Dependency::read(Resource::store(store_index)),
-            Dependency::read(Resource::table(store_index, self.table_index)),
-            Dependency::read(Resource::chunk(store_index, self.table_index, chunk_index)),
-            Dependency::new(
-                Resource::column(
-                    store_index,
-                    self.table_index,
-                    chunk_index,
-                    self.column_index,
-                ),
-                self.access,
-            ),
-        ]
+    pub fn dependency_with_wildcard_chunk(self, root_identifier: ResourceId) -> Dependency {
+        Dependency::new(
+            self.access,
+            [
+                Resource::store(Some(root_identifier)),
+                Resource::table(Some(self.table_index.into())),
+                Resource::chunk(None),
+                Resource::column_by_identifier(self.identifier, Some(self.column_index.into())),
+            ],
+        )
     }
 }
 
@@ -1679,37 +1690,64 @@ impl Catalog {
     where
         I: IntoIterator<Item = Meta>,
     {
-        let mut metas: Vec<_> = metas.into_iter().collect();
-        if metas.len() > u16::MAX as usize {
-            return Err(DefinitionError::TooManyColumns);
+        let (metas, table_shape_signature) = normalize_metas(metas)?;
+        self.intern_table_shape(&table_shape_signature)?;
+
+        self.build_table_from_metas(metas, configuration)
+    }
+
+    pub fn get_or_create_table<I>(
+        &mut self,
+        tables: &mut Vec<Table>,
+        metas: I,
+        configuration: Configuration,
+    ) -> Result<TableIndex, DefinitionError>
+    where
+        I: IntoIterator<Item = Meta>,
+    {
+        let (metas, table_shape_signature) = normalize_metas(metas)?;
+        self.intern_table_shape(&table_shape_signature)?;
+
+        if let Some(existing_table_index) = tables.iter().find_map(|table| {
+            table_shape_signature_for_table(table)
+                .eq(&table_shape_signature)
+                .then_some(table.index())
+        }) {
+            return Ok(existing_table_index);
         }
-        metas.sort_unstable_by_key(|meta| meta.identifier());
 
-        for meta_pair in metas.windows(2) {
-            if meta_pair[0].identifier() == meta_pair[1].identifier() {
-                return Err(DefinitionError::DuplicateMeta {
-                    meta_name: meta_pair[1].name(),
-                });
-            }
-        }
+        let table = self.build_table_from_metas(metas, configuration)?;
+        let table_index = table.index();
+        tables.push(table);
 
-        let table_shape_signature: Box<[MetaSignature]> = metas
-            .iter()
-            .copied()
-            .map(MetaSignature::from_meta)
-            .collect();
+        Ok(table_index)
+    }
 
+    fn intern_table_shape(
+        &mut self,
+        table_shape_signature: &[MetaSignature],
+    ) -> Result<(), DefinitionError> {
         if !self
             .table_shape_indices_by_signature
-            .contains_key(&table_shape_signature)
+            .contains_key(table_shape_signature)
         {
             let next_table_shape_index = u32::try_from(self.table_shape_count)
                 .map_err(|_| DefinitionError::TooManyTables)?;
-            self.table_shape_indices_by_signature
-                .insert(table_shape_signature, next_table_shape_index);
+            self.table_shape_indices_by_signature.insert(
+                table_shape_signature.to_vec().into_boxed_slice(),
+                next_table_shape_index,
+            );
             self.table_shape_count += 1;
         }
 
+        Ok(())
+    }
+
+    fn build_table_from_metas(
+        &mut self,
+        metas: Vec<Meta>,
+        configuration: Configuration,
+    ) -> Result<Table, DefinitionError> {
         let row_width = metas
             .iter()
             .filter(|meta| meta.is_inline())
@@ -1736,6 +1774,42 @@ impl Catalog {
             chunk_layouts,
         })
     }
+}
+
+fn normalize_metas<I>(metas: I) -> Result<(Vec<Meta>, Box<[MetaSignature]>), DefinitionError>
+where
+    I: IntoIterator<Item = Meta>,
+{
+    let mut metas: Vec<_> = metas.into_iter().collect();
+    if metas.len() > u16::MAX as usize {
+        return Err(DefinitionError::TooManyColumns);
+    }
+    metas.sort_unstable_by_key(|meta| meta.identifier());
+
+    for meta_pair in metas.windows(2) {
+        if meta_pair[0].identifier() == meta_pair[1].identifier() {
+            return Err(DefinitionError::DuplicateMeta {
+                meta_name: meta_pair[1].name(),
+            });
+        }
+    }
+
+    let table_shape_signature = metas
+        .iter()
+        .copied()
+        .map(MetaSignature::from_meta)
+        .collect();
+
+    Ok((metas, table_shape_signature))
+}
+
+fn table_shape_signature_for_table(table: &Table) -> Box<[MetaSignature]> {
+    table
+        .metas()
+        .iter()
+        .copied()
+        .map(MetaSignature::from_meta)
+        .collect()
 }
 
 fn region_layout_for_meta(meta: Meta, capacity: usize) -> Result<Option<Layout>, DefinitionError> {

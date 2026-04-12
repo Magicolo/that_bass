@@ -112,21 +112,28 @@ fn resource_generation_follows_the_table_chunk_and_column_identity_model() -> Re
             let column_access = table
                 .map_access::<Position>(Access::Read)
                 .expect("table should map Position access");
-            let resource = column_access.resource(store_index, ChunkIndex::new(chunk_index_value));
+            let dependency =
+                column_access.dependency(store_index, ChunkIndex::new(chunk_index_value));
 
-            assert_eq!(resource.store_index(), store_index);
-            assert_eq!(resource.table_index(), Some(table.index()));
+            assert_eq!(dependency.access(), Access::Read);
             assert_eq!(
-                resource.chunk_index(),
-                Some(ChunkIndex::new(chunk_index_value))
+                dependency.path(),
+                &[
+                    Resource::store(Some(store_index.into())),
+                    Resource::table(Some(table.index().into())),
+                    Resource::chunk(Some(ChunkIndex::new(chunk_index_value).into())),
+                    Resource::column_by_identifier(
+                        core::any::TypeId::of::<Position>(),
+                        Some(column_access.column_index().into()),
+                    ),
+                ]
             );
-            assert_eq!(resource.column_index(), Some(column_access.column_index()));
         })
         .map_or(Ok(()), |failure| Err(format!("{failure:?}")))
 }
 
 #[test]
-fn dependencies_for_column_access_include_read_ancestors_and_write_leaf() {
+fn dependencies_for_column_access_are_monotone_root_to_leaf_paths() {
     let mut catalog = Catalog::new();
     let table = catalog
         .register_table([Meta::of::<Position>()], Configuration::default())
@@ -136,22 +143,16 @@ fn dependencies_for_column_access_include_read_ancestors_and_write_leaf() {
         .expect("table should map Position access");
 
     assert_eq!(
-        column_access.dependencies(StoreIndex::new(0), ChunkIndex::new(2)),
-        [
-            Dependency::read(Resource::store(StoreIndex::new(0))),
-            Dependency::read(Resource::table(StoreIndex::new(0), table.index())),
-            Dependency::read(Resource::chunk(
-                StoreIndex::new(0),
-                table.index(),
-                ChunkIndex::new(2)
-            )),
-            Dependency::write(Resource::column(
-                StoreIndex::new(0),
-                table.index(),
-                ChunkIndex::new(2),
-                column_access.column_index(),
-            )),
-        ]
+        column_access.dependency(StoreIndex::new(0), ChunkIndex::new(2)),
+        Dependency::write([
+            Resource::store(Some(StoreIndex::new(0).into())),
+            Resource::table(Some(table.index().into())),
+            Resource::chunk(Some(ChunkIndex::new(2).into())),
+            Resource::column_by_identifier(
+                core::any::TypeId::of::<Position>(),
+                Some(column_access.column_index().into()),
+            ),
+        ])
     );
 }
 
@@ -166,23 +167,23 @@ fn metadata_can_name_broader_store_table_and_chunk_dependencies() {
     let chunk_index = ChunkIndex::new(2);
 
     assert_eq!(
-        table.store_dependencies(store_index, Access::Write),
-        [Dependency::write(Resource::store(store_index))]
+        table.store_dependency(store_index, Access::Write),
+        Dependency::write([Resource::store(Some(store_index.into()))])
     );
     assert_eq!(
-        table.table_dependencies(store_index, Access::Write),
-        [
-            Dependency::read(Resource::store(store_index)),
-            Dependency::write(Resource::table(store_index, table.index()))
-        ]
+        table.table_dependency(store_index, Access::Write),
+        Dependency::write([
+            Resource::store(Some(store_index.into())),
+            Resource::table(Some(table.index().into())),
+        ])
     );
     assert_eq!(
-        table.chunk_dependencies(store_index, chunk_index, Access::Write),
-        [
-            Dependency::read(Resource::store(store_index)),
-            Dependency::read(Resource::table(store_index, table.index())),
-            Dependency::write(Resource::chunk(store_index, table.index(), chunk_index))
-        ]
+        table.chunk_dependency(store_index, chunk_index, Access::Write),
+        Dependency::write([
+            Resource::store(Some(store_index.into())),
+            Resource::table(Some(table.index().into())),
+            Resource::chunk(Some(chunk_index.into())),
+        ])
     );
 }
 

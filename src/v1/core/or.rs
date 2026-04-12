@@ -32,6 +32,10 @@ impl<L, R> Or<L, R> {
     }
 
     #[inline]
+    /// # Safety
+    ///
+    /// The caller must guarantee that `self` is `Or::Left(_)`.
+    /// Calling this on `Or::Right(_)` is immediate undefined behavior.
     pub unsafe fn left_unchecked(self) -> L {
         debug_assert!(self.is_left());
         match self {
@@ -47,6 +51,10 @@ impl<L, R> Or<L, R> {
     }
 
     #[inline]
+    /// # Safety
+    ///
+    /// The caller must guarantee that `self` is `Or::Right(_)`.
+    /// Calling this on `Or::Left(_)` is immediate undefined behavior.
     pub unsafe fn right_unchecked(self) -> R {
         debug_assert!(self.is_right());
         match self {
@@ -149,10 +157,10 @@ impl<L: Copy, R: Copy> Or<&L, &R> {
     }
 }
 
-impl<L, R> Into<Result<L, R>> for Or<L, R> {
+impl<L, R> From<Or<L, R>> for Result<L, R> {
     #[inline]
-    fn into(self) -> Result<L, R> {
-        self.map_or(Ok, Err)
+    fn from(value: Or<L, R>) -> Self {
+        value.map_or(Ok, Err)
     }
 }
 
