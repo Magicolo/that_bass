@@ -3,12 +3,10 @@ use std::hint::black_box;
 use std::num::NonZeroUsize;
 use that_bass::v2::{
     command, query,
-    runtime::{
-        Callbacks, Executor, FunctionContext, Options, Outcome, ResolveContext, Seed, VisibleChunk,
-    },
+    runtime::{Callbacks, Executor, FunctionContext, Options, ResolveContext},
     schedule::Builder,
-    schema::{Catalog, ChunkIndex, Meta, Table, TableIndex},
-    Configuration,
+    schema::{Meta, Table},
+    Configuration, Store,
 };
 
 #[repr(C)]
@@ -37,13 +35,13 @@ fn benchmark_many_tiny_jobs(criterion: &mut Criterion) {
             &chunk_count,
             |bencher, chunk_count| {
                 bencher.iter(|| {
-                    let (schedule, seed) = scan_schedule(*chunk_count);
+                    let (schedule, mut store) = scan_schedule(*chunk_count);
                     let report = Executor::with_options(
                         Options::default()
                             .with_worker_count(non_zero_usize(4))
                             .with_record_trace(false),
                     )
-                    .run(&schedule, &seed, &NoopCallbacks);
+                    .run(&schedule, &mut store, &NoopCallbacks);
 
                     black_box(report);
                 });
@@ -64,17 +62,14 @@ fn benchmark_resolve_injection(criterion: &mut Criterion) {
             &chunk_count,
             |bencher, chunk_count| {
                 bencher.iter(|| {
-                    let (schedule, seed, position_table_index) = injection_schedule(*chunk_count);
-                    let callbacks = InjectionCallbacks {
-                        table_index: position_table_index,
-                        chunk_count: *chunk_count,
-                    };
+                    let (schedule, mut store, spawn_index) = injection_schedule(*chunk_count);
+                    let callbacks = InjectionCallbacks { spawn_index };
                     let report = Executor::with_options(
                         Options::default()
                             .with_worker_count(non_zero_usize(4))
                             .with_record_trace(false),
                     )
-                    .run(&schedule, &seed, &callbacks);
+                    .run(&schedule, &mut store, &callbacks);
 
                     black_box(report);
                 });
@@ -88,64 +83,67 @@ fn benchmark_resolve_injection(criterion: &mut Criterion) {
 struct NoopCallbacks;
 
 impl Callbacks for NoopCallbacks {
-    fn run_function(&self, _context: FunctionContext<'_>) {}
+    fn run_function(&self, _context: FunctionContext<'_, '_>) {}
 }
 
 struct InjectionCallbacks {
-    table_index: TableIndex,
-    chunk_count: usize,
+    spawn_index: that_bass::v2::schedule::FunctionIndex,
 }
 
 impl Callbacks for InjectionCallbacks {
-    fn run_function(&self, _context: FunctionContext<'_>) {}
-
-    fn run_resolve(&self, context: ResolveContext<'_>) -> Outcome {
-        if context.resolve().function_index().value() != 0 {
-            return Outcome::none();
+    fn run_function(&self, mut context: FunctionContext<'_, '_>) {
+        if context.function_index() == self.spawn_index {
+            context
+                .insert::<(Position,)>()
+                .expect("spawn function should expose its typed insert buffer")
+                .one((Position { x: 1.0, y: 2.0 },));
         }
-
-        Outcome::visible_chunks(
-            (0..self.chunk_count)
-                .map(|chunk_offset| {
-                    VisibleChunk::new(
-                        self.table_index,
-                        ChunkIndex::new(
-                            u32::try_from(chunk_offset)
-                                .expect("benchmark chunk count should fit in u32"),
-                        ),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )
     }
+
+    fn run_resolve(&self, _context: ResolveContext<'_>) {}
 }
 
-fn scan_schedule(chunk_count: usize) -> (that_bass::v2::schedule::Schedule, Seed) {
-    let mut catalog = Catalog::new();
-    let mut tables = vec![catalog
-        .register_table([Meta::of::<Position>()], test_configuration())
-        .expect("benchmark table registration should succeed")];
-    populate_chunks(&mut tables[0], chunk_count);
+fn scan_schedule(chunk_count: usize) -> (that_bass::v2::schedule::Schedule, Store) {
+    let mut store = Store::with_configuration(test_configuration());
+    let table_index = store
+        .register_table([Meta::of::<Position>()])
+        .expect("benchmark table registration should succeed");
+    populate_chunks(
+        store
+            .table_mut(table_index)
+            .expect("registered table should stay addressable"),
+        chunk_count,
+    );
 
-    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let mut builder = Builder::new(&mut store);
     builder.push_query(
         "scan",
         query::all(query::read::<Position>()).expect("benchmark query declaration should succeed"),
     );
     let schedule = builder.build();
-    let seed = Seed::from_tables(&tables);
 
-    (schedule, seed)
+    (schedule, store)
 }
 
-fn injection_schedule(chunk_count: usize) -> (that_bass::v2::schedule::Schedule, Seed, TableIndex) {
-    let mut catalog = Catalog::new();
-    let mut tables = vec![catalog
-        .register_table([Meta::of::<Spawner>()], test_configuration())
-        .expect("benchmark table registration should succeed")];
-    populate_chunks(&mut tables[0], chunk_count);
+fn injection_schedule(
+    chunk_count: usize,
+) -> (
+    that_bass::v2::schedule::Schedule,
+    Store,
+    that_bass::v2::schedule::FunctionIndex,
+) {
+    let mut store = Store::with_configuration(test_configuration());
+    let table_index = store
+        .register_table([Meta::of::<Spawner>()])
+        .expect("benchmark table registration should succeed");
+    populate_chunks(
+        store
+            .table_mut(table_index)
+            .expect("registered table should stay addressable"),
+        chunk_count,
+    );
 
-    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let mut builder = Builder::new(&mut store);
     let spawn_index = builder.push_query(
         "spawn",
         query::all(query::read::<Spawner>()).expect("benchmark query declaration should succeed"),
@@ -157,10 +155,10 @@ fn injection_schedule(chunk_count: usize) -> (that_bass::v2::schedule::Schedule,
     let position_table_index = builder
         .add_insert(spawn_index, command::Insert::<(Position,)>::new())
         .expect("typed insert should resolve to one known table");
+    let _ = position_table_index;
     let schedule = builder.build();
-    let seed = Seed::from_tables(&tables);
 
-    (schedule, seed, position_table_index)
+    (schedule, store, spawn_index)
 }
 
 fn populate_chunks(table: &mut Table, chunk_count: usize) {

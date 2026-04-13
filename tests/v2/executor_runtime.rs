@@ -3,12 +3,10 @@ use parking_lot::Mutex;
 use std::{num::NonZeroUsize, thread, time::Duration};
 use that_bass::v2::{
     command, query,
-    runtime::{
-        Callbacks, Executor, FunctionContext, Options, Outcome, ResolveContext, Seed, VisibleChunk,
-    },
+    runtime::{Callbacks, Executor, FunctionContext, Options, ResolveContext},
     schedule::Builder,
-    schema::{Catalog, ChunkIndex, Meta, Table, TableIndex},
-    Configuration,
+    schema::{ChunkIndex, Meta, Table, TableIndex},
+    Configuration, Store,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,26 +50,30 @@ fn executor_steals_individually_seeded_chunk_jobs() {
 
     let chunk_count = 32usize;
     let worker_count = 2usize;
-    let mut catalog = Catalog::new();
-    let mut tables = vec![catalog
-        .register_table([Meta::of::<Position>()], test_configuration())
-        .expect("table registration should succeed")];
-    populate_chunks(&mut tables[0], chunk_count);
+    let mut store = Store::with_configuration(test_configuration());
+    let table_index = store
+        .register_table([Meta::of::<Position>()])
+        .expect("table registration should succeed");
+    populate_chunks(
+        store
+            .table_mut(table_index)
+            .expect("registered table should stay addressable"),
+        chunk_count,
+    );
 
-    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let mut builder = Builder::new(&mut store);
     builder.push_query(
         "scan",
         query::all(query::read::<Position>()).expect("query declaration should succeed"),
     );
     let schedule = builder.build();
-    let seed = Seed::from_tables(&tables);
     let callbacks = Recorder::new(Duration::from_millis(1));
     let report = Executor::with_options(
         Options::default()
             .with_worker_count(non_zero_usize(worker_count))
             .with_record_trace(true),
     )
-    .run(&schedule, &seed, &callbacks);
+    .run(&schedule, &mut store, &callbacks);
 
     assert!(report.steal_count() > 0);
     assert!(
@@ -86,13 +88,18 @@ fn executor_steals_individually_seeded_chunk_jobs() {
 
 #[test]
 fn resolve_can_inject_new_chunk_jobs_for_later_functions_in_the_same_frame() {
-    let mut catalog = Catalog::new();
-    let mut tables = vec![catalog
-        .register_table([Meta::of::<Spawner>()], test_configuration())
-        .expect("table registration should succeed")];
-    populate_chunks(&mut tables[0], 1);
+    let mut store = Store::with_configuration(test_configuration());
+    let spawner_table_index = store
+        .register_table([Meta::of::<Spawner>()])
+        .expect("table registration should succeed");
+    populate_chunks(
+        store
+            .table_mut(spawner_table_index)
+            .expect("registered table should stay addressable"),
+        1,
+    );
 
-    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let mut builder = Builder::new(&mut store);
     let spawn_index = builder.push_query(
         "spawn",
         query::all(query::read::<Spawner>()).expect("query declaration should succeed"),
@@ -105,15 +112,14 @@ fn resolve_can_inject_new_chunk_jobs_for_later_functions_in_the_same_frame() {
         .add_insert(spawn_index, command::Insert::<(Position,)>::new())
         .expect("typed insert should resolve to one known table");
     let schedule = builder.build();
-    let seed = Seed::from_tables(&tables);
     let callbacks =
-        Recorder::with_injected_chunks(Duration::ZERO, position_table_index, [ChunkIndex::new(0)]);
+        Recorder::with_inserted_position(Duration::ZERO, spawn_index, Position { x: 1.0, y: 2.0 });
     let report = Executor::with_options(
         Options::default()
             .with_worker_count(non_zero_usize(2))
             .with_record_trace(true),
     )
-    .run(&schedule, &seed, &callbacks);
+    .run(&schedule, &mut store, &callbacks);
 
     let clamp_calls = callbacks.function_calls_for(clamp_index);
 
@@ -152,8 +158,8 @@ struct RecordedFunctionCall {
 
 struct Recorder {
     sleep_duration: Duration,
-    injected_table_index: Option<TableIndex>,
-    injected_chunk_indices: Vec<ChunkIndex>,
+    insert_on_function_index: Option<usize>,
+    inserted_position: Option<Position>,
     function_calls: Mutex<Vec<RecordedFunctionCall>>,
     resolve_calls: Mutex<usize>,
 }
@@ -162,22 +168,22 @@ impl Recorder {
     fn new(sleep_duration: Duration) -> Self {
         Self {
             sleep_duration,
-            injected_table_index: None,
-            injected_chunk_indices: Vec::new(),
+            insert_on_function_index: None,
+            inserted_position: None,
             function_calls: Mutex::new(Vec::new()),
             resolve_calls: Mutex::new(0),
         }
     }
 
-    fn with_injected_chunks(
+    fn with_inserted_position(
         sleep_duration: Duration,
-        table_index: TableIndex,
-        chunk_indices: impl IntoIterator<Item = ChunkIndex>,
+        function_index: that_bass::v2::schedule::FunctionIndex,
+        position: Position,
     ) -> Self {
         Self {
             sleep_duration,
-            injected_table_index: Some(table_index),
-            injected_chunk_indices: chunk_indices.into_iter().collect(),
+            insert_on_function_index: Some(function_index.value()),
+            inserted_position: Some(position),
             function_calls: Mutex::new(Vec::new()),
             resolve_calls: Mutex::new(0),
         }
@@ -205,9 +211,18 @@ impl Recorder {
 }
 
 impl Callbacks for Recorder {
-    fn run_function(&self, context: FunctionContext<'_>) {
+    fn run_function(&self, mut context: FunctionContext<'_, '_>) {
         if !self.sleep_duration.is_zero() {
             thread::sleep(self.sleep_duration);
+        }
+
+        if self.insert_on_function_index == Some(context.function_index().value()) {
+            context
+                .insert::<(Position,)>()
+                .expect("spawn function should expose its typed insert buffer")
+                .one((self
+                    .inserted_position
+                    .expect("inserted position should be configured"),));
         }
 
         self.function_calls.lock().push(RecordedFunctionCall {
@@ -217,20 +232,8 @@ impl Callbacks for Recorder {
         });
     }
 
-    fn run_resolve(&self, _context: ResolveContext<'_>) -> Outcome {
+    fn run_resolve(&self, _context: ResolveContext<'_>) {
         *self.resolve_calls.lock() += 1;
-
-        let Some(table_index) = self.injected_table_index else {
-            return Outcome::none();
-        };
-
-        Outcome::visible_chunks(
-            self.injected_chunk_indices
-                .iter()
-                .copied()
-                .map(|chunk_index| VisibleChunk::new(table_index, chunk_index))
-                .collect::<Vec<_>>(),
-        )
     }
 }
 
@@ -241,23 +244,27 @@ fn populate_chunks(table: &mut Table, chunk_count: usize) {
 }
 
 fn assert_seeded_chunk_execution(chunk_count: usize, worker_count: usize) {
-    let mut catalog = Catalog::new();
-    let mut tables = vec![catalog
-        .register_table([Meta::of::<Position>()], test_configuration())
-        .expect("table registration should succeed")];
-    populate_chunks(&mut tables[0], chunk_count);
+    let mut store = Store::with_configuration(test_configuration());
+    let table_index = store
+        .register_table([Meta::of::<Position>()])
+        .expect("table registration should succeed");
+    populate_chunks(
+        store
+            .table_mut(table_index)
+            .expect("registered table should stay addressable"),
+        chunk_count,
+    );
 
-    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let mut builder = Builder::new(&mut store);
     builder.push_query(
         "scan",
         query::all(query::read::<Position>()).expect("query declaration should succeed"),
     );
     let schedule = builder.build();
-    let seed = Seed::from_tables(&tables);
     let callbacks = Recorder::new(Duration::ZERO);
     let report =
         Executor::with_options(Options::default().with_worker_count(non_zero_usize(worker_count)))
-            .run(&schedule, &seed, &callbacks);
+            .run(&schedule, &mut store, &callbacks);
 
     assert_eq!(callbacks.function_call_count(), chunk_count);
     assert_eq!(callbacks.resolve_call_count(), 1);

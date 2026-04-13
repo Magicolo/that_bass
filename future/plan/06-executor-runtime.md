@@ -9,7 +9,7 @@ Read this file together with `future/plan/specification.md` and `future/plan/sta
 Implement the runtime executor:
 
 - worker pool,
-- local deques,
+- worker-local ready queues,
 - work stealing,
 - cheap runtime job objects,
 - family-aware affinity,
@@ -28,7 +28,8 @@ Implement the runtime executor:
 Assume:
 
 - fixed-size worker pool,
-- one local deque per worker,
+- one local ready queue per worker,
+- an optional shared ready queue for injected or broadly placed jobs,
 - work stealing when local work is exhausted,
 - many small job objects,
 - per-job readiness tracking,
@@ -189,7 +190,7 @@ Heavier reshaping remains a frame-boundary concern.
 ## Implementation Checklist
 
 1. Implement the worker pool.
-2. Implement local deques and stealing.
+2. Implement local ready queues and stealing.
 3. Implement pooled runtime job objects.
 4. Implement job readiness tracking.
 5. Implement affinity hints.
@@ -235,11 +236,16 @@ The current repository now implements this task in `src/v2/runtime.rs` with:
 
 - a public `Seed` built from the current table snapshot rather than direct live-store coupling,
 - a public `Executor` and `Options` surface,
-- worker-local FIFO deques plus work stealing through `crossbeam-deque`,
+- worker-local and shared `VecDeque` ready queues protected by `parking_lot::Mutex`,
+- stealing by taking independent jobs from other workers when the local queue is empty,
 - one runtime function job per seeded chunk and one runtime resolve job per function family,
 - explicit readiness tracking with successor lists and per-job predecessor counters,
-- resolve callbacks that report `VisibleChunk` values through `runtime::Outcome`,
+- runtime-owned command resolution that mutates `Store` directly and reports resulting
+  `VisibleChunk` values through `runtime::Outcome`,
 - same-frame injection of later function jobs when resolve phases expose new chunks,
+- resolve-to-function visibility edges also delaying the paired later resolve family so a
+  function with no seeded jobs cannot resolve before earlier resolves have had a chance to inject
+  new work into it,
 - runtime traces and summary metrics through `runtime::Report`,
 - and executor-focused examples, tests, and benchmarks.
 
@@ -257,10 +263,11 @@ The following concrete actions were taken to satisfy this task:
 - added `src/v2/runtime.rs` as the frame-local executor runtime,
 - introduced the `Seed`, `Executor`, `Callbacks`, `FunctionContext`, `ResolveContext`,
   `Outcome`, `VisibleChunk`, `Trace`, and `Report` runtime vocabulary,
-- implemented worker-local deques, injector-based ready queues, and stealing,
+- implemented worker-local and shared ready queues plus stealing,
 - implemented initial per-chunk job seeding from the frame snapshot,
 - implemented one batched resolve job per function family,
-- implemented resolve-driven injection of new downstream chunk jobs during the same frame,
+- implemented runtime-owned batched command resolution and resolve-driven injection of new
+  downstream chunk jobs during the same frame,
 - added `tests/v2/executor_runtime.rs` for seeded execution, stealing, and injection behavior,
 - added `examples/v2/executor_runtime.rs` to keep the public runtime surface visible,
 - added `benches/v2/runtime.rs` so many-job and injection-heavy executor costs are benchmarkable,

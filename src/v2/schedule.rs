@@ -11,10 +11,10 @@
 
 pub use crate::v2::query::Access;
 use crate::v2::{
-    command::{self, Columns},
+    command::{self, Initialize},
     query::{All, Analysis, Filter, QueryTuple},
-    schema::{Catalog, DefinitionError, Dependency, Resource, ResourceId, Table, TableIndex},
-    store::Configuration,
+    schema::{DefinitionError, Dependency, Resource, ResourceId, Table, TableIndex},
+    store::Store,
 };
 
 /// The ordering source that establishes one happens-before edge.
@@ -258,32 +258,19 @@ impl Schedule {
 /// A builder for one reusable schedule.
 pub struct Builder<'table> {
     root_identifier: ResourceId,
-    catalog: &'table mut Catalog,
-    tables: &'table mut Vec<Table>,
-    configuration: Configuration,
+    store: &'table mut Store,
     functions: Vec<PendingFunction>,
 }
 
 impl<'table> Builder<'table> {
-    pub fn new(
-        catalog: &'table mut Catalog,
-        tables: &'table mut Vec<Table>,
-        configuration: Configuration,
-    ) -> Self {
-        Self::with_root_identifier(catalog, tables, configuration, ResourceId::new(0))
+    pub fn new(store: &'table mut Store) -> Self {
+        Self::with_root_identifier(store, ResourceId::new(0))
     }
 
-    pub fn with_root_identifier(
-        catalog: &'table mut Catalog,
-        tables: &'table mut Vec<Table>,
-        configuration: Configuration,
-        root_identifier: ResourceId,
-    ) -> Self {
+    pub fn with_root_identifier(store: &'table mut Store, root_identifier: ResourceId) -> Self {
         Self {
             root_identifier,
-            catalog,
-            tables,
-            configuration,
+            store,
             functions: Vec::new(),
         }
     }
@@ -298,14 +285,15 @@ impl<'table> Builder<'table> {
         F: Filter + 'static,
     {
         let known_tables = self
-            .tables
+            .store
+            .tables()
             .iter()
             .filter(|table| query.matches_table(table))
             .map(Table::index)
             .collect::<Vec<_>>();
         let query_analysis = query.analysis().clone();
         let dependencies = collect_query_dependencies(
-            self.tables,
+            self.store.tables(),
             self.root_identifier,
             &known_tables,
             &query_analysis,
@@ -330,48 +318,22 @@ impl<'table> Builder<'table> {
         insert: command::Insert<T>,
     ) -> Result<TableIndex, Error>
     where
-        T: Columns,
+        T: command::Columns,
     {
         if function_index.value() >= self.functions.len() {
             return Err(Error::MissingFunction { function_index });
         }
 
-        let target_table_index =
-            self.catalog
-                .get_or_create_table(self.tables, T::metas(), self.configuration)?;
-        let target_table = self
-            .tables
-            .iter()
-            .find(|table| table.index() == target_table_index)
-            .expect("catalog get-or-create should leave the target table addressable");
+        let command_plan = insert.initialize(self.store)?;
+        let PlanLike::Insert(target_table_index) = plan_like(&command_plan) else {
+            unreachable!("insert initialization should always yield an insert plan");
+        };
         let dependency = Dependency::write([
             Resource::store(Some(self.root_identifier)),
             Resource::table(Some(target_table_index.into())),
         ]);
-        let command_plan = insert.plan(target_table_index);
 
-        for pending_function in &mut self.functions {
-            if pending_function.matches_table(target_table)
-                && !pending_function.known_tables.contains(&target_table_index)
-            {
-                pending_function.known_tables.push(target_table_index);
-                if let Some(query_analysis) = pending_function.query_analysis.as_ref() {
-                    for declared_access in query_analysis.declared_accesses() {
-                        let Some(column_access) = target_table.map_access_for_identifier(
-                            declared_access.identifier(),
-                            declared_access.access(),
-                        ) else {
-                            continue;
-                        };
-
-                        push_dependency_if_missing(
-                            &mut pending_function.dependencies,
-                            column_access.dependency_with_wildcard_chunk(self.root_identifier),
-                        );
-                    }
-                }
-            }
-        }
+        self.refresh_pending_queries_for_table(target_table_index);
 
         let function = self
             .functions
@@ -381,6 +343,41 @@ impl<'table> Builder<'table> {
         push_dependency_if_missing(&mut function.command_dependencies, dependency);
 
         Ok(target_table_index)
+    }
+
+    pub fn add_remove<F>(
+        &mut self,
+        function_index: FunctionIndex,
+        remove: command::Remove<F>,
+    ) -> Result<(), Error>
+    where
+        F: Filter,
+    {
+        if function_index.value() >= self.functions.len() {
+            return Err(Error::MissingFunction { function_index });
+        }
+
+        let command_plan = remove.initialize(self.store)?;
+        let PlanLike::Remove(allowed_table_indices) = plan_like(&command_plan) else {
+            unreachable!("remove initialization should always yield a remove plan");
+        };
+        let allowed_table_indices = allowed_table_indices.to_vec();
+        let function = self
+            .functions
+            .get_mut(function_index.value())
+            .expect("validated function index should stay addressable");
+        function.command_plans.push(command_plan);
+        for table_index in allowed_table_indices {
+            push_dependency_if_missing(
+                &mut function.command_dependencies,
+                Dependency::write([
+                    Resource::store(Some(self.root_identifier)),
+                    Resource::table(Some(table_index.into())),
+                ]),
+            );
+        }
+
+        Ok(())
     }
 
     pub fn build(self) -> Schedule {
@@ -406,8 +403,7 @@ impl<'table> Builder<'table> {
                 command_kinds: pending_function
                     .command_plans
                     .iter()
-                    .copied()
-                    .map(command::Plan::kind)
+                    .map(|plan| plan.kind())
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
                 resolve_index,
@@ -422,7 +418,7 @@ impl<'table> Builder<'table> {
                 command_kinds: pending_function
                     .command_plans
                     .into_iter()
-                    .map(command::Plan::kind)
+                    .map(|plan| plan.kind())
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             });
@@ -479,6 +475,50 @@ impl<'table> Builder<'table> {
             resolves: resolves.into_boxed_slice(),
             edges: edges.into_boxed_slice(),
         }
+    }
+
+    fn refresh_pending_queries_for_table(&mut self, table_index: TableIndex) {
+        let target_table = self
+            .store
+            .table(table_index)
+            .expect("refreshed target table should stay addressable");
+
+        for pending_function in &mut self.functions {
+            if pending_function.matches_table(target_table)
+                && !pending_function.known_tables.contains(&table_index)
+            {
+                pending_function.known_tables.push(table_index);
+                if let Some(query_analysis) = pending_function.query_analysis.as_ref() {
+                    for declared_access in query_analysis.declared_accesses() {
+                        let Some(column_access) = target_table.map_access_for_identifier(
+                            declared_access.identifier(),
+                            declared_access.access(),
+                        ) else {
+                            continue;
+                        };
+
+                        push_dependency_if_missing(
+                            &mut pending_function.dependencies,
+                            column_access.dependency_with_wildcard_chunk(self.root_identifier),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+enum PlanLike<'plan> {
+    Insert(TableIndex),
+    Remove(&'plan [TableIndex]),
+    Set,
+}
+
+fn plan_like(plan: &command::Plan) -> PlanLike<'_> {
+    match plan {
+        command::Plan::Insert(plan) => PlanLike::Insert(plan.table_index()),
+        command::Plan::Remove(plan) => PlanLike::Remove(plan.allowed_table_indices()),
+        command::Plan::Set => PlanLike::Set,
     }
 }
 

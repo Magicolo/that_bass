@@ -3,8 +3,8 @@ use std::num::NonZeroUsize;
 use that_bass::v2::{
     command, query,
     schedule::{self, Builder, Edge, Node, Ordering, Reason},
-    schema::{Catalog, Dependency, Meta, Resource, ResourceId, Table},
-    Configuration,
+    schema::{Dependency, Meta, Resource, ResourceId},
+    Configuration, Store,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,16 +121,12 @@ fn covers_handles_wildcards_and_prefix_paths() {
 
 #[test]
 fn schedule_builder_caches_known_tables_for_matching_queries() {
-    let mut catalog = Catalog::new();
-    let mut tables = make_tables(
-        &mut catalog,
-        [
-            [Meta::of::<Position>()].as_slice(),
-            [Meta::of::<Velocity>()].as_slice(),
-        ],
-    );
-    let position_table_index = tables[0].index();
-    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let mut store = make_store([
+        [Meta::of::<Position>()].as_slice(),
+        [Meta::of::<Velocity>()].as_slice(),
+    ]);
+    let position_table_index = store.tables()[0].index();
+    let mut builder = Builder::new(&mut store);
     let function_index = builder.push_query(
         "read position",
         query::all(query::read::<Position>()).expect("query declaration should succeed"),
@@ -148,9 +144,8 @@ fn schedule_builder_caches_known_tables_for_matching_queries() {
 
 #[test]
 fn insert_descriptor_exposes_one_known_target_table_before_first_execution() {
-    let mut catalog = Catalog::new();
-    let mut tables = make_tables(&mut catalog, [[Meta::of::<Position>()].as_slice()]);
-    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let mut store = make_store([[Meta::of::<Position>()].as_slice()]);
+    let mut builder = Builder::new(&mut store);
     let function_index = builder.push_query(
         "spawn",
         query::all(query::rows()).expect("query declaration should succeed"),
@@ -172,12 +167,10 @@ fn insert_descriptor_exposes_one_known_target_table_before_first_execution() {
 
     assert!(function.known_tables().contains(&target_table_index));
     assert_eq!(function.command_kinds(), &[command::Kind::Insert]);
-    assert_eq!(
-        resolve.command_plans(),
-        &[command::Plan::Insert {
-            table_index: target_table_index
-        }]
-    );
+    let [command::Plan::Insert(insert_plan)] = resolve.command_plans() else {
+        panic!("insert descriptor should plan one insert command");
+    };
+    assert_eq!(insert_plan.table_index(), target_table_index);
     assert_eq!(
         resolve.dependencies(),
         &[Dependency::write([
@@ -189,9 +182,8 @@ fn insert_descriptor_exposes_one_known_target_table_before_first_execution() {
 
 #[test]
 fn typed_insert_table_creation_refreshes_later_matching_function_caches() {
-    let mut catalog = Catalog::new();
-    let mut tables = make_tables(&mut catalog, [[Meta::of::<Velocity>()].as_slice()]);
-    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let mut store = make_store([[Meta::of::<Velocity>()].as_slice()]);
+    let mut builder = Builder::new(&mut store);
     let spawn_index = builder.push_query(
         "spawn",
         query::all(query::read::<Velocity>()).expect("query declaration should succeed"),
@@ -222,10 +214,46 @@ fn typed_insert_table_creation_refreshes_later_matching_function_caches() {
 }
 
 #[test]
+fn remove_descriptor_narrows_dependencies_through_its_filter() {
+    let mut store = make_store([
+        [Meta::of::<Position>()].as_slice(),
+        [Meta::of::<Velocity>()].as_slice(),
+    ]);
+    let position_table_index = store.tables()[0].index();
+    let mut builder = Builder::new(&mut store);
+    let function_index = builder.push_query(
+        "remove position rows",
+        query::all(query::rows()).expect("query declaration should succeed"),
+    );
+    builder
+        .add_remove(
+            function_index,
+            command::Remove::new(query::has::<Position>()),
+        )
+        .expect("remove planning should succeed");
+    let schedule = builder.build();
+    let resolve = schedule
+        .resolve_for_function(function_index)
+        .expect("paired resolve should exist");
+
+    let [command::Plan::Remove(remove_plan)] = resolve.command_plans() else {
+        panic!("remove descriptor should plan one remove command");
+    };
+
+    assert_eq!(remove_plan.allowed_table_indices(), &[position_table_index]);
+    assert_eq!(
+        resolve.dependencies(),
+        &[Dependency::write([
+            Resource::store(Some(schedule.root_identifier())),
+            Resource::table(Some(position_table_index.into())),
+        ])]
+    );
+}
+
+#[test]
 fn conflicting_functions_produce_resolve_to_function_edges() {
-    let mut catalog = Catalog::new();
-    let mut tables = make_tables(&mut catalog, [[Meta::of::<Position>()].as_slice()]);
-    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let mut store = make_store([[Meta::of::<Position>()].as_slice()]);
+    let mut builder = Builder::new(&mut store);
     let integrate_index = builder.push_query(
         "integrate",
         query::all(query::write::<Position>()).expect("query declaration should succeed"),
@@ -251,9 +279,8 @@ fn conflicting_functions_produce_resolve_to_function_edges() {
 
 #[test]
 fn conflicting_resolve_families_produce_resolve_to_resolve_edges() {
-    let mut catalog = Catalog::new();
-    let mut tables = make_tables(&mut catalog, [[Meta::of::<Position>()].as_slice()]);
-    let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+    let mut store = make_store([[Meta::of::<Position>()].as_slice()]);
+    let mut builder = Builder::new(&mut store);
     let first_function_index = builder.push_query(
         "spawn first",
         query::all(query::rows()).expect("query declaration should succeed"),
@@ -294,10 +321,9 @@ fn schedule_reuse_is_stable_after_chunk_count_changes() -> Result<(), String> {
 
     additional_chunk_count_generator
         .check(|additional_chunk_count| {
-            let mut catalog = Catalog::new();
-            let mut tables = make_tables(&mut catalog, [[Meta::of::<Position>()].as_slice()]);
-            let table_index = tables[0].index();
-            let mut builder = Builder::new(&mut catalog, &mut tables, test_configuration());
+            let mut store = make_store([[Meta::of::<Position>()].as_slice()]);
+            let table_index = store.tables()[0].index();
+            let mut builder = Builder::new(&mut store);
             let function_index = builder.push_query(
                 "read position",
                 query::all(query::read::<Position>()).expect("query declaration should succeed"),
@@ -306,7 +332,10 @@ fn schedule_reuse_is_stable_after_chunk_count_changes() -> Result<(), String> {
             let initial_edge_count = schedule.edge_count();
 
             for _ in 0..additional_chunk_count {
-                tables[0].push_chunk();
+                store
+                    .table_mut(table_index)
+                    .expect("scheduled table should stay addressable")
+                    .push_chunk();
             }
 
             assert_eq!(
@@ -321,18 +350,16 @@ fn schedule_reuse_is_stable_after_chunk_count_changes() -> Result<(), String> {
         .map_or(Ok(()), |failure| Err(format!("{failure:?}")))
 }
 
-fn make_tables<const TABLE_COUNT: usize>(
-    catalog: &mut Catalog,
-    meta_groups: [&[Meta]; TABLE_COUNT],
-) -> Vec<Table> {
-    meta_groups
-        .into_iter()
-        .map(|metas| {
-            catalog
-                .register_table(metas.iter().copied(), test_configuration())
-                .expect("table registration should succeed")
-        })
-        .collect()
+fn make_store<const TABLE_COUNT: usize>(meta_groups: [&[Meta]; TABLE_COUNT]) -> Store {
+    let mut store = Store::with_configuration(test_configuration());
+
+    for metas in meta_groups {
+        store
+            .register_table(metas.iter().copied())
+            .expect("table registration should succeed");
+    }
+
+    store
 }
 
 fn test_configuration() -> Configuration {

@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 use that_bass::v2::{
-    command::Remove,
+    command::RemoveRows,
     query,
     schema::{Catalog, Meta},
     Configuration,
@@ -54,7 +54,7 @@ pub fn run() {
     let lifetimes = table
         .slice::<Lifetime>(chunk_index)
         .expect("dense-prefix slice should succeed");
-    let mut remove = Remove::new();
+    let mut remove = RemoveRows::new();
 
     for (row, lifetime) in rows.zip(lifetimes) {
         if lifetime.frames_remaining == 0 {

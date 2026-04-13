@@ -5,27 +5,32 @@
 //!
 //! - per-chunk function jobs,
 //! - one batched resolve job per function family,
-//! - worker-local deques,
+//! - worker-local ready queues,
 //! - work stealing,
 //! - family-biased affinity,
 //! - and resolve-driven same-frame injection of newly visible chunk jobs.
 //!
 //! The runtime is intentionally narrower than a full store executor for now:
 //!
-//! - it consumes a frame `Seed` built from the current table snapshot,
+//! - it seeds one frame from the current `Store` snapshot,
 //! - it runs generic function and resolve callbacks,
-//! - and resolve callbacks report visible chunks explicitly instead of mutating the storage
-//!   directly.
+//! - and batched resolve phases mutate the store directly and report the resulting chunk states.
 
 use crate::v2::{
+    command,
     query::Access,
     schedule::{self, Function, FunctionIndex, Node, Resolve, ResolveIndex, Schedule},
-    schema::{ChunkIndex, ColumnIndex, Dependency, Resource, ResourceId, Table, TableIndex},
+    schema::{
+        ChunkIndex, ColumnIndex, Dependency, Resource, ResourceId, RowLayout, Rows, Table,
+        TableIndex,
+    },
+    store::Store,
 };
 use core::{any::TypeId, num::NonZeroUsize};
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    mem::take,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -94,13 +99,15 @@ pub enum Injection {
 pub struct VisibleChunk {
     table_index: TableIndex,
     chunk_index: ChunkIndex,
+    row_count: usize,
 }
 
 impl VisibleChunk {
-    pub const fn new(table_index: TableIndex, chunk_index: ChunkIndex) -> Self {
+    pub const fn new(table_index: TableIndex, chunk_index: ChunkIndex, row_count: usize) -> Self {
         Self {
             table_index,
             chunk_index,
+            row_count,
         }
     }
 
@@ -110,6 +117,10 @@ impl VisibleChunk {
 
     pub const fn chunk_index(self) -> ChunkIndex {
         self.chunk_index
+    }
+
+    pub const fn row_count(self) -> usize {
+        self.row_count
     }
 }
 
@@ -139,23 +150,22 @@ impl Outcome {
 
 /// The runnable callback surface consumed by the executor runtime.
 pub trait Callbacks: Send + Sync + 'static {
-    fn run_function(&self, context: FunctionContext<'_>);
+    fn run_function(&self, context: FunctionContext<'_, '_>);
 
-    fn run_resolve(&self, _context: ResolveContext<'_>) -> Outcome {
-        Outcome::none()
-    }
+    fn run_resolve(&self, _context: ResolveContext<'_>) {}
 }
 
 /// Context for one per-chunk function job.
-#[derive(Debug, Clone, Copy)]
-pub struct FunctionContext<'schedule> {
+pub struct FunctionContext<'schedule, 'job> {
     function: &'schedule Function,
     table_index: TableIndex,
     chunk_index: ChunkIndex,
     worker_index: usize,
+    rows: Rows<'job>,
+    command_buffer: &'job mut command::Buffer,
 }
 
-impl<'schedule> FunctionContext<'schedule> {
+impl<'schedule, 'job> FunctionContext<'schedule, 'job> {
     pub const fn function(&self) -> &'schedule Function {
         self.function
     }
@@ -174,6 +184,21 @@ impl<'schedule> FunctionContext<'schedule> {
 
     pub const fn worker_index(&self) -> usize {
         self.worker_index
+    }
+
+    pub const fn rows(&self) -> Rows<'job> {
+        self.rows
+    }
+
+    pub fn insert<T>(&mut self) -> Option<command::InsertRows<'_, T>>
+    where
+        T: command::Columns,
+    {
+        self.command_buffer.insert::<T>()
+    }
+
+    pub fn remove(&mut self) -> Option<&mut command::RemoveRows> {
+        self.command_buffer.remove()
     }
 }
 
@@ -315,13 +340,27 @@ impl Executor {
         self.options
     }
 
-    pub fn run<C>(&self, schedule: &Schedule, seed: &Seed, callbacks: &C) -> Report
+    pub fn run<C>(&self, schedule: &Schedule, store: &mut Store, callbacks: &C) -> Report
+    where
+        C: Callbacks,
+    {
+        let seed = Seed::from_store(store);
+        self.run_seeded(schedule, &seed, store, callbacks)
+    }
+
+    pub fn run_seeded<C>(
+        &self,
+        schedule: &Schedule,
+        seed: &Seed,
+        store: &mut Store,
+        callbacks: &C,
+    ) -> Report
     where
         C: Callbacks,
     {
         let worker_count = self.options.worker_count.get();
         let queues = Queues::new(worker_count);
-        let shared = Arc::new(Shared::new(schedule, seed, self.options));
+        let shared = Arc::new(Shared::new(schedule, seed, store, self.options));
         let build = Build::new(schedule, seed, worker_count).seed_ready_jobs(&queues, &shared);
 
         thread::scope(|scope| {
@@ -358,6 +397,10 @@ impl Seed {
         Self::default()
     }
 
+    pub fn from_store(store: &Store) -> Self {
+        Self::from_tables(store.tables())
+    }
+
     pub fn from_tables(tables: &[Table]) -> Self {
         let tables_by_index = tables
             .iter()
@@ -382,13 +425,20 @@ impl Seed {
                     .map(|chunk| chunk.chunk_index())
                     .collect::<Vec<_>>()
                     .into_boxed_slice();
+                let chunk_row_counts = table
+                    .chunks()
+                    .iter()
+                    .map(|chunk| (chunk.chunk_index(), chunk.count()))
+                    .collect::<BTreeMap<_, _>>();
 
                 (
                     table.index(),
                     SeedTable {
                         table_index: table.index(),
                         chunk_indices,
+                        chunk_row_counts,
                         column_indices_by_identifier,
+                        row_layout: table.row_layout(),
                     },
                 )
             })
@@ -410,7 +460,9 @@ impl Seed {
 struct SeedTable {
     table_index: TableIndex,
     chunk_indices: Box<[ChunkIndex]>,
+    chunk_row_counts: BTreeMap<ChunkIndex, usize>,
     column_indices_by_identifier: BTreeMap<TypeId, ColumnIndex>,
+    row_layout: RowLayout,
 }
 
 impl SeedTable {
@@ -436,6 +488,14 @@ impl SeedTable {
                 Resource::column_by_identifier(identifier, Some(column_index.into())),
             ],
         ))
+    }
+
+    fn row_layout(&self) -> RowLayout {
+        self.row_layout
+    }
+
+    fn chunk_row_count(&self, chunk_index: ChunkIndex) -> Option<usize> {
+        self.chunk_row_counts.get(&chunk_index).copied()
     }
 }
 
@@ -481,15 +541,17 @@ struct Job {
 #[derive(Debug)]
 struct JobRecord {
     job: Job,
+    command_buffer: Mutex<command::Buffer>,
     pending_predecessor_count: AtomicUsize,
     successor_indices: Mutex<Vec<JobIndex>>,
     completed: AtomicBool,
 }
 
 impl JobRecord {
-    fn new(job: Job) -> Self {
+    fn new(job: Job, command_buffer: command::Buffer) -> Self {
         Self {
             job,
+            command_buffer: Mutex::new(command_buffer),
             pending_predecessor_count: AtomicUsize::new(0),
             successor_indices: Mutex::new(Vec::new()),
             completed: AtomicBool::new(false),
@@ -518,12 +580,15 @@ impl Queues {
     }
 }
 
-struct Shared<'schedule, 'seed> {
+struct Shared<'schedule, 'seed, 'store> {
     schedule: &'schedule Schedule,
     seed: &'seed Seed,
+    store: Mutex<&'store mut Store>,
     options: Options,
     jobs: RwLock<Vec<Arc<JobRecord>>>,
     function_chunk_keys: Mutex<BTreeSet<FunctionChunkKey>>,
+    function_job_indices_by_function: RwLock<Vec<Vec<JobIndex>>>,
+    chunk_row_counts: Mutex<BTreeMap<(TableIndex, ChunkIndex), usize>>,
     resolve_job_indices: RwLock<Vec<Option<JobIndex>>>,
     ready_job_count: AtomicUsize,
     max_ready_job_count: AtomicUsize,
@@ -538,22 +603,42 @@ struct Shared<'schedule, 'seed> {
     trace: Mutex<Vec<Trace>>,
 }
 
-impl<'schedule, 'seed> Shared<'schedule, 'seed> {
-    fn new(schedule: &'schedule Schedule, seed: &'seed Seed, options: Options) -> Self {
+impl<'schedule, 'seed, 'store> Shared<'schedule, 'seed, 'store> {
+    fn new(
+        schedule: &'schedule Schedule,
+        seed: &'seed Seed,
+        store: &'store mut Store,
+        options: Options,
+    ) -> Self {
         let resolve_job_indices = (0..schedule.resolve_count())
             .map(|_| None)
             .collect::<Vec<_>>();
+        let function_job_indices_by_function = vec![Vec::new(); schedule.function_count()];
         let worker_execution_counts = (0..options.worker_count.get())
             .map(|_| AtomicUsize::new(0))
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        let chunk_row_counts = seed
+            .tables_by_index
+            .iter()
+            .flat_map(|(table_index, seed_table)| {
+                seed_table
+                    .chunk_row_counts
+                    .iter()
+                    .map(|(chunk_index, row_count)| ((*table_index, *chunk_index), *row_count))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<BTreeMap<_, _>>();
 
         Self {
             schedule,
             seed,
+            store: Mutex::new(store),
             options,
             jobs: RwLock::new(Vec::new()),
             function_chunk_keys: Mutex::new(BTreeSet::new()),
+            function_job_indices_by_function: RwLock::new(function_job_indices_by_function),
+            chunk_row_counts: Mutex::new(chunk_row_counts),
             resolve_job_indices: RwLock::new(resolve_job_indices),
             ready_job_count: AtomicUsize::new(0),
             max_ready_job_count: AtomicUsize::new(0),
@@ -569,10 +654,14 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
         }
     }
 
-    fn append_job(&self, job: Job) -> JobIndex {
+    fn set_function_job_indices(&self, function_job_indices_by_function: Vec<Vec<JobIndex>>) {
+        *self.function_job_indices_by_function.write() = function_job_indices_by_function;
+    }
+
+    fn append_job(&self, job: Job, command_buffer: command::Buffer) -> JobIndex {
         let mut jobs = self.jobs.write();
         let job_index = JobIndex::new(jobs.len());
-        jobs.push(Arc::new(JobRecord::new(job)));
+        jobs.push(Arc::new(JobRecord::new(job, command_buffer)));
         self.created_job_count.fetch_add(1, Ordering::Relaxed);
         self.remaining_job_count.fetch_add(1, Ordering::Relaxed);
 
@@ -594,6 +683,27 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
 
     fn set_resolve_job_index(&self, resolve_index: ResolveIndex, job_index: JobIndex) {
         self.resolve_job_indices.write()[resolve_index.value()] = Some(job_index);
+    }
+
+    fn rows_for_chunk<'job>(
+        &self,
+        table_index: TableIndex,
+        chunk_index: ChunkIndex,
+    ) -> Option<Rows<'job>> {
+        let seed_table = self.seed.table(table_index)?;
+        let row_count = self
+            .chunk_row_counts
+            .lock()
+            .get(&(table_index, chunk_index))
+            .copied()
+            .or_else(|| seed_table.chunk_row_count(chunk_index))?;
+
+        Some(Rows::generated(
+            table_index,
+            chunk_index,
+            seed_table.row_layout(),
+            row_count,
+        ))
     }
 
     fn push_ready_local(&self, local_queue: &Mutex<VecDeque<JobIndex>>, job_index: JobIndex) {
@@ -675,6 +785,55 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
         }
     }
 
+    fn resolve_commands(
+        &self,
+        resolve_index: ResolveIndex,
+    ) -> Result<Outcome, command::ResolveError> {
+        let resolve = self
+            .schedule
+            .resolve(resolve_index)
+            .expect("runtime resolve should exist");
+        let function_job_indices = self.function_job_indices_by_function.read();
+        let function_job_indices = function_job_indices
+            .get(resolve.function_index().value())
+            .expect("resolve function index should stay addressable");
+        let mut batch = command::Batch::new(resolve.command_plans());
+
+        for function_job_index in function_job_indices.iter().copied() {
+            let job_record = self.job(function_job_index);
+            let command_buffer = take(&mut *job_record.command_buffer.lock());
+            batch.merge(command_buffer);
+        }
+
+        if batch.is_empty() {
+            return Ok(Outcome::none());
+        }
+
+        let changed_chunks = {
+            let mut store = self.store.lock();
+            batch.resolve_on(*store)?
+        };
+        {
+            let mut chunk_row_counts = self.chunk_row_counts.lock();
+            for chunk_state in changed_chunks.iter().copied() {
+                chunk_row_counts.insert(
+                    (chunk_state.table_index(), chunk_state.chunk_index()),
+                    chunk_state.row_count(),
+                );
+            }
+        }
+
+        Ok(Outcome::visible_chunks(
+            changed_chunks.into_vec().into_iter().map(|chunk_state| {
+                VisibleChunk::new(
+                    chunk_state.table_index(),
+                    chunk_state.chunk_index(),
+                    chunk_state.row_count(),
+                )
+            }),
+        ))
+    }
+
     fn inject_from_resolve(
         &self,
         resolve_index: ResolveIndex,
@@ -721,7 +880,11 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
                     function.index(),
                     visible_chunk.chunk_index(),
                 );
-                if dependencies.is_empty() && function.query_analysis().is_some() {
+                if dependencies.is_empty()
+                    && function
+                        .query_analysis()
+                        .is_some_and(|analysis| !analysis.declared_accesses().is_empty())
+                {
                     continue;
                 }
 
@@ -730,17 +893,26 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
 
                 let affinity_worker_index =
                     function.index().value() % self.options.worker_count.get();
-                let job_index = self.append_job(Job {
-                    kind: JobKind::Function {
-                        function_index: function.index(),
-                        table_index: visible_chunk.table_index(),
-                        chunk_index: visible_chunk.chunk_index(),
+                let resolve = self
+                    .schedule
+                    .resolve_for_function(function.index())
+                    .expect("every scheduled function should have a paired resolve family");
+                let job_index = self.append_job(
+                    Job {
+                        kind: JobKind::Function {
+                            function_index: function.index(),
+                            table_index: visible_chunk.table_index(),
+                            chunk_index: visible_chunk.chunk_index(),
+                        },
+                        dependencies,
+                        affinity_worker_index,
                     },
-                    dependencies,
-                    affinity_worker_index,
-                });
+                    command::Buffer::new(resolve.command_plans()),
+                );
                 self.function_job_count.fetch_add(1, Ordering::Relaxed);
                 self.injected_job_count.fetch_add(1, Ordering::Relaxed);
+                self.function_job_indices_by_function.write()[function.index().value()]
+                    .push(job_index);
 
                 let paired_resolve_index = function.resolve_index();
                 self.add_edge(job_index, self.resolve_job_index(paired_resolve_index));
@@ -804,17 +976,17 @@ impl<'schedule, 'seed> Shared<'schedule, 'seed> {
     }
 }
 
-struct Build<'schedule, 'seed, 'shared> {
+struct Build<'schedule, 'seed, 'store, 'shared> {
     schedule: &'schedule Schedule,
     seed: &'seed Seed,
     worker_count: usize,
-    shared: Option<&'shared Arc<Shared<'schedule, 'seed>>>,
+    shared: Option<&'shared Arc<Shared<'schedule, 'seed, 'store>>>,
     ready_job_indices: Vec<JobIndex>,
     function_job_indices_by_function: Vec<Vec<JobIndex>>,
     resolve_job_count: usize,
 }
 
-impl<'schedule, 'seed, 'shared> Build<'schedule, 'seed, 'shared> {
+impl<'schedule, 'seed, 'store, 'shared> Build<'schedule, 'seed, 'store, 'shared> {
     fn new(schedule: &'schedule Schedule, seed: &'seed Seed, worker_count: usize) -> Self {
         Self {
             schedule,
@@ -830,7 +1002,7 @@ impl<'schedule, 'seed, 'shared> Build<'schedule, 'seed, 'shared> {
     fn seed_ready_jobs(
         mut self,
         queues: &Queues,
-        shared: &'shared Arc<Shared<'schedule, 'seed>>,
+        shared: &'shared Arc<Shared<'schedule, 'seed, 'store>>,
     ) -> Self {
         self.shared = Some(shared);
 
@@ -843,6 +1015,8 @@ impl<'schedule, 'seed, 'shared> Build<'schedule, 'seed, 'shared> {
         }
 
         self.add_initial_edges();
+        self.shared()
+            .set_function_job_indices(self.function_job_indices_by_function.clone());
 
         for job_index in self.ready_job_indices.iter().copied() {
             let job_record = shared.job(job_index);
@@ -865,20 +1039,31 @@ impl<'schedule, 'seed, 'shared> Build<'schedule, 'seed, 'shared> {
                     function.index(),
                     chunk_index,
                 );
-                if dependencies.is_empty() && function.query_analysis().is_some() {
+                if dependencies.is_empty()
+                    && function
+                        .query_analysis()
+                        .is_some_and(|analysis| !analysis.declared_accesses().is_empty())
+                {
                     continue;
                 }
 
                 let affinity_worker_index = function.index().value() % self.worker_count;
-                let job_index = self.shared().append_job(Job {
-                    kind: JobKind::Function {
-                        function_index: function.index(),
-                        table_index,
-                        chunk_index,
+                let resolve = self
+                    .schedule
+                    .resolve_for_function(function.index())
+                    .expect("every scheduled function should have a paired resolve family");
+                let job_index = self.shared().append_job(
+                    Job {
+                        kind: JobKind::Function {
+                            function_index: function.index(),
+                            table_index,
+                            chunk_index,
+                        },
+                        dependencies,
+                        affinity_worker_index,
                     },
-                    dependencies,
-                    affinity_worker_index,
-                });
+                    command::Buffer::new(resolve.command_plans()),
+                );
 
                 self.shared()
                     .function_chunk_keys
@@ -897,13 +1082,16 @@ impl<'schedule, 'seed, 'shared> Build<'schedule, 'seed, 'shared> {
     }
 
     fn populate_resolve_job(&mut self, resolve: &Resolve) {
-        let job_index = self.shared().append_job(Job {
-            kind: JobKind::Resolve {
-                resolve_index: resolve.index(),
+        let job_index = self.shared().append_job(
+            Job {
+                kind: JobKind::Resolve {
+                    resolve_index: resolve.index(),
+                },
+                dependencies: resolve.dependencies().to_vec().into_boxed_slice(),
+                affinity_worker_index: resolve.function_index().value() % self.worker_count,
             },
-            dependencies: resolve.dependencies().to_vec().into_boxed_slice(),
-            affinity_worker_index: resolve.function_index().value() % self.worker_count,
-        });
+            command::Buffer::default(),
+        );
 
         self.shared()
             .set_resolve_job_index(resolve.index(), job_index);
@@ -928,7 +1116,19 @@ impl<'schedule, 'seed, 'shared> Build<'schedule, 'seed, 'shared> {
                 ) => {
                     let predecessor_job_index =
                         self.shared().resolve_job_index(predecessor_resolve_index);
+                    let successor_resolve_job_index = self.shared().resolve_job_index(
+                        self.schedule
+                            .function(successor_function_index)
+                            .expect("scheduled successor function should exist")
+                            .resolve_index(),
+                    );
                     let predecessor_record = self.shared().job(predecessor_job_index);
+
+                    // A predecessor resolve may expose new chunks for the successor function. Even
+                    // when the successor currently has no seeded jobs, its paired resolve must stay
+                    // blocked until that predecessor has had a chance to inject them.
+                    self.shared()
+                        .add_edge(predecessor_job_index, successor_resolve_job_index);
 
                     for function_job_index in
                         &self.function_job_indices_by_function[successor_function_index.value()]
@@ -976,17 +1176,17 @@ impl<'schedule, 'seed, 'shared> Build<'schedule, 'seed, 'shared> {
         }
     }
 
-    fn shared(&self) -> &Arc<Shared<'schedule, 'seed>> {
+    fn shared(&self) -> &Arc<Shared<'schedule, 'seed, 'store>> {
         self.shared
             .as_ref()
             .expect("build should have a shared runtime before populating jobs")
     }
 }
 
-fn worker_loop<'schedule, 'seed, C>(
+fn worker_loop<'schedule, 'seed, 'store, C>(
     worker_index: usize,
     queues: &Queues,
-    shared: &Arc<Shared<'schedule, 'seed>>,
+    shared: &Arc<Shared<'schedule, 'seed, 'store>>,
     callbacks: &C,
 ) where
     C: Callbacks,
@@ -1012,12 +1212,19 @@ fn worker_loop<'schedule, 'seed, C>(
                     .schedule
                     .function(*function_index)
                     .expect("runtime function should exist");
+                let rows = shared
+                    .rows_for_chunk(*table_index, *chunk_index)
+                    .expect("runtime function chunk should have a visible row state");
+                let mut command_buffer = job_record.command_buffer.lock();
                 callbacks.run_function(FunctionContext {
                     function,
                     table_index: *table_index,
                     chunk_index: *chunk_index,
                     worker_index,
+                    rows,
+                    command_buffer: &mut command_buffer,
                 });
+                drop(command_buffer);
                 shared.record_trace(Trace {
                     worker_index,
                     kind: TraceKind::Function {
@@ -1033,7 +1240,10 @@ fn worker_loop<'schedule, 'seed, C>(
                     .resolve(*resolve_index)
                     .expect("runtime resolve should exist");
                 let started_at = Instant::now();
-                let outcome = callbacks.run_resolve(ResolveContext {
+                let outcome = shared
+                    .resolve_commands(*resolve_index)
+                    .expect("resolve command application should succeed");
+                callbacks.run_resolve(ResolveContext {
                     resolve,
                     worker_index,
                 });
@@ -1052,10 +1262,10 @@ fn worker_loop<'schedule, 'seed, C>(
     }
 }
 
-fn pop_ready_job<'schedule, 'seed>(
+fn pop_ready_job<'schedule, 'seed, 'store>(
     worker_index: usize,
     queues: &Queues,
-    shared: &Shared<'schedule, 'seed>,
+    shared: &Shared<'schedule, 'seed, 'store>,
 ) -> Option<JobIndex> {
     if let Some(job_index) = queues.local_queue(worker_index).lock().pop_back() {
         shared.note_ready_pop();

@@ -70,7 +70,7 @@ Important design change:
 At minimum, the rewrite should define command families for:
 
 - `Insert<T>`
-- `Remove<Row<'job>>` for keyless tables, currently surfaced as `command::Remove<'job>`
+- `Remove<Row<'job>>` for keyless tables, currently surfaced as `command::RemoveRows`
 - `Remove<Key>` for keyed tables later
 - future deferred value writes such as `Set<T>` or `Patch<T>`
 - future `Destroy`, `Add`, `RemoveComponent`, `Modify`, and event emission hooks
@@ -243,7 +243,7 @@ and:
 schedule.push(
     query::all((query::rows(), query::read::<Lifetime>()))
         .expect("query declaration should succeed"),
-    |rows, lifetimes, mut remove: Remove| {
+    |rows, lifetimes, mut remove: RemoveRows| {
         for (row, lifetime) in rows.zip(lifetimes) {
             if lifetime.done {
                 remove.one(row);
@@ -305,3 +305,65 @@ This task is done when:
 - one function's command buffers are collected and resolved in batch,
 - later functions can observe resolved changes in the same frame,
 - insert and remove semantics are both explicit and testable.
+
+## Implementation Review
+
+The current repository now implements this task across `src/v2/command.rs`,
+`src/v2/runtime.rs`, `src/v2/schedule.rs`, and `src/v2/store.rs` with:
+
+- a store-centric initialization trait, `command::Initialize`, for injected capabilities,
+- typed `Insert<T>` initialization through `Store::get_or_create_table(...)`,
+- filtered `Remove<F>` initialization that narrows its affected tables before first execution,
+- one local `command::Buffer` per runtime function job,
+- typed insert row recording through `InsertRows<'_, T>`,
+- keyless remove recording through `RemoveRows`,
+- one batched resolve phase per scheduled function,
+- runtime-owned command resolution that mutates `Store` directly and reports resulting visible
+  chunk states,
+- same-frame downstream chunk injection after successful insert resolution,
+- and focused tests and examples that exercise self-visibility, later visibility, filtered
+  remove planning, and one-resolve-many-buffers behavior.
+
+Important implementation choice:
+
+- the runtime, not the user callback surface, owns structural resolution,
+- so `run_resolve(...)` is observational only,
+- while the executor gathers all per-job buffers for the scheduled function, merges them by
+  command plan, mutates the store, and only then exposes newly visible chunks to later jobs.
+- the paired resolve family of a later function is also kept behind earlier resolve-to-function
+  visibility edges, so a function that starts with no seeded jobs cannot resolve before injected
+  same-frame work has had a chance to run.
+
+Selected scope boundary:
+
+- no new tables are created during frame execution,
+- table creation or lookup happens during initialization when the function is registered,
+- and mid-frame dynamism is limited to chunk growth, chunk shrinkage, and downstream chunk-job
+  injection for already-known tables.
+
+## Actions Taken In The Repository
+
+The following concrete actions were taken to satisfy this task:
+
+- added `command::Initialize` so injected capabilities can perform one-time setup against
+  `&mut Store`,
+- moved typed insert table discovery to initialization-time `Store::get_or_create_table(...)`,
+- added filtered remove planning through `command::Remove<F>`,
+- changed `Columns::metas()` to return iterators and generated tuple implementations up to arity
+  `8`,
+- implemented per-job `command::Buffer` instances with typed insert and remove recording,
+- implemented batched function-level insert resolution with existing-chunk fill plus new chunk
+  allocation,
+- implemented batched keyless remove resolution with per-table grouping, row sorting,
+  deduplication, and descending `swap_remove`,
+- updated the runtime so resolve jobs consume the buffered commands and emit real structural
+  outcomes instead of synthetic callback-supplied ones,
+- updated schedule planning so resolve dependencies belong to the command plans that actually
+  mutate tables,
+- added `tests/v2/command_resolution.rs` for same-frame visibility, filtered remove behavior, and
+  one-resolve-many-buffers coverage,
+- added `examples/v2/command_resolution.rs` so the Task 07 public surface remains runnable.
+
+Current status:
+
+- implemented in the current repository layout.

@@ -13,7 +13,7 @@ Why this folder exists:
 - it gives a newcomer one concrete place to see the current `v2` public API in use,
 - it makes public-surface drift visible during the rewrite,
 - it provides a lightweight integration point that should evolve with the rewrite tasks.
-- it now includes the Task 00 foundation surface, the Task 01 `Meta`/table catalog surface, the Task 02 chunk-layout surface, the Task 03 keyless-row surface, the Task 04 query surface, the Task 05 schedule-builder surface, and the Task 06 executor-runtime surface.
+- it now includes the Task 00 foundation surface, the Task 01 `Meta`/table catalog surface, the Task 02 chunk-layout surface, the Task 03 keyless-row surface, the Task 04 query surface, the Task 05 schedule-builder surface, the Task 06 executor-runtime surface, and the Task 07 command-resolution surface.
 
 Maintenance rule:
 

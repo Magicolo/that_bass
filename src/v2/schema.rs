@@ -438,6 +438,13 @@ pub struct Row<'job> {
 }
 
 impl<'job> Row<'job> {
+    pub const fn from_packed(packed: u64) -> Self {
+        Self {
+            packed,
+            marker: PhantomData,
+        }
+    }
+
     pub const fn table_index(self) -> TableIndex {
         TableIndex::new((self.packed >> u32::BITS) as u32)
     }
@@ -482,6 +489,15 @@ impl<'job> Rows<'job> {
             count,
             marker: PhantomData,
         }
+    }
+
+    pub(crate) const fn generated(
+        table_index: TableIndex,
+        chunk_index: ChunkIndex,
+        row_layout: RowLayout,
+        count: usize,
+    ) -> Self {
+        Self::new(table_index, chunk_index, row_layout, 0, count)
     }
 
     pub const fn table_index(self) -> TableIndex {
@@ -953,6 +969,11 @@ pub struct Chunk {
     pointers: Box<[NonNull<u8>]>,
 }
 
+// Safety: `Chunk` owns its allocation and raw pointers exclusively. Sending a chunk to another
+// thread moves ownership; it does not create shared aliasing. The rewrite only exposes chunk
+// mutation behind higher-level scheduling or exclusive access boundaries.
+unsafe impl Send for Chunk {}
+
 impl Chunk {
     fn new(
         chunk_index: ChunkIndex,
@@ -1245,6 +1266,10 @@ pub struct Table {
     layout: TableLayout,
     chunk_layouts: Box<[ChunkLayout]>,
 }
+
+// Safety: `Table` owns its chunks and metadata outright. Sending a table to another thread moves
+// ownership of those chunks; it does not permit concurrent access to the same table instance.
+unsafe impl Send for Table {}
 
 impl Table {
     pub const fn index(&self) -> TableIndex {

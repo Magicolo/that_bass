@@ -1,10 +1,5 @@
 use core::num::NonZeroUsize;
-use that_bass::v2::{
-    command, query,
-    schedule::Builder,
-    schema::{Catalog, Meta},
-    Configuration,
-};
+use that_bass::v2::{command, query, schedule::Builder, schema::Meta, Configuration, Store};
 
 #[repr(C)]
 struct Position {
@@ -19,26 +14,17 @@ struct Velocity {
 }
 
 pub fn run() {
-    let mut catalog = Catalog::new();
-    let position_table = catalog
-        .register_table(
-            [Meta::of::<Position>()],
-            Configuration::default().with_target_chunk_byte_count(non_zero_usize(8 * 1024)),
-        )
-        .expect("example table registration should succeed");
-    let movement_table = catalog
-        .register_table(
-            [Meta::of::<Position>(), Meta::of::<Velocity>()],
-            Configuration::default().with_target_chunk_byte_count(non_zero_usize(8 * 1024)),
-        )
-        .expect("example table registration should succeed");
-    let mut tables = vec![position_table, movement_table];
-
-    let mut builder = Builder::new(
-        &mut catalog,
-        &mut tables,
+    let mut store = Store::with_configuration(
         Configuration::default().with_target_chunk_byte_count(non_zero_usize(8 * 1024)),
     );
+    store
+        .register_table([Meta::of::<Position>()])
+        .expect("example table registration should succeed");
+    store
+        .register_table([Meta::of::<Position>(), Meta::of::<Velocity>()])
+        .expect("example table registration should succeed");
+
+    let mut builder = Builder::new(&mut store);
     let integrate_index = builder.push_query(
         "integrate",
         query::all((

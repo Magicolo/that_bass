@@ -4,10 +4,11 @@
 //!
 //! - a `Store` root type for the rewrite boundary,
 //! - a configuration object with a benchmarkable chunk-byte target,
-//! - a chunk-capacity planner that follows the selected specification.
+//! - a chunk-capacity planner that follows the selected specification,
+//! - and the initialization-time table registration surface used by scheduled injections.
 
 use crate::v2::instrumentation::{NoopSink, Sink};
-use crate::v2::schema::{Table, TableIndex};
+use crate::v2::schema::{Catalog, DefinitionError, Meta, Table, TableIndex};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -17,6 +18,7 @@ const DEFAULT_TARGET_CHUNK_BYTE_COUNT: usize = 16 * 1024;
 pub struct Store {
     configuration: Configuration,
     instrumentation_sink: Arc<dyn Sink>,
+    catalog: Catalog,
     tables: Vec<Table>,
 }
 
@@ -42,6 +44,7 @@ impl Store {
         Self {
             configuration,
             instrumentation_sink,
+            catalog: Catalog::new(),
             tables: Vec::new(),
         }
     }
@@ -68,6 +71,28 @@ impl Store {
 
     pub fn table_mut(&mut self, table_index: TableIndex) -> Option<&mut Table> {
         self.tables.get_mut(table_index.value() as usize)
+    }
+
+    pub fn register_table<I>(&mut self, metas: I) -> Result<TableIndex, DefinitionError>
+    where
+        I: IntoIterator<Item = Meta>,
+    {
+        let table = self.catalog.register_table(metas, self.configuration)?;
+        let table_index = table.index();
+        self.tables.push(table);
+        Ok(table_index)
+    }
+
+    pub fn get_or_create_table<I>(&mut self, metas: I) -> Result<TableIndex, DefinitionError>
+    where
+        I: IntoIterator<Item = Meta>,
+    {
+        self.catalog
+            .get_or_create_table(&mut self.tables, metas, self.configuration)
+    }
+
+    pub fn table_shape_count(&self) -> usize {
+        self.catalog.table_shape_count()
     }
 
     pub fn plan_chunk_capacity_for_row_width(&self, inline_row_width: usize) -> ChunkPlan {

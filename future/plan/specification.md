@@ -39,13 +39,16 @@ The selected direction is:
 
 Current implementation status in `src/v2/`:
 
-- Tasks `00` through `06` are implemented in the isolated rewrite lane.
+- Tasks `00` through `07` are implemented in the isolated rewrite lane.
 - The current `v2` surface now includes the foundation boundary, metadata and row vocabulary,
   single-allocation chunk storage, keyless row views and remove buffers, the first typed query
   surface, reusable schedule-family planning with monotone dependency paths, and a frame-local
-  executor runtime with worker-local deques, work stealing, runtime reports, and resolve-driven
-  chunk injection.
-- Tasks `07` and later remain planned work.
+  executor runtime seeded from frame snapshots, with worker-local ready queues, work stealing,
+  runtime reports, resolve-driven chunk injection, store-centric initialization of injected
+  capabilities through `initialize(store: &mut Store)`, per-job command buffers, batched
+  function-level resolve phases, typed insert planning through initialization-time
+  `get_or_create_table(...)`, filtered remove planning, and store-backed structural resolution.
+- Tasks `08` and later remain planned work.
 
 ## Goals
 
@@ -260,9 +263,9 @@ This mirrors the intended ownership interpretation more closely:
 
 The empty-path case means:
 
-- `Dependency { access: Write, path: [] }` behaves like a full write barrier,
-- `Dependency { access: Read, path: [] }` is less useful semantically, but the model permits it if
-  needed for symmetry.
+- `Dependency { access: Write, path: [] }` behaves like a full barrier,
+- the selected public helper for this is `Dependency::barrier()`,
+- and the rewrite does not currently rely on a public read-barrier variant.
 
 ### Job
 
@@ -410,6 +413,13 @@ To the scheduler, these are still just identifiers plus access modes. The import
 all dependencies use the same path model and are compared by shared prefix and access mode rather
 than by special-casing broad and narrow forms.
 
+Important design constraint:
+
+- the scheduler should stay generic over hierarchical resource paths,
+- store/table/chunk/column is the current `v2` resource tree, not a special-case scheduler law,
+- and storage-aware planning helpers should remain layered on top of a schedule core that reasons
+  primarily in terms of dependency paths and happens-before edges.
+
 ## Dependency Conflict Rule
 
 Selected direction:
@@ -547,7 +557,8 @@ See `future/08-nested-query-soundness.md`.
 Assumed executor model:
 
 - fixed-size worker pool,
-- local deques per worker,
+- worker-local ready queues,
+- an optional shared ready queue for injected or broadly placed work,
 - work stealing,
 - independently stealable job objects,
 - optional correlation or affinity hints so related jobs tend to stay on one thread.
@@ -585,6 +596,8 @@ Selected refinement:
 - especially for typed command families such as `Insert<T>`,
 - so runtime dynamism should primarily be chunk creation and row-count visibility, not table
   creation.
+- the executor should seed runtime jobs from a frame-local snapshot of visible tables and chunks
+  rather than requiring direct live mutable access to the store during scheduling.
 
 ## Job Granularity
 
@@ -683,6 +696,9 @@ Selected resolve granularity:
 - but resolution is not modeled as "one resolve job per originating chunk job",
 - instead, the resolve phase for one scheduled function collects all of that function's local command buffers and resolves them in batch,
 - the resolver may internally partition the batch by target table or chunk when that is provably safe and profitable, but the baseline semantic unit is the function-level resolve family.
+- when an earlier resolve can expose new chunk jobs for a later function, the later paired resolve
+  family must also stay blocked until that earlier resolve completes, even if the later function
+  started the frame with no seeded jobs.
 
 ## Batch APIs
 
@@ -719,6 +735,13 @@ Selected refinement:
 - schedule/query setup can cache eligible tables at initialization time,
 - and the table-write dependency belongs to the resolve family rather than to the ordinary jobs
   that only queue local insert commands.
+
+Broader initialization rule:
+
+- injected capabilities such as queries and command descriptors should be allowed to perform
+  one-time initialization against `&mut Store` when the containing function is registered,
+- that initialization stage is where table-shape discovery and other store-scoped setup belongs,
+- and no new tables should be created during frame execution.
 
 ## Remove Semantics
 
@@ -811,7 +834,7 @@ Chunk queries do not materialize row handles into a physical column. Instead the
 
 The current Task 03 direction also includes a keyless batched remove buffer:
 
-- row-targeted remove commands are recorded as `command::Remove<'job>`,
+- row-targeted remove commands are recorded as `command::RemoveRows`,
 - remove resolution groups targets by chunk,
 - row indices are sorted, deduplicated, and applied from highest to lowest within each chunk,
 - and old row coordinates may be reused immediately after resolution because `swap_remove` moves

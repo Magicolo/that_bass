@@ -1,5 +1,5 @@
 use that_bass::v2::{
-    command::{Kind, Remove, Strategy},
+    command::{Kind, RemoveRows, Strategy},
     key::Key,
     query::{self, Access},
     schedule::Ordering,
@@ -17,7 +17,7 @@ pub fn run() {
     let remove_command_kind = Kind::Remove;
     let resolve_strategy = Strategy::FunctionLevelBatch;
     let default_ordering = Ordering::ImplicitDeclarationOrder;
-    let remove_buffer = Remove::new();
+    let remove_buffer = RemoveRows::new();
     let key = Key::new(12, 3);
 
     println!("Vocabulary snapshot");

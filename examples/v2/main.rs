@@ -1,4 +1,5 @@
 mod chunk_layout;
+mod command_resolution;
 mod executor_runtime;
 mod instrumentation;
 mod keyless_rows;
@@ -31,6 +32,9 @@ fn main() {
     println!();
 
     executor_runtime::run();
+    println!();
+
+    command_resolution::run();
     println!();
 
     vocabulary::run();

@@ -19,13 +19,14 @@
 //!
 //! Module map:
 //!
-//! - `command`: deferred command vocabulary.
+//! - `command`: injected command initialization, deferred command vocabulary, and batched resolve
+//!   support types.
 //! - `instrumentation`: measurement categories and public diagnostics hooks.
 //! - `key`: stable-identity vocabulary used by later extension resources.
 //! - `query`: typed query descriptors, inline dense-slice projections, optional chunk views,
 //!   filters, and access analysis validated at `query::all(...)` construction time.
-//! - `runtime`: frame-local executor runtime, work stealing, runtime reports, and resolve-driven
-//!   chunk injection.
+//! - `runtime`: frame-local executor runtime, work stealing, runtime reports, store-backed
+//!   batched resolve, and resolve-driven chunk injection.
 //! - `schedule`: reusable schedule families, happens-before edges, conflict planning, and the
 //!   storage-aware initialization helper that turns typed queries and inserts into schedule data.
 //! - `schema`: the metadata catalog, `Meta` descriptors, chunk layouts, tables, chunks, and
@@ -69,8 +70,9 @@
 //! scheduled functions expand into per-chunk jobs.
 //!
 //! `resolve job`
-//!: A later scheduled step that batches deferred command buffers and applies their structural work
-//! according to declared happens-before edges.
+//!: A later scheduled step that batches deferred command buffers, applies their structural work
+//! against `Store`, and exposes the resulting chunk visibility according to declared
+//! happens-before edges.
 //!
 //! `happens-before`
 //!: An ordering guarantee between jobs or resolve jobs. Outside declared happens-before edges, the

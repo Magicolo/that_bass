@@ -1,7 +1,7 @@
 use checkito::Check;
 use std::num::NonZeroUsize;
 use that_bass::v2::{
-    command::Remove,
+    command::RemoveRows,
     query,
     schema::{Catalog, ChunkError, ChunkIndex, Meta, Table},
     Configuration,
@@ -53,7 +53,7 @@ fn batched_remove_deduplicates_targets_and_applies_descending_row_order() {
     let rows = table
         .rows(chunk_index)
         .expect("table should expose a generated rows view");
-    let mut remove = Remove::new();
+    let mut remove = RemoveRows::new();
     remove.one(rows.get(1).expect("row 1 should exist"));
     remove.one(rows.get(3).expect("row 3 should exist"));
     remove.one(rows.get(3).expect("row 3 should still exist"));
@@ -96,7 +96,7 @@ fn row_handles_are_transient_and_can_be_reused_after_remove_resolution() {
         .expect("dense-prefix slice should succeed")[0]
         .clone();
 
-    let mut remove = Remove::new();
+    let mut remove = RemoveRows::new();
     remove.one(removed_row);
     remove
         .resolve_on(&mut table)
@@ -149,7 +149,7 @@ fn remove_buffer_rejects_rows_from_a_different_table() {
         .expect("table should expose a generated rows view")
         .first()
         .expect("the first row should exist");
-    let mut remove = Remove::new();
+    let mut remove = RemoveRows::new();
     remove.one(left_row);
 
     let error = remove
