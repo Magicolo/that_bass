@@ -22,9 +22,11 @@
 //! - `command`: injected command initialization, deferred command vocabulary, and batched resolve
 //!   support types.
 //! - `instrumentation`: measurement categories and public diagnostics hooks.
-//! - `key`: stable-identity vocabulary used by later extension resources.
+//! - `key`: managed stable-identity data, including `Key`, the `Keys` resource, reservation, and
+//!   reverse lookup.
 //! - `query`: typed query descriptors, inline dense-slice projections, optional chunk views,
-//!   filters, and access analysis validated at `query::all(...)` construction time.
+//!   filters, access analysis validated at `query::all(...)` construction time, and keyed
+//!   random-access lookup.
 //! - `runtime`: frame-local executor runtime, work stealing, runtime reports, store-backed
 //!   batched resolve, and resolve-driven chunk injection.
 //! - `schedule`: reusable schedule families, happens-before edges, conflict planning, and the
@@ -63,7 +65,7 @@
 //!
 //! `key`
 //!: A stable identity datum. Storage primitives treat `Key` like any other column, and
-//! later extension resources such as `Keys` synchronize tables that choose to store it.
+//! the managed `Keys` resource synchronizes tables that choose to store it.
 //!
 //! `job`
 //!: A runtime work unit that the executor may schedule independently. In the selected direction,

@@ -8,6 +8,7 @@
 //! - and the initialization-time table registration surface used by scheduled injections.
 
 use crate::v2::instrumentation::{NoopSink, Sink};
+use crate::v2::key;
 use crate::v2::schema::{Catalog, DefinitionError, Meta, Table, TableIndex};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ pub struct Store {
     configuration: Configuration,
     instrumentation_sink: Arc<dyn Sink>,
     catalog: Catalog,
+    keys: Option<key::Keys>,
     tables: Vec<Table>,
 }
 
@@ -45,6 +47,7 @@ impl Store {
             configuration,
             instrumentation_sink,
             catalog: Catalog::new(),
+            keys: None,
             tables: Vec::new(),
         }
     }
@@ -59,6 +62,15 @@ impl Store {
 
     pub fn tables(&self) -> &[Table] {
         &self.tables
+    }
+
+    pub fn keys(&self) -> Option<key::Keys> {
+        self.keys.clone()
+    }
+
+    pub fn initialize_keys(&mut self) -> key::Keys {
+        let keys = self.keys.get_or_insert_with(key::Keys::new);
+        keys.clone()
     }
 
     pub fn table_count(&self) -> usize {

@@ -12,6 +12,7 @@
 pub use crate::v2::query::Access;
 use crate::v2::{
     command::{self, Initialize},
+    key,
     query::{All, Analysis, Filter, QueryTuple},
     schema::{DefinitionError, Dependency, Resource, ResourceId, Table, TableIndex},
     store::Store,
@@ -64,6 +65,7 @@ pub struct Function {
     dependencies: Box<[Dependency]>,
     known_tables: Box<[TableIndex]>,
     query_analysis: Option<Analysis>,
+    uses_keys: bool,
     command_kinds: Box<[command::Kind]>,
     resolve_index: ResolveIndex,
 }
@@ -87,6 +89,10 @@ impl Function {
 
     pub fn query_analysis(&self) -> Option<&Analysis> {
         self.query_analysis.as_ref()
+    }
+
+    pub const fn uses_keys(&self) -> bool {
+        self.uses_keys
     }
 
     pub fn command_kinds(&self) -> &[command::Kind] {
@@ -304,6 +310,7 @@ impl<'table> Builder<'table> {
             dependencies,
             known_tables,
             query_analysis: Some(query_analysis),
+            uses_keys: false,
             command_plans: Vec::new(),
             command_dependencies: Vec::new(),
             matches_table: Box::new(move |table| query.matches_table(table)),
@@ -332,6 +339,10 @@ impl<'table> Builder<'table> {
             Resource::store(Some(self.root_identifier)),
             Resource::table(Some(target_table_index.into())),
         ]);
+        let target_table_uses_keys = self
+            .store
+            .table(target_table_index)
+            .is_some_and(table_uses_keys);
 
         self.refresh_pending_queries_for_table(target_table_index);
 
@@ -341,8 +352,33 @@ impl<'table> Builder<'table> {
             .expect("validated function index should stay addressable");
         function.command_plans.push(command_plan);
         push_dependency_if_missing(&mut function.command_dependencies, dependency);
+        if target_table_uses_keys {
+            push_dependency_if_missing(
+                &mut function.command_dependencies,
+                key::Keys::write_dependency(self.root_identifier),
+            );
+        }
 
         Ok(target_table_index)
+    }
+
+    pub fn add_keys(&mut self, function_index: FunctionIndex) -> Result<(), Error> {
+        if function_index.value() >= self.functions.len() {
+            return Err(Error::MissingFunction { function_index });
+        }
+
+        self.store.initialize_keys();
+        let function = self
+            .functions
+            .get_mut(function_index.value())
+            .expect("validated function index should stay addressable");
+        function.uses_keys = true;
+        push_dependency_if_missing(
+            &mut function.dependencies,
+            key::Keys::read_dependency(self.root_identifier),
+        );
+
+        Ok(())
     }
 
     pub fn add_remove<F>(
@@ -362,6 +398,11 @@ impl<'table> Builder<'table> {
             unreachable!("remove initialization should always yield a remove plan");
         };
         let allowed_table_indices = allowed_table_indices.to_vec();
+        let keyed_table_indices = allowed_table_indices
+            .iter()
+            .copied()
+            .filter(|table_index| self.store.table(*table_index).is_some_and(table_uses_keys))
+            .collect::<Vec<_>>();
         let function = self
             .functions
             .get_mut(function_index.value())
@@ -374,6 +415,12 @@ impl<'table> Builder<'table> {
                     Resource::store(Some(self.root_identifier)),
                     Resource::table(Some(table_index.into())),
                 ]),
+            );
+        }
+        if !keyed_table_indices.is_empty() {
+            push_dependency_if_missing(
+                &mut function.command_dependencies,
+                key::Keys::write_dependency(self.root_identifier),
             );
         }
 
@@ -400,6 +447,7 @@ impl<'table> Builder<'table> {
                 dependencies: pending_function.dependencies.into_boxed_slice(),
                 known_tables: pending_function.known_tables.into_boxed_slice(),
                 query_analysis: pending_function.query_analysis,
+                uses_keys: pending_function.uses_keys,
                 command_kinds: pending_function
                     .command_plans
                     .iter()
@@ -663,6 +711,7 @@ struct PendingFunction {
     dependencies: Vec<Dependency>,
     known_tables: Vec<TableIndex>,
     query_analysis: Option<Analysis>,
+    uses_keys: bool,
     command_plans: Vec<command::Plan>,
     command_dependencies: Vec<Dependency>,
     matches_table: Box<dyn Fn(&Table) -> bool>,
@@ -672,4 +721,8 @@ impl PendingFunction {
     fn matches_table(&self, table: &Table) -> bool {
         (self.matches_table)(table)
     }
+}
+
+fn table_uses_keys(table: &Table) -> bool {
+    table.inline_meta_for::<key::Key>().is_some()
 }

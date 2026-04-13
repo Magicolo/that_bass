@@ -153,6 +153,9 @@ Selected refinement:
 - `Remove<F>` should accept a filter `F`,
 - so the schedule can narrow remove dependencies to the tables that `F` may match,
 - instead of pessimistically treating remove as a whole-store structural command.
+- when a resolved table carries an inline `Key` column and `Keys` is initialized,
+  remove resolution should release deleted keys and republish moved keys inline during the same
+  batched resolve pass instead of building heap-allocated synchronization side buffers.
 
 ## Why Remove Needs Extra Care
 
@@ -333,6 +336,12 @@ Important implementation choice:
 - the paired resolve family of a later function is also kept behind earlier resolve-to-function
   visibility edges, so a function that starts with no seeded jobs cannot resolve before injected
   same-frame work has had a chance to run.
+
+Extension constraint for later tasks:
+
+- when later extension resources such as `Keys` need structural synchronization, prefer inline
+  resolve-time maintenance over heap-built side buffers or generic event dispatch if the tighter
+  path is materially cheaper.
 
 Selected scope boundary:
 

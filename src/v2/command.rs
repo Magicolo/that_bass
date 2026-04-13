@@ -8,6 +8,7 @@
 //! - and structural visibility updates are reported back to the executor explicitly.
 
 use crate::v2::{
+    key,
     query::Filter,
     schema::{ChunkError, ChunkIndex, Meta, Row, Table, TableIndex},
     store::Store,
@@ -76,14 +77,22 @@ impl ChunkState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
     MissingTable { table_index: TableIndex },
+    MissingKeysResource { table_index: TableIndex },
     MissingInsertBuffer { type_name: &'static str },
     UnexpectedRemoveTable { table_index: TableIndex },
     Chunk(ChunkError),
+    Key(key::Error),
 }
 
 impl From<ChunkError> for ResolveError {
     fn from(error: ChunkError) -> Self {
         Self::Chunk(error)
+    }
+}
+
+impl From<key::Error> for ResolveError {
+    fn from(error: key::Error) -> Self {
+        Self::Key(error)
     }
 }
 
@@ -237,7 +246,8 @@ impl Plan {
 type MakeRows = fn() -> Box<dyn Any + Send>;
 type RowsAreEmpty = fn(&dyn Any) -> bool;
 type MergeRows = fn(&mut dyn Any, &mut dyn Any);
-type ResolveRows = fn(&mut dyn Any, &mut Table) -> Result<Box<[ChunkState]>, ResolveError>;
+type ResolveRows =
+    fn(&mut dyn Any, &mut Table, Option<&key::Keys>) -> Result<Box<[ChunkState]>, ResolveError>;
 
 /// One typed insert plan resolved during initialization.
 #[derive(Clone)]
@@ -339,10 +349,11 @@ impl Batch {
     }
 
     pub fn resolve_on(self, store: &mut Store) -> Result<Box<[ChunkState]>, ResolveError> {
+        let keys = store.keys();
         let mut changed_chunk_states = BTreeMap::<(TableIndex, ChunkIndex), usize>::new();
 
         for entry in self.entries {
-            for chunk_state in entry.resolve_on(store)? {
+            for chunk_state in entry.resolve_on(store, keys.as_ref())? {
                 changed_chunk_states.insert(
                     (chunk_state.table_index(), chunk_state.chunk_index()),
                     chunk_state.row_count(),
@@ -538,10 +549,14 @@ impl Entry {
         }
     }
 
-    fn resolve_on(self, store: &mut Store) -> Result<Box<[ChunkState]>, ResolveError> {
+    fn resolve_on(
+        self,
+        store: &mut Store,
+        keys: Option<&key::Keys>,
+    ) -> Result<Box<[ChunkState]>, ResolveError> {
         match self {
-            Self::Insert(entry) => entry.resolve_on(store),
-            Self::Remove(entry) => entry.resolve_on(store),
+            Self::Insert(entry) => entry.resolve_on(store, keys),
+            Self::Remove(entry) => entry.resolve_on(store, keys),
         }
     }
 }
@@ -566,7 +581,11 @@ impl InsertEntry {
         (self.plan.merge_rows)(self.rows.as_mut(), other.rows.as_mut());
     }
 
-    fn resolve_on(self, store: &mut Store) -> Result<Box<[ChunkState]>, ResolveError> {
+    fn resolve_on(
+        self,
+        store: &mut Store,
+        keys: Option<&key::Keys>,
+    ) -> Result<Box<[ChunkState]>, ResolveError> {
         let table = store
             .table_mut(self.plan.table_index())
             .ok_or(ResolveError::MissingTable {
@@ -574,7 +593,7 @@ impl InsertEntry {
             })?;
         let mut rows = self.rows;
 
-        (self.plan.resolve_rows)(rows.as_mut(), table)
+        (self.plan.resolve_rows)(rows.as_mut(), table, keys)
     }
 }
 
@@ -585,7 +604,11 @@ struct RemoveEntry {
 }
 
 impl RemoveEntry {
-    fn resolve_on(self, store: &mut Store) -> Result<Box<[ChunkState]>, ResolveError> {
+    fn resolve_on(
+        self,
+        store: &mut Store,
+        keys: Option<&key::Keys>,
+    ) -> Result<Box<[ChunkState]>, ResolveError> {
         let mut packed_rows_by_table = BTreeMap::<TableIndex, Vec<u64>>::new();
 
         for packed_row in self.rows.packed_rows {
@@ -614,7 +637,15 @@ impl RemoveEntry {
                 .map(Row::<'static>::from_packed)
                 .map(|row| table.row_layout().chunk_index(row))
                 .collect::<Vec<_>>();
-            table.resolve_remove_rows(packed_rows.into_iter().map(Row::<'static>::from_packed))?;
+
+            if table.inline_meta_for::<key::Key>().is_some() {
+                let keys = keys.ok_or(ResolveError::MissingKeysResource { table_index })?;
+                resolve_keyed_remove_rows(table, packed_rows, keys)?;
+            } else {
+                table.resolve_remove_rows(
+                    packed_rows.into_iter().map(Row::<'static>::from_packed),
+                )?;
+            }
 
             for chunk_index in affected_chunk_indices {
                 let row_count = table.chunk(chunk_index).map_or(0, |chunk| chunk.count());
@@ -656,6 +687,7 @@ where
 fn resolve_insert_rows<T>(
     rows: &mut dyn Any,
     table: &mut Table,
+    keys: Option<&key::Keys>,
 ) -> Result<Box<[ChunkState]>, ResolveError>
 where
     T: Columns,
@@ -669,6 +701,14 @@ where
         return Ok(Box::new([]));
     }
 
+    let keyed_rows = table.inline_meta_for::<key::Key>().is_some();
+    let keys = if keyed_rows {
+        Some(keys.ok_or(ResolveError::MissingKeysResource {
+            table_index: table.index(),
+        })?)
+    } else {
+        None
+    };
     let mut changed_chunk_states = BTreeMap::<ChunkIndex, usize>::new();
     let mut current_chunk_index = table
         .chunks()
@@ -705,6 +745,16 @@ where
             T::write_row(row, table, chunk_index, row_index)?;
             table.assume_initialized_prefix(chunk_index, row_index + 1)?;
         }
+        if let Some(keys) = keys {
+            let key = table.slice::<key::Key>(chunk_index)?[row_index];
+            let row = table.row_layout().row(
+                table.index(),
+                chunk_index,
+                u32::try_from(row_index)
+                    .expect("inserted row indices must remain representable in packed rows"),
+            )?;
+            keys.publish(key, Row::from_packed(row.packed()))?;
+        }
         let row_count = table
             .chunk(chunk_index)
             .ok_or(ChunkError::MissingChunk { chunk_index })?
@@ -716,4 +766,73 @@ where
         .into_iter()
         .map(|(chunk_index, row_count)| ChunkState::new(table.index(), chunk_index, row_count))
         .collect())
+}
+
+fn resolve_keyed_remove_rows(
+    table: &mut Table,
+    packed_rows: Vec<u64>,
+    keys: &key::Keys,
+) -> Result<(), ResolveError> {
+    let mut row_indices_by_chunk = BTreeMap::<ChunkIndex, Vec<usize>>::new();
+
+    for packed_row in packed_rows {
+        let row = Row::<'static>::from_packed(packed_row);
+        let actual_table_index = row.table_index();
+        if actual_table_index != table.index() {
+            return Err(ResolveError::Chunk(ChunkError::RowTableMismatch {
+                expected_table_index: table.index(),
+                actual_table_index,
+            }));
+        }
+
+        let chunk_index = table.row_layout().chunk_index(row);
+        let row_index = table.row_layout().row_index(row) as usize;
+        row_indices_by_chunk
+            .entry(chunk_index)
+            .or_default()
+            .push(row_index);
+    }
+
+    for (chunk_index, mut row_indices) in row_indices_by_chunk {
+        row_indices.sort_unstable();
+        row_indices.dedup();
+
+        for row_index in row_indices.into_iter().rev() {
+            let current_row_count = table
+                .chunk(chunk_index)
+                .ok_or(ChunkError::MissingChunk { chunk_index })?
+                .count();
+            if row_index >= current_row_count {
+                return Err(ResolveError::Chunk(
+                    ChunkError::RowIndexOutsideInitializedPrefix {
+                        row_index,
+                        count: current_row_count,
+                    },
+                ));
+            }
+
+            let removed_key = table.slice::<key::Key>(chunk_index)?[row_index];
+            let last_row_index = current_row_count - 1;
+            let moved_key = if row_index == last_row_index {
+                None
+            } else {
+                Some(table.slice::<key::Key>(chunk_index)?[last_row_index])
+            };
+
+            table.swap_remove_row(chunk_index, row_index)?;
+            keys.release(removed_key)?;
+            if let Some(moved_key) = moved_key {
+                let moved_row = table.row_layout().row(
+                    table.index(),
+                    chunk_index,
+                    u32::try_from(row_index).expect(
+                        "moved row indices must remain representable in packed row handles",
+                    ),
+                )?;
+                keys.republish(moved_key, Row::from_packed(moved_row.packed()))?;
+            }
+        }
+    }
+
+    Ok(())
 }

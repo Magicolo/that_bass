@@ -39,7 +39,7 @@ The selected direction is:
 
 Current implementation status in `src/v2/`:
 
-- Tasks `00` through `07` are implemented in the isolated rewrite lane.
+- Tasks `00` through `08` are implemented in the isolated rewrite lane.
 - The current `v2` surface now includes the foundation boundary, metadata and row vocabulary,
   single-allocation chunk storage, keyless row views and remove buffers, the first typed query
   surface, reusable schedule-family planning with monotone dependency paths, and a frame-local
@@ -47,8 +47,11 @@ Current implementation status in `src/v2/`:
   runtime reports, resolve-driven chunk injection, store-centric initialization of injected
   capabilities through `initialize(store: &mut Store)`, per-job command buffers, batched
   function-level resolve phases, typed insert planning through initialization-time
-  `get_or_create_table(...)`, filtered remove planning, and store-backed structural resolution.
-- Tasks `08` and later remain planned work.
+  `get_or_create_table(...)`, filtered remove planning, store-backed structural resolution,
+  explicit `Keys` initialization through `Store::initialize_keys()`, schedule-level key injection,
+  runtime `Keys` access in function contexts, inline keyed insert/remove synchronization during
+  resolve, and keyed random lookup through `query::All::get(...)`.
+- Tasks `09` and later remain planned work.
 
 ## Goals
 
@@ -848,11 +851,50 @@ Selected direction:
 
 - storage primitives stay agnostic to whether a table carries a `Key` column,
 - a table that declares `Key` stores it like any other column,
-- the existence of a `Key` column implies participation of the `Keys` resource,
+- the existence of a `Key` column implies participation of the `Keys` resource once `Keys` is
+  explicitly initialized,
 - queries can request `&[Key]` directly because it is just another chunk slice,
 - a global `Keys` resource discovers tables with `Key` columns and maintains `Key -> Row`
   mapping,
 - the `Key` column provides the cheap `Row -> Key` direction.
+
+Selected refinements:
+
+- `Keys` is created when it is explicitly injected into a supported initialization path, not merely
+  because a table shape mentions `Key`,
+- keyed insert is expected to use `Keys::reserve()` first and then insert rows that already carry
+  their `Key` inline,
+- reserved keys are observable before they become live rows,
+- and the current preferred slot-state model is `Free`, `Reserved`, and `Live(Row)`.
+
+Selected maintenance direction:
+
+- keyed synchronization happens inline during structural resolve,
+- not through heap-allocated per-resolve key-update vectors,
+- insert resolve publishes `Key -> Row` once rows become visible,
+- remove resolve releases removed keys and republishes moved keys after `swap_remove`,
+- and a separate public `move` event is unnecessary because row movement is just another publish
+  of the moved key's new row.
+
+Selected keyed lookup direction:
+
+- keyed random-access queries consult `Keys` first to obtain the current `Row`,
+- then decode that row into a physical table/chunk/row address,
+- and may use a `debug_assert!` against the inline `Key` column as a synchronization check rather
+  than as the ordinary validity mechanism.
+
+Selected scheduler direction:
+
+- `Keys::reserve()` should be allowed under a `Read(Keys)` dependency if the implementation
+  remains internally concurrent-safe and linearizable,
+- keyed random-access lookup also uses `Read(Keys)`,
+- keyed structural maintenance during resolve uses `Write(Keys)`.
+
+Selected implementation direction:
+
+- `Keys` should be a slab-like concurrent slot structure with stable indices,
+- atomics should dominate the hot path for reserve, publish, release, and lookup,
+- and a very short-lived lock is acceptable only for rare slot-storage growth in an MVP.
 
 This preserves:
 

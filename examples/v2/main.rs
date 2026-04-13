@@ -3,6 +3,7 @@ mod command_resolution;
 mod executor_runtime;
 mod instrumentation;
 mod keyless_rows;
+mod managed_keys;
 mod metadata;
 mod query_surface;
 mod schedule_builder;
@@ -23,6 +24,9 @@ fn main() {
     println!();
 
     keyless_rows::run();
+    println!();
+
+    managed_keys::run();
     println!();
 
     query_surface::run();

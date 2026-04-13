@@ -17,7 +17,7 @@
 //! - and batched resolve phases mutate the store directly and report the resulting chunk states.
 
 use crate::v2::{
-    command,
+    command, key,
     query::Access,
     schedule::{self, Function, FunctionIndex, Node, Resolve, ResolveIndex, Schedule},
     schema::{
@@ -162,6 +162,7 @@ pub struct FunctionContext<'schedule, 'job> {
     chunk_index: ChunkIndex,
     worker_index: usize,
     rows: Rows<'job>,
+    keys: Option<key::Keys>,
     command_buffer: &'job mut command::Buffer,
 }
 
@@ -188,6 +189,10 @@ impl<'schedule, 'job> FunctionContext<'schedule, 'job> {
 
     pub const fn rows(&self) -> Rows<'job> {
         self.rows
+    }
+
+    pub fn keys(&self) -> Option<&key::Keys> {
+        self.keys.as_ref()
     }
 
     pub fn insert<T>(&mut self) -> Option<command::InsertRows<'_, T>>
@@ -584,6 +589,7 @@ struct Shared<'schedule, 'seed, 'store> {
     schedule: &'schedule Schedule,
     seed: &'seed Seed,
     store: Mutex<&'store mut Store>,
+    keys: Option<key::Keys>,
     options: Options,
     jobs: RwLock<Vec<Arc<JobRecord>>>,
     function_chunk_keys: Mutex<BTreeSet<FunctionChunkKey>>,
@@ -633,6 +639,7 @@ impl<'schedule, 'seed, 'store> Shared<'schedule, 'seed, 'store> {
         Self {
             schedule,
             seed,
+            keys: store.keys(),
             store: Mutex::new(store),
             options,
             jobs: RwLock::new(Vec::new()),
@@ -1222,6 +1229,12 @@ fn worker_loop<'schedule, 'seed, 'store, C>(
                     chunk_index: *chunk_index,
                     worker_index,
                     rows,
+                    keys: function.uses_keys().then(|| {
+                        shared
+                            .keys
+                            .clone()
+                            .expect("functions that use keys should initialize the Keys resource")
+                    }),
                     command_buffer: &mut command_buffer,
                 });
                 drop(command_buffer);

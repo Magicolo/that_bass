@@ -174,6 +174,10 @@ impl Resource {
         Self { kind, identifier }
     }
 
+    pub fn typed<T: 'static>(identifier: Option<ResourceId>) -> Self {
+        Self::new(TypeId::of::<T>(), identifier)
+    }
+
     pub fn store(identifier: Option<ResourceId>) -> Self {
         Self::new(TypeId::of::<StoreKind>(), identifier)
     }

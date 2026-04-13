@@ -11,7 +11,11 @@
 
 pub use crate::v2::schema::{Row, Rows};
 
-use crate::v2::schema::{ChunkError, ChunkIndex, Table, TableIndex};
+use crate::v2::{
+    key,
+    schema::{ChunkError, ChunkIndex, Table, TableIndex},
+    Store,
+};
 use core::{
     any::{type_name, TypeId},
     iter::FusedIterator,
@@ -75,12 +79,28 @@ pub enum Error {
         chunk_index: ChunkIndex,
         count: usize,
     },
+    MissingKeyedTable {
+        table_index: TableIndex,
+    },
+    MissingRowForKey {
+        key: key::Key,
+        table_index: TableIndex,
+        chunk_index: ChunkIndex,
+        row_index: usize,
+    },
     Chunk(ChunkError),
+    Key(key::Error),
 }
 
 impl From<ChunkError> for Error {
     fn from(error: ChunkError) -> Self {
         Self::Chunk(error)
+    }
+}
+
+impl From<key::Error> for Error {
+    fn from(error: key::Error) -> Self {
+        Self::Key(error)
     }
 }
 
@@ -608,6 +628,25 @@ pub trait Query {
     ) -> Result<Self::Item<'table, 'job>, Error>;
 }
 
+pub trait LookupQuery {
+    type Item<'table, 'job>
+    where
+        Self: 'table;
+
+    fn matches_table(&self, table: &Table) -> bool;
+
+    /// # Safety
+    ///
+    /// The caller must ensure that keyed lookup aliasing has already been validated for the
+    /// projected item shape.
+    unsafe fn project_row<'table, 'job>(
+        &self,
+        table: *const Table,
+        chunk_index: ChunkIndex,
+        row_index: usize,
+    ) -> Result<Self::Item<'table, 'job>, Error>;
+}
+
 impl Query for RowsRequest {
     type Item<'table, 'job> = Rows<'job>;
 
@@ -624,6 +663,31 @@ impl Query for RowsRequest {
     ) -> Result<Self::Item<'table, 'job>, Error> {
         // Safety: the caller ensures projection aliasing has already been validated.
         unsafe { (&*table).rows(chunk_index).map_err(Error::from) }
+    }
+}
+
+impl LookupQuery for RowsRequest {
+    type Item<'table, 'job> = Row<'job>;
+
+    fn matches_table(&self, _table: &Table) -> bool {
+        true
+    }
+
+    unsafe fn project_row<'table, 'job>(
+        &self,
+        table: *const Table,
+        chunk_index: ChunkIndex,
+        row_index: usize,
+    ) -> Result<Self::Item<'table, 'job>, Error> {
+        let table = unsafe { &*table };
+        let row = table.row_layout().row(
+            table.index(),
+            chunk_index,
+            u32::try_from(row_index)
+                .expect("keyed row lookup indices must remain representable in packed rows"),
+        )?;
+
+        Ok(Row::from_packed(row.packed()))
     }
 }
 
@@ -649,6 +713,29 @@ impl<T: 'static> Query for Read<T> {
     ) -> Result<Self::Item<'table, 'job>, Error> {
         // Safety: the caller ensures projection aliasing has already been validated.
         unsafe { (&*table).slice::<T>(chunk_index).map_err(Error::from) }
+    }
+}
+
+impl<T: 'static> LookupQuery for Read<T> {
+    type Item<'table, 'job> = &'table T;
+
+    fn matches_table(&self, table: &Table) -> bool {
+        table.inline_meta_for::<T>().is_some()
+    }
+
+    unsafe fn project_row<'table, 'job>(
+        &self,
+        table: *const Table,
+        chunk_index: ChunkIndex,
+        row_index: usize,
+    ) -> Result<Self::Item<'table, 'job>, Error> {
+        let slice = unsafe { (&*table).slice::<T>(chunk_index)? };
+        slice
+            .get(row_index)
+            .ok_or(Error::Chunk(ChunkError::RowIndexOutsideInitializedPrefix {
+                row_index,
+                count: slice.len(),
+            }))
     }
 }
 
@@ -718,6 +805,35 @@ where
     }
 }
 
+impl<Q> LookupQuery for OptionQuery<Q>
+where
+    Q: LookupQuery,
+{
+    type Item<'table, 'job>
+        = Option<Q::Item<'table, 'job>>
+    where
+        Self: 'table;
+
+    fn matches_table(&self, _table: &Table) -> bool {
+        true
+    }
+
+    unsafe fn project_row<'table, 'job>(
+        &self,
+        table: *const Table,
+        chunk_index: ChunkIndex,
+        row_index: usize,
+    ) -> Result<Self::Item<'table, 'job>, Error> {
+        if unsafe { self.query.matches_table(&*table) } {
+            Ok(Some(unsafe {
+                self.query.project_row(table, chunk_index, row_index)?
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 impl<Q> Query for One<Q>
 where
     Q: Query,
@@ -765,6 +881,29 @@ where
     }
 }
 
+impl<Q> LookupQuery for One<Q>
+where
+    Q: LookupQuery,
+{
+    type Item<'table, 'job>
+        = Q::Item<'table, 'job>
+    where
+        Self: 'table;
+
+    fn matches_table(&self, table: &Table) -> bool {
+        self.query.matches_table(table)
+    }
+
+    unsafe fn project_row<'table, 'job>(
+        &self,
+        table: *const Table,
+        chunk_index: ChunkIndex,
+        row_index: usize,
+    ) -> Result<Self::Item<'table, 'job>, Error> {
+        unsafe { self.query.project_row(table, chunk_index, row_index) }
+    }
+}
+
 pub trait QueryTuple {
     type Item<'table, 'job>
     where
@@ -782,6 +921,25 @@ pub trait QueryTuple {
         &self,
         table: *mut Table,
         chunk_index: ChunkIndex,
+    ) -> Result<Self::Item<'table, 'job>, Error>;
+}
+
+pub trait LookupTuple {
+    type Item<'table, 'job>
+    where
+        Self: 'table;
+
+    fn matches_table(&self, table: &Table) -> bool;
+
+    /// # Safety
+    ///
+    /// The caller must ensure that keyed lookup aliasing has already been validated for the
+    /// projected item shape.
+    unsafe fn project_row<'table, 'job>(
+        &self,
+        table: *const Table,
+        chunk_index: ChunkIndex,
+        row_index: usize,
     ) -> Result<Self::Item<'table, 'job>, Error>;
 }
 
@@ -809,6 +967,29 @@ where
     ) -> Result<Self::Item<'table, 'job>, Error> {
         // Safety: forwarded from caller.
         unsafe { Query::project_chunk(self, table, chunk_index) }
+    }
+}
+
+impl<Q> LookupTuple for Q
+where
+    Q: LookupQuery,
+{
+    type Item<'table, 'job>
+        = Q::Item<'table, 'job>
+    where
+        Self: 'table;
+
+    fn matches_table(&self, table: &Table) -> bool {
+        self.matches_table(table)
+    }
+
+    unsafe fn project_row<'table, 'job>(
+        &self,
+        table: *const Table,
+        chunk_index: ChunkIndex,
+        row_index: usize,
+    ) -> Result<Self::Item<'table, 'job>, Error> {
+        unsafe { LookupQuery::project_row(self, table, chunk_index, row_index) }
     }
 }
 
@@ -854,6 +1035,46 @@ macro_rules! impl_query_tuple {
 }
 
 impl_query_tuple!(
+    (Q0: q0, Q1: q1),
+    (Q0: q0, Q1: q1, Q2: q2),
+    (Q0: q0, Q1: q1, Q2: q2, Q3: q3)
+);
+
+macro_rules! impl_lookup_tuple {
+    ($(($( $type_name:ident : $value_name:ident ),+)),+ $(,)?) => {
+        $(
+            impl<$($type_name),+> LookupTuple for ($($type_name,)+)
+            where
+                $($type_name: LookupQuery,)+
+            {
+                type Item<'table, 'job> = ($($type_name::Item<'table, 'job>,)+)
+                where
+                    Self: 'table;
+
+                fn matches_table(&self, table: &Table) -> bool {
+                    let ($($value_name,)+) = self;
+                    true $(&& $value_name.matches_table(table))+
+                }
+
+                unsafe fn project_row<'table, 'job>(
+                    &self,
+                    table: *const Table,
+                    chunk_index: ChunkIndex,
+                    row_index: usize,
+                ) -> Result<Self::Item<'table, 'job>, Error> {
+                    let ($($value_name,)+) = self;
+                    Ok((
+                        $(
+                            unsafe { $value_name.project_row(table, chunk_index, row_index)? },
+                        )+
+                    ))
+                }
+            }
+        )+
+    };
+}
+
+impl_lookup_tuple!(
     (Q0: q0, Q1: q1),
     (Q0: q0, Q1: q1, Q2: q2),
     (Q0: q0, Q1: q1, Q2: q2, Q3: q3)
@@ -913,6 +1134,60 @@ where
         // Safety: `query::all(...)` validated this conjunctive query at construction time, and the
         // filter plus required-column checks above ensure projection only runs on matching tables.
         unsafe { self.query.project_chunk(table_pointer, chunk_index) }
+    }
+}
+
+impl<Q, F> All<Q, F>
+where
+    Q: LookupTuple,
+    F: Filter,
+{
+    pub fn get<'table>(
+        &self,
+        store: &'table Store,
+        keys: &key::Keys,
+        key: key::Key,
+    ) -> Result<Q::Item<'table, 'table>, Error> {
+        let row = keys.get(key)?;
+        let table_index = row.table_index();
+        let table = store
+            .table(table_index)
+            .ok_or(Error::MissingKeyedTable { table_index })?;
+        if !(self.filter.matches(table) && self.query.matches_table(table)) {
+            return Err(Error::TableDoesNotMatch { table_index });
+        }
+
+        let chunk_index = table.row_layout().chunk_index(row);
+        let row_index = table.row_layout().row_index(row) as usize;
+        let row_count = table
+            .chunk(chunk_index)
+            .ok_or(Error::MissingRowForKey {
+                key,
+                table_index,
+                chunk_index,
+                row_index,
+            })?
+            .count();
+        if row_index >= row_count {
+            return Err(Error::MissingRowForKey {
+                key,
+                table_index,
+                chunk_index,
+                row_index,
+            });
+        }
+
+        if table.inline_meta_for::<key::Key>().is_some() {
+            let stored_key = table.slice::<key::Key>(chunk_index)?[row_index];
+            debug_assert_eq!(stored_key, key);
+        }
+
+        let table_pointer = table as *const Table;
+
+        unsafe {
+            self.query
+                .project_row(table_pointer, chunk_index, row_index)
+        }
     }
 }
 
