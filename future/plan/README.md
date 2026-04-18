@@ -6,9 +6,10 @@ If you are new to the rewrite, read in this order:
 
 1. [specification.md](/home/goulade/Projects/rust/that_bass/future/plan/specification.md)
 2. [standards.md](/home/goulade/Projects/rust/that_bass/future/plan/standards.md)
-3. [00-foundation.md](/home/goulade/Projects/rust/that_bass/future/plan/00-foundation.md)
-4. [01-identity-and-metadata.md](/home/goulade/Projects/rust/that_bass/future/plan/01-identity-and-metadata.md) through [10-validation-and-migration.md](/home/goulade/Projects/rust/that_bass/future/plan/10-validation-and-migration.md) for the MVP rewrite
-5. [11-direct-exclusive-api.md](/home/goulade/Projects/rust/that_bass/future/plan/11-direct-exclusive-api.md) and later for post-MVP extensions
+3. [validation-matrix.md](/home/goulade/Projects/rust/that_bass/future/plan/validation-matrix.md)
+4. [00-foundation.md](/home/goulade/Projects/rust/that_bass/future/plan/00-foundation.md)
+5. [01-identity-and-metadata.md](/home/goulade/Projects/rust/that_bass/future/plan/01-identity-and-metadata.md) through [10-validation-and-migration.md](/home/goulade/Projects/rust/that_bass/future/plan/10-validation-and-migration.md) for the MVP rewrite
+6. [11-direct-exclusive-api.md](/home/goulade/Projects/rust/that_bass/future/plan/11-direct-exclusive-api.md) and later for post-MVP extensions
 
 Before reading these files, use:
 
@@ -21,6 +22,8 @@ Before reading these files, use:
   - The selected architecture, design decisions, non-goals, and open questions.
 - [standards.md](/home/goulade/Projects/rust/that_bass/future/plan/standards.md)
   - Mandatory coding standards, testing rules, unsafe-code rules, and preserved codebase habits.
+- [validation-matrix.md](/home/goulade/Projects/rust/that_bass/future/plan/validation-matrix.md)
+  - Concrete map from rewrite concerns to tests, focused Miri suites, examples, and benchmarks.
 - [00-foundation.md](/home/goulade/Projects/rust/that_bass/future/plan/00-foundation.md)
   - Rewrite lane, benchmarks, instrumentation, and guardrails.
 - [01-identity-and-metadata.md](/home/goulade/Projects/rust/that_bass/future/plan/01-identity-and-metadata.md)
@@ -60,8 +63,9 @@ If you are implementing the rewrite from scratch:
 
 1. Read the specification.
 2. Read the standards.
-3. Implement tasks `00` through `10` in order unless a task explicitly says otherwise.
-4. Treat tasks `11` and later as important follow-up work, not prerequisites for the first coherent milestone.
+3. Read the validation matrix.
+4. Implement tasks `00` through `10` in order unless a task explicitly says otherwise.
+5. Treat tasks `11` and later as important follow-up work, not prerequisites for the first coherent milestone.
 
 ## Maintenance Rule
 

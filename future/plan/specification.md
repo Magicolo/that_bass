@@ -10,6 +10,7 @@ Primary references:
 
 - `AGENTS.md`
 - `future/plan/standards.md`
+- `future/plan/validation-matrix.md`
 - `future/03-chunking-locks-and-query-plans.md`
 - `future/04-scheduler-first-lockless-mode.md`
 - `future/07-keyless-and-user-keyed-tables.md`
@@ -39,7 +40,7 @@ The selected direction is:
 
 Current implementation status in `src/v2/`:
 
-- Tasks `00` through `09` are implemented in the isolated rewrite lane.
+- Tasks `00` through `10` are implemented in the isolated rewrite lane.
 - The current `v2` surface now includes the foundation boundary, metadata and row vocabulary,
   single-allocation chunk storage, keyless row views and remove buffers, the first typed query
   surface, reusable schedule-family planning with monotone dependency paths, and a frame-local
@@ -51,9 +52,10 @@ Current implementation status in `src/v2/`:
   explicit `Keys` initialization through `Store::initialize_keys()`, schedule-level key injection,
   runtime `Keys` access in function contexts, inline keyed insert/remove synchronization during
   resolve, keyed random lookup through `query::All::get(...)`, `Store::initialize_global(...)`,
-  standalone singleton-table queries through `query::one::<T>()` / `query::one_mut::<T>()`, and
-  mixed stream-plus-singleton schedule planning.
-- Tasks `10` and later remain planned work.
+  standalone singleton-table queries through `query::one::<T>()` / `query::one_mut::<T>()`,
+  mixed stream-plus-singleton schedule planning, and the validation/migration discipline
+  artifacts that keep the rewrite benchmarkable and auditable.
+- Tasks `11` and later remain planned work.
 
 ## Goals
 

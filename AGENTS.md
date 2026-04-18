@@ -26,7 +26,7 @@ Primary source references:
   - Add better deferred orchestration, query combinators, richer transforms, generative testing, and possibly event filters.
   - Chunk-based storage, interpreter/serialization work, and scheduler integration are exploratory design notes, not active implementation (`src/v1/mod.rs:53-220`).
   - The selected long-term rewrite direction is now documented in `future/plan/specification.md`, `future/plan/standards.md`, `future/plan/README.md`, and the ordered `future/plan/00-foundation.md` through `future/plan/15-layout-specialization.md` task set. That plan currently assumes per-job command recording, function-level batched resolve phases, monotone dependency paths with optional wildcard identifiers, empty-path full barriers, resolve-only structural mutation with typed inserts getting or creating their target tables during initialization and storing the resulting table indices in planned resolve metadata, and an atomic-first `Keys` extension that publishes `Key -> Row` mappings inline during resolve instead of through heap-built update buffers. Treat those files as design documents for future work, not descriptions of current runtime behavior.
-  - Tasks `future/plan/00-foundation.md` through `future/plan/09-global-tables.md` are implemented through the isolated `src/v2/` rewrite lane. Treat `src/v2/` as the future-engine boundary and keep it isolated from the current runtime modules.
+  - Tasks `future/plan/00-foundation.md` through `future/plan/10-validation-and-migration.md` are implemented through the isolated `src/v2/` rewrite lane. Treat `src/v2/` as the future-engine boundary and keep it isolated from the current runtime modules.
   - For `v2`, prefer short public type names that are still full English words. Let module names carry context. Example shape: `Store`, `Configuration`, `command::Kind`, `instrumentation::Category`.
 
 ## Workspace Layout
@@ -52,7 +52,7 @@ Primary source references:
 | `that_base_derive/src/lib.rs` | Procedural macros; emits absolute `that_bass::v1::...` paths for the stable engine | `that_base_derive/src/lib.rs:23`, `that_base_derive/src/lib.rs:37`, `that_base_derive/src/lib.rs:83`, `that_base_derive/src/lib.rs:198` |
 | `tests/` | Integration suites grouped by engine generation; read these before changing semantics | `tests/v1/check.rs`, `tests/v1/query.rs`, `tests/v1/event.rs`, `tests/v1/derive.rs`, `tests/v2/foundation.rs`, `tests/v2/metadata.rs`, `tests/v2/keyless_rows.rs`, `tests/v2/query_surface.rs`, `tests/v2/global_tables.rs`, `tests/v2/schedule_builder.rs`, `tests/v2/executor_runtime.rs`, `tests/v2/command_resolution.rs`, `tests/v2/managed_keys.rs` |
 | `examples/v2/` | Runnable sample usage for the rewrite lane; keep this aligned with the current `v2` public API | `examples/v2/main.rs`, `examples/v2/store_planning.rs`, `examples/v2/metadata.rs`, `examples/v2/keyless_rows.rs`, `examples/v2/managed_keys.rs`, `examples/v2/query_surface.rs`, `examples/v2/global_tables.rs`, `examples/v2/schedule_builder.rs`, `examples/v2/executor_runtime.rs`, `examples/v2/command_resolution.rs`, `examples/v2/instrumentation.rs`, `examples/v2/vocabulary.rs` |
-| `future/` | Architecture proposals and rewrite planning docs | `future/README.md`, `future/06-recommended-roadmap.md`, `future/plan/specification.md` |
+| `future/` | Architecture proposals and rewrite planning docs | `future/README.md`, `future/06-recommended-roadmap.md`, `future/plan/specification.md`, `future/plan/validation-matrix.md` |
 
 Inactive or misleading files:
 
@@ -270,8 +270,11 @@ These rules matter more than style. Breaking any of them is likely UB or subtle 
 - `tests/v2/executor_runtime.rs` verifies seeded per-chunk execution, real stealing across worker-local ready queues, and resolve-driven same-frame chunk injection for later function families.
 - `tests/v2/command_resolution.rs` verifies per-job command recording, no self-visibility for structural edits, same-frame visibility to later functions after batched resolve, filtered remove planning, and one-resolve-many-buffers behavior.
 - `benches/v1/create.rs` measures alternative create APIs, not end-to-end workload throughput.
-- `benches/v2/foundation.rs` is the initial comparative harness for the rewrite lane. It currently measures boundary construction, chunk-capacity planning, and chunk allocation/growth, and should grow with later `v2` tasks instead of adding benchmark hooks inside library code.
-- `examples/v2/` is the executable API-evolution trace for the rewrite lane. It now includes the Task 07 command-resolution surface. When `v2` public behavior or naming changes, update these examples in the same patch.
+- `benches/v2/foundation.rs` measures rewrite-lane boundary construction, chunk-capacity planning, and chunk allocation/growth.
+- `benches/v2/runtime.rs` measures many-job runtime behavior, worker-count sweeps, and injection-policy sweeps.
+- `benches/v2/workloads.rs` measures scan-heavy row widths, dominant-versus-medium table layouts, keyed-column versus keyless scan cost, singleton access, and remove-heavy runtime behavior.
+- `future/plan/validation-matrix.md` is the concrete map from rewrite concerns to tests, focused Miri suites, examples, and benchmarks. Read it when deciding how to validate a `v2` change.
+- `examples/v2/` is the executable API-evolution trace for the rewrite lane. It currently covers the implemented Task `00` through Task `09` public surfaces. When `v2` public behavior or naming changes, update these examples in the same patch.
 
 ## Recommended Workflow For Agents
 

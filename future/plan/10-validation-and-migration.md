@@ -4,6 +4,10 @@ This task closes the initial MVP rewrite milestone. It exists to keep the projec
 
 Read this file together with `future/plan/specification.md` and `future/plan/standards.md`. A large rewrite fails when it either freezes at “almost done” or tries to absorb every interesting idea before the core is stable. This task is the countermeasure.
 
+Supporting reference:
+
+- `future/plan/validation-matrix.md`
+
 ## Purpose
 
 Define:
@@ -18,6 +22,7 @@ Define:
 
 - `future/plan/specification.md`
 - `future/plan/standards.md`
+- `future/plan/validation-matrix.md`
 - `future/README.md`
 - `future/06-recommended-roadmap.md`
 - `AGENTS.md`
@@ -214,3 +219,21 @@ This task is done when:
 - the deferred-feature list is visible,
 - the documentation maintenance rule is written down,
 - every later rewrite patch can point back to this task and say how it was verified.
+
+## Implementation Review
+
+The current repository now implements this task with:
+
+- this task file as the process-level source of truth,
+- [validation-matrix.md](/home/goulade/Projects/rust/that_bass/future/plan/validation-matrix.md)
+  as the concrete map from rewrite concerns to tests, focused Miri suites, examples, and
+  benchmarks,
+- [benches/v2/runtime.rs](/home/goulade/Projects/rust/that_bass/benches/v2/runtime.rs) extended
+  to sweep worker counts and injection policies for runtime-heavy workloads,
+- [benches/v2/workloads.rs](/home/goulade/Projects/rust/that_bass/benches/v2/workloads.rs) for
+  scan-heavy row-width comparisons, dominant-versus-medium table layouts, keyed-column versus
+  keyless scan cost, singleton-table access, and remove-heavy runtime cost,
+- [future/plan/specification.md](/home/goulade/Projects/rust/that_bass/future/plan/specification.md)
+  updated so Tasks `00` through `10` are now treated as implemented in `src/v2/`,
+- and [AGENTS.md](/home/goulade/Projects/rust/that_bass/AGENTS.md) updated so the codebase spec
+  points newcomers at the validation matrix and the expanded benchmark surface.

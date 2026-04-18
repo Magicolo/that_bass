@@ -1,9 +1,9 @@
-use criterion::{BenchmarkId, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion};
 use std::hint::black_box;
 use std::num::NonZeroUsize;
 use that_bass::v2::{
     command, query,
-    runtime::{Callbacks, Executor, FunctionContext, Options, ResolveContext},
+    runtime::{Callbacks, Executor, FunctionContext, Injection, Options, ResolveContext},
     schedule::Builder,
     schema::{Meta, Table},
     Configuration, Store,
@@ -28,25 +28,35 @@ pub fn benchmark(criterion: &mut Criterion) {
 fn benchmark_many_tiny_jobs(criterion: &mut Criterion) {
     let mut benchmark_group = criterion.benchmark_group("rewrite_runtime/many_tiny_jobs");
     let chunk_counts = [64usize, 256, 1024];
+    let worker_counts = [1usize, 4];
+    let injections = [Injection::PreferProducer, Injection::SharedFirst];
 
     for chunk_count in chunk_counts {
-        benchmark_group.bench_with_input(
-            BenchmarkId::new("chunk_count", chunk_count),
-            &chunk_count,
-            |bencher, chunk_count| {
-                bencher.iter(|| {
-                    let (schedule, mut store) = scan_schedule(*chunk_count);
-                    let report = Executor::with_options(
-                        Options::default()
-                            .with_worker_count(non_zero_usize(4))
-                            .with_record_trace(false),
-                    )
-                    .run(&schedule, &mut store, &NoopCallbacks);
+        for worker_count in worker_counts {
+            for injection in injections {
+                let (schedule, mut store) = scan_schedule(chunk_count);
+                benchmark_group.bench_with_input(
+                    BenchmarkId::new(
+                        format!("chunk_count/workers_{worker_count}/{injection:?}"),
+                        chunk_count,
+                    ),
+                    &chunk_count,
+                    |bencher, _chunk_count| {
+                        bencher.iter(|| {
+                            let report = Executor::with_options(
+                                Options::default()
+                                    .with_worker_count(non_zero_usize(worker_count))
+                                    .with_injection(injection)
+                                    .with_record_trace(false),
+                            )
+                            .run(&schedule, &mut store, &NoopCallbacks);
 
-                    black_box(report);
-                });
-            },
-        );
+                            black_box(report);
+                        });
+                    },
+                );
+            }
+        }
     }
 
     benchmark_group.finish();
@@ -55,26 +65,40 @@ fn benchmark_many_tiny_jobs(criterion: &mut Criterion) {
 fn benchmark_resolve_injection(criterion: &mut Criterion) {
     let mut benchmark_group = criterion.benchmark_group("rewrite_runtime/resolve_injection");
     let chunk_counts = [16usize, 64, 256];
+    let worker_counts = [1usize, 4];
+    let injections = [Injection::PreferProducer, Injection::SharedFirst];
 
     for chunk_count in chunk_counts {
-        benchmark_group.bench_with_input(
-            BenchmarkId::new("chunk_count", chunk_count),
-            &chunk_count,
-            |bencher, chunk_count| {
-                bencher.iter(|| {
-                    let (schedule, mut store, spawn_index) = injection_schedule(*chunk_count);
-                    let callbacks = InjectionCallbacks { spawn_index };
-                    let report = Executor::with_options(
-                        Options::default()
-                            .with_worker_count(non_zero_usize(4))
-                            .with_record_trace(false),
-                    )
-                    .run(&schedule, &mut store, &callbacks);
+        for worker_count in worker_counts {
+            for injection in injections {
+                let (schedule, spawn_index) = injection_schedule(chunk_count);
+                let callbacks = InjectionCallbacks { spawn_index };
+                benchmark_group.bench_with_input(
+                    BenchmarkId::new(
+                        format!("chunk_count/workers_{worker_count}/{injection:?}"),
+                        chunk_count,
+                    ),
+                    &chunk_count,
+                    |bencher, chunk_count| {
+                        bencher.iter_batched(
+                            || seeded_injection_store(*chunk_count),
+                            |mut store| {
+                                let report = Executor::with_options(
+                                    Options::default()
+                                        .with_worker_count(non_zero_usize(worker_count))
+                                        .with_injection(injection)
+                                        .with_record_trace(false),
+                                )
+                                .run(&schedule, &mut store, &callbacks);
 
-                    black_box(report);
-                });
-            },
-        );
+                                black_box(report);
+                            },
+                            BatchSize::LargeInput,
+                        );
+                    },
+                );
+            }
+        }
     }
 
     benchmark_group.finish();
@@ -129,7 +153,6 @@ fn injection_schedule(
     chunk_count: usize,
 ) -> (
     that_bass::v2::schedule::Schedule,
-    Store,
     that_bass::v2::schedule::FunctionIndex,
 ) {
     let mut store = Store::with_configuration(test_configuration());
@@ -158,7 +181,25 @@ fn injection_schedule(
     let _ = position_table_index;
     let schedule = builder.build();
 
-    (schedule, store, spawn_index)
+    (schedule, spawn_index)
+}
+
+fn seeded_injection_store(chunk_count: usize) -> Store {
+    let mut store = Store::with_configuration(test_configuration());
+    let spawner_table_index = store
+        .register_table([Meta::of::<Spawner>()])
+        .expect("benchmark table registration should succeed");
+    let _position_table_index = store
+        .register_table([Meta::of::<Position>()])
+        .expect("benchmark table registration should succeed");
+    populate_chunks(
+        store
+            .table_mut(spawner_table_index)
+            .expect("registered table should stay addressable"),
+        chunk_count,
+    );
+
+    store
 }
 
 fn populate_chunks(table: &mut Table, chunk_count: usize) {
