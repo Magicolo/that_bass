@@ -1,36 +1,19 @@
-mod chunk_layout;
 mod command_resolution;
 mod executor_runtime;
 mod global_tables;
-mod instrumentation;
-mod keyless_rows;
 mod managed_keys;
-mod metadata;
-mod query_surface;
 mod schedule_builder;
 mod store_planning;
 mod vocabulary;
 
 fn main() {
-    println!("that_bass v2 foundation example");
+    println!("that_bass v2 public API example");
     println!();
 
     store_planning::run();
     println!();
 
-    metadata::run();
-    println!();
-
-    chunk_layout::run();
-    println!();
-
-    keyless_rows::run();
-    println!();
-
     managed_keys::run();
-    println!();
-
-    query_surface::run();
     println!();
 
     schedule_builder::run();
@@ -46,7 +29,4 @@ fn main() {
     println!();
 
     vocabulary::run();
-    println!();
-
-    instrumentation::run();
 }

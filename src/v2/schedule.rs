@@ -21,6 +21,7 @@ use crate::v2::{
 use core::any::{type_name, TypeId};
 
 /// The ordering source that establishes one happens-before edge.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ordering {
     /// The default ordering induced by function declaration order when accesses conflict.
@@ -60,6 +61,7 @@ impl ResolveIndex {
 }
 
 /// One scheduled function family in the reusable schedule.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     index: FunctionIndex,
@@ -117,6 +119,7 @@ impl Function {
 }
 
 /// One planned singleton-table side input attached to a function family.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Global {
     table_index: TableIndex,
@@ -158,6 +161,7 @@ impl Global {
 }
 
 /// One resolve family paired with one scheduled function family.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolve {
     index: ResolveIndex,
@@ -200,6 +204,7 @@ impl Resolve {
 }
 
 /// One node in the family-level schedule graph.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Node {
     Function(FunctionIndex),
@@ -207,6 +212,7 @@ pub enum Node {
 }
 
 /// Why one schedule edge exists.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Reason {
     Completion,
@@ -214,6 +220,7 @@ pub enum Reason {
 }
 
 /// One family-level happens-before edge in the reusable schedule graph.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Edge {
     from: Node,
@@ -281,18 +288,22 @@ pub struct Schedule {
 }
 
 impl Schedule {
+    #[doc(hidden)]
     pub const fn root_identifier(&self) -> ResourceId {
         self.root_identifier
     }
 
+    #[doc(hidden)]
     pub fn functions(&self) -> &[Function] {
         &self.functions
     }
 
+    #[doc(hidden)]
     pub fn resolves(&self) -> &[Resolve] {
         &self.resolves
     }
 
+    #[doc(hidden)]
     pub fn edges(&self) -> &[Edge] {
         &self.edges
     }
@@ -309,14 +320,17 @@ impl Schedule {
         self.edges.len()
     }
 
+    #[doc(hidden)]
     pub fn function(&self, function_index: FunctionIndex) -> Option<&Function> {
         self.functions.get(function_index.value())
     }
 
+    #[doc(hidden)]
     pub fn resolve(&self, resolve_index: ResolveIndex) -> Option<&Resolve> {
         self.resolves.get(resolve_index.value())
     }
 
+    #[doc(hidden)]
     pub fn resolve_for_function(&self, function_index: FunctionIndex) -> Option<&Resolve> {
         let function = self.function(function_index)?;
         self.resolve(function.resolve_index())
@@ -367,10 +381,12 @@ pub struct Builder<'table> {
 }
 
 impl<'table> Builder<'table> {
+    #[doc(hidden)]
     pub fn new(store: &'table mut Store) -> Self {
         Self::with_root_identifier(store, ResourceId::new(0))
     }
 
+    #[doc(hidden)]
     pub fn with_root_identifier(store: &'table mut Store, root_identifier: ResourceId) -> Self {
         Self {
             root_identifier,
@@ -387,6 +403,7 @@ impl<'table> Builder<'table> {
         Ok(self.push_planned_function(label.into(), planned_inputs))
     }
 
+    #[doc(hidden)]
     pub fn push_query<Q, F>(
         &mut self,
         label: impl Into<Box<str>>,
@@ -937,6 +954,7 @@ fn plan_like(plan: &command::Plan) -> PlanLike<'_> {
 }
 
 /// Returns whether two dependency paths conflict.
+#[doc(hidden)]
 pub fn conflict(left_dependency: &Dependency, right_dependency: &Dependency) -> bool {
     if !accesses_conflict(left_dependency.access(), right_dependency.access()) {
         return false;
@@ -959,6 +977,7 @@ pub fn conflict(left_dependency: &Dependency, right_dependency: &Dependency) -> 
 }
 
 /// Returns whether one broader dependency covers a more specific dependency.
+#[doc(hidden)]
 pub fn covers(general_dependency: &Dependency, specific_dependency: &Dependency) -> bool {
     if !access_covers(general_dependency.access(), specific_dependency.access()) {
         return false;
@@ -987,6 +1006,7 @@ pub fn covers(general_dependency: &Dependency, specific_dependency: &Dependency)
         })
 }
 
+#[doc(hidden)]
 pub fn conflicts_any(left_dependencies: &[Dependency], right_dependencies: &[Dependency]) -> bool {
     left_dependencies.iter().any(|left_dependency| {
         right_dependencies

@@ -273,10 +273,12 @@ impl Keys {
         }
     }
 
+    #[doc(hidden)]
     pub fn slot_count(&self) -> usize {
         self.shared.slots.read().len()
     }
 
+    #[doc(hidden)]
     pub fn read_dependency(root_identifier: ResourceId) -> Dependency {
         Dependency::new(
             Access::Read,
@@ -287,6 +289,7 @@ impl Keys {
         )
     }
 
+    #[doc(hidden)]
     pub fn write_dependency(root_identifier: ResourceId) -> Dependency {
         Dependency::new(
             Access::Write,

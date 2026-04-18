@@ -8,12 +8,21 @@ Run the current example with:
 cargo run --example v2
 ```
 
+Recommended read order:
+
+- `main.rs` for the newcomer-facing `v2` walkthrough,
+- `store_planning.rs`, `global_tables.rs`, `schedule_builder.rs`,
+  `executor_runtime.rs`, `command_resolution.rs`, and `managed_keys.rs`
+  for the intended first-iteration API,
+- the remaining files only when you need lower-level or more focused demonstrations.
+
 Why this folder exists:
 
 - it gives a newcomer one concrete place to see the current `v2` public API in use,
 - it makes public-surface drift visible during the rewrite,
 - it provides a lightweight integration point that should evolve with the rewrite tasks.
-- it now includes the Task 00 foundation surface, the Task 01 `Meta`/table catalog surface, the Task 02 chunk-layout surface, the Task 03 keyless-row surface, the Task 04 query surface, the Task 05 schedule-builder surface, the Task 06 executor-runtime surface, the Task 07 command-resolution surface, the Task 08 managed-keys surface, and the Task 09 global-table surface.
+- it now includes the newcomer-facing first-iteration surface and a smaller set of focused,
+  advanced demonstrations that still help validate ongoing rewrite tasks.
 
 Maintenance rule:
 

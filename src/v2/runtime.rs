@@ -68,19 +68,23 @@ impl Options {
         self
     }
 
+    #[doc(hidden)]
     pub const fn record_trace(self) -> bool {
         self.record_trace
     }
 
+    #[doc(hidden)]
     pub const fn with_record_trace(mut self, record_trace: bool) -> Self {
         self.record_trace = record_trace;
         self
     }
 
+    #[doc(hidden)]
     pub const fn injection(self) -> Injection {
         self.injection
     }
 
+    #[doc(hidden)]
     pub const fn with_injection(mut self, injection: Injection) -> Self {
         self.injection = injection;
         self
@@ -88,6 +92,7 @@ impl Options {
 }
 
 /// Placement policy for newly injected ready jobs.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Injection {
     PreferProducer,
@@ -95,6 +100,7 @@ pub enum Injection {
 }
 
 /// One visible chunk reported by resolve work.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VisibleChunk {
     table_index: TableIndex,
@@ -125,6 +131,7 @@ impl VisibleChunk {
 }
 
 /// The structural visibility result of one resolve callback.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outcome {
     visible_chunks: Box<[VisibleChunk]>,
@@ -229,6 +236,7 @@ impl<'schedule> ResolveContext<'schedule> {
 }
 
 /// One executor trace entry.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Trace {
     worker_index: usize,
@@ -246,6 +254,7 @@ impl Trace {
 }
 
 /// The kind of runtime work described in one trace entry.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceKind {
     Function {
@@ -311,10 +320,12 @@ impl Report {
         self.max_ready_job_count
     }
 
+    #[doc(hidden)]
     pub fn worker_execution_counts(&self) -> &[usize] {
         &self.worker_execution_counts
     }
 
+    #[doc(hidden)]
     pub fn trace(&self) -> &[Trace] {
         &self.trace
     }
@@ -353,6 +364,7 @@ impl Executor {
         self.run_seeded(schedule, &seed, store, callbacks)
     }
 
+    #[doc(hidden)]
     pub fn run_seeded<C>(
         &self,
         schedule: &Schedule,
@@ -392,6 +404,7 @@ impl Executor {
 }
 
 /// A frame-local topology snapshot used to seed the runtime executor.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Seed {
     tables_by_index: BTreeMap<TableIndex, SeedTable>,

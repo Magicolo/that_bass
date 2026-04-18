@@ -1,40 +1,69 @@
-use that_bass::v2::{
-    command::{Kind, RemoveRows, Strategy},
-    key::Key,
-    query::{self, Access},
-    schedule::Ordering,
-};
+use that_bass::v2::{command, query, Configuration, Key, Store};
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Position {
+    x: f32,
+    y: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Velocity {
+    x: f32,
+    y: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Time {
+    seconds: f32,
+}
 
 pub fn run() {
-    let position_access = Access::Write;
-    let velocity_access = Access::Read;
-    let rows_request = query::rows();
-    let optional_velocity = query::option(query::read::<u32>());
-    let singleton_position = query::one::<u64>();
-    let singleton_position_mut = query::one_mut::<u64>();
-    let query_shape = query::all((rows_request, query::read::<u32>(), optional_velocity))
-        .expect("query declaration should succeed")
-        .filter(query::has::<u64>());
-    let remove_command_kind = Kind::Remove;
-    let resolve_strategy = Strategy::FunctionLevelBatch;
-    let default_ordering = Ordering::ImplicitDeclarationOrder;
-    let remove_buffer = RemoveRows::new();
-    let key = Key::new(12, 3);
+    let mut store = Store::with_configuration(Configuration::default());
+    let position_table_index = store
+        .register::<Position>()
+        .expect("position registration should succeed");
+    let moving_table_index = store
+        .register_row::<(Position, Velocity)>()
+        .expect("row registration should succeed");
+    let time_table_index = store
+        .initialize_global(Time { seconds: 0.016 })
+        .expect("global initialization should succeed");
 
-    println!("Vocabulary snapshot");
-    println!("  query access: position={position_access:?}, velocity={velocity_access:?}");
-    println!("  query rows request: {rows_request:?}");
-    println!("  optional query item: {optional_velocity:?}");
-    println!("  one query item: {singleton_position:?}");
-    println!("  one mutable query item: {singleton_position_mut:?}");
-    println!("  analyzed conjunctive query: {:?}", query_shape.analysis());
-    println!("  command kind: {remove_command_kind:?}");
-    println!("  empty remove buffer length: {}", remove_buffer.len());
-    println!("  resolve strategy: {resolve_strategy:?}");
-    println!("  default ordering: {default_ordering:?}");
-    println!(
-        "  key datum example: slot_index={}, generation={}",
-        key.slot_index(),
-        key.generation()
+    let integrate = (
+        query::all((
+            query::write::<Position>(),
+            query::option(query::read::<Velocity>()),
+        ))
+        .expect("integrate query should be valid"),
+        query::one::<Time>(),
     );
+
+    let mut builder = store.builder();
+    let spawn_index = builder
+        .push(
+            "spawn",
+            query::all(query::rows()).expect("rows query should be valid"),
+        )
+        .expect("spawn function should be registered");
+    builder
+        .add_insert(spawn_index, command::insert::<(Key, Position)>())
+        .expect("keyed insert planning should succeed");
+    let integrate_index = builder
+        .push("integrate", integrate)
+        .expect("mixed stream and singleton inputs should be valid");
+    let schedule = builder.build();
+
+    println!("Recommended surface");
+    println!(
+        "  registered position table: {}",
+        position_table_index.value()
+    );
+    println!("  registered moving table: {}", moving_table_index.value());
+    println!("  initialized time table: {}", time_table_index.value());
+    println!("  schedule functions: {}", schedule.function_count());
+    println!("  schedule resolves: {}", schedule.resolve_count());
+    println!("  integrate function index: {}", integrate_index.value());
 }

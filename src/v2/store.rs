@@ -8,9 +8,12 @@
 //! - the initialization-time table registration surface used by scheduled injections,
 //! - and a direct exclusive-mode helper for singleton-like global tables.
 
-use crate::v2::instrumentation::{NoopSink, Sink};
-use crate::v2::key;
 use crate::v2::schema::{Catalog, ChunkError, DefinitionError, Meta, Table, TableIndex};
+use crate::v2::{
+    command::Columns,
+    instrumentation::{NoopSink, Sink},
+    key,
+};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -63,6 +66,7 @@ impl Store {
         Self::with_instrumentation(configuration, Arc::new(NoopSink::new()))
     }
 
+    #[doc(hidden)]
     pub fn with_instrumentation(
         configuration: Configuration,
         instrumentation_sink: Arc<dyn Sink>,
@@ -80,35 +84,74 @@ impl Store {
         &self.configuration
     }
 
+    #[doc(hidden)]
     pub fn instrumentation_sink(&self) -> &(dyn Sink + Send + Sync + 'static) {
         &*self.instrumentation_sink
     }
 
+    #[doc(hidden)]
     pub fn tables(&self) -> &[Table] {
         &self.tables
     }
 
-    pub fn keys(&self) -> Option<key::Keys> {
+    pub fn keys(&self) -> Option<crate::v2::Keys> {
         self.keys.clone()
     }
 
+    pub fn builder(&mut self) -> crate::v2::Builder<'_> {
+        crate::v2::Builder::new(self)
+    }
+
+    #[doc(hidden)]
     pub fn initialize_keys(&mut self) -> key::Keys {
         let keys = self.keys.get_or_insert_with(key::Keys::new);
         keys.clone()
     }
 
+    #[doc(hidden)]
     pub fn table_count(&self) -> usize {
         self.tables.len()
     }
 
+    #[doc(hidden)]
     pub fn table(&self, table_index: TableIndex) -> Option<&Table> {
         self.tables.get(table_index.value() as usize)
     }
 
+    #[doc(hidden)]
     pub fn table_mut(&mut self, table_index: TableIndex) -> Option<&mut Table> {
         self.tables.get_mut(table_index.value() as usize)
     }
 
+    pub fn register<T>(&mut self) -> Result<TableIndex, DefinitionError>
+    where
+        T: Send + 'static,
+    {
+        self.register_table([Meta::of::<T>()])
+    }
+
+    pub fn ensure<T>(&mut self) -> Result<TableIndex, DefinitionError>
+    where
+        T: Send + 'static,
+    {
+        self.get_or_create_table([Meta::of::<T>()])
+    }
+
+    pub fn register_row<T>(&mut self) -> Result<TableIndex, DefinitionError>
+    where
+        T: Columns,
+    {
+        self.register_table(T::metas())
+    }
+
+    pub fn ensure_row<T>(&mut self) -> Result<TableIndex, DefinitionError>
+    where
+        T: Columns,
+    {
+        self.get_or_create_table(T::metas())
+    }
+
+    #[doc(hidden)]
     pub fn register_table<I>(&mut self, metas: I) -> Result<TableIndex, DefinitionError>
     where
         I: IntoIterator<Item = Meta>,
@@ -119,6 +162,7 @@ impl Store {
         Ok(table_index)
     }
 
+    #[doc(hidden)]
     pub fn get_or_create_table<I>(&mut self, metas: I) -> Result<TableIndex, DefinitionError>
     where
         I: IntoIterator<Item = Meta>,
@@ -153,6 +197,7 @@ impl Store {
         Ok(table_index)
     }
 
+    #[doc(hidden)]
     pub fn table_shape_count(&self) -> usize {
         self.catalog.table_shape_count()
     }

@@ -55,6 +55,12 @@ Current implementation status in `src/v2/`:
   standalone singleton-table queries through `query::one::<T>()` / `query::one_mut::<T>()`,
   mixed stream-plus-singleton schedule planning, and the validation/migration discipline
   artifacts that keep the rewrite benchmarkable and auditable.
+- The first-iteration recommended surface is intentionally smaller than the full implementation:
+  users should normally stay within `Store`, `Configuration`, `ChunkPlan`, `query`, `command`,
+  `Builder`, `Schedule`, `Executor`, `Options`, `Key`, and `Keys`.
+- Lower-level `v2` modules such as `schema`, most schedule internals, runtime seeding details, and
+  diagnostics plumbing may remain public for tests and focused examples, but they are considered
+  advanced/internal until later API expansion work.
 - Tasks `11` and later remain planned work.
 
 ## Goals

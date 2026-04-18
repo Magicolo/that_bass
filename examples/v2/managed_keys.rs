@@ -1,11 +1,7 @@
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
 use that_bass::v2::{
-    command, key, query,
-    runtime::{Callbacks, Executor, FunctionContext, Options},
-    schedule::Builder,
-    schema::Meta,
-    Configuration, Store,
+    command, query, Callbacks, Configuration, Executor, FunctionContext, Key, Options, Store,
 };
 
 #[repr(C)]
@@ -23,39 +19,18 @@ struct Spawner {
 
 pub fn run() {
     let mut store = Store::with_configuration(test_configuration());
-    let spawner_table_index = store
-        .register_table([Meta::of::<Spawner>()])
-        .expect("example table registration should succeed");
-    let chunk_index = store
-        .table_mut(spawner_table_index)
-        .expect("registered table should stay addressable")
-        .push_chunk();
-    unsafe {
-        store
-            .table_mut(spawner_table_index)
-            .expect("registered table should stay addressable")
-            .write::<Spawner>(chunk_index, 0, Spawner { count: 1 })
-            .expect("direct write should succeed");
-        store
-            .table_mut(spawner_table_index)
-            .expect("registered table should stay addressable")
-            .assume_initialized_prefix(chunk_index, 1)
-            .expect("initialized prefix declaration should succeed");
-    }
-
-    let mut builder = Builder::new(&mut store);
-    let producer_index = builder.push_query(
-        "spawn-keyed",
-        query::all(query::read::<Spawner>()).expect("example query declaration should succeed"),
-    );
+    store
+        .initialize_global(Spawner { count: 1 })
+        .expect("global initialization should succeed");
+    let mut builder = store.builder();
+    let producer_index = builder
+        .push("spawn-keyed", query::one::<Spawner>())
+        .expect("singleton input should be valid");
     builder
         .add_keys(producer_index)
         .expect("key injection should succeed");
     builder
-        .add_insert(
-            producer_index,
-            command::Insert::<(key::Key, Position)>::new(),
-        )
+        .add_insert(producer_index, command::insert::<(Key, Position)>())
         .expect("keyed insert planning should succeed");
     let schedule = builder.build();
 
@@ -84,7 +59,7 @@ pub fn run() {
 }
 
 struct DemoCallbacks {
-    reserved_key: Mutex<Option<key::Key>>,
+    reserved_key: Mutex<Option<Key>>,
 }
 
 impl Callbacks for DemoCallbacks {
@@ -92,7 +67,7 @@ impl Callbacks for DemoCallbacks {
         let keys = context.keys().expect("producer should receive Keys");
         let reserved_key = keys.reserve();
         context
-            .insert::<(key::Key, Position)>()
+            .insert::<(Key, Position)>()
             .expect("producer should expose its keyed insert buffer")
             .one((reserved_key, Position { x: 1.0, y: 2.0 }));
         *self.reserved_key.lock() = Some(reserved_key);

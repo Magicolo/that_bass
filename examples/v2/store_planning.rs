@@ -1,6 +1,6 @@
 use core::mem::size_of;
 use core::num::NonZeroUsize;
-use that_bass::v2::{schema::TableLayout, Configuration, Store};
+use that_bass::v2::{Configuration, Store};
 
 #[repr(C)]
 struct BodyState {
@@ -14,18 +14,12 @@ pub fn run() {
         Configuration::default().with_target_chunk_byte_count(non_zero_usize(8 * 1024));
     let tuned_store = Store::with_configuration(tuned_configuration);
 
-    let body_state_layout = TableLayout::new(size_of::<BodyState>(), 2);
-    let default_chunk_plan =
-        default_store.plan_chunk_capacity_for_row_width(body_state_layout.row_width());
-    let tuned_chunk_plan =
-        tuned_store.plan_chunk_capacity_for_row_width(body_state_layout.row_width());
+    let row_width = size_of::<BodyState>();
+    let default_chunk_plan = default_store.plan_chunk_capacity_for_row_width(row_width);
+    let tuned_chunk_plan = tuned_store.plan_chunk_capacity_for_row_width(row_width);
 
     println!("Store planning");
-    println!(
-        "  row width: {} bytes across {} columns",
-        body_state_layout.row_width(),
-        body_state_layout.column_count()
-    );
+    println!("  row width: {row_width} bytes");
     println!(
         "  default target: {} bytes -> chunk capacity {} rows",
         default_chunk_plan.target_chunk_byte_count().get(),

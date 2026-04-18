@@ -20,6 +20,7 @@ use core::{
 use std::collections::BTreeMap;
 
 /// Initialization of one injected item against the current store.
+#[doc(hidden)]
 pub trait Initialize {
     type State;
     type Error;
@@ -28,6 +29,7 @@ pub trait Initialize {
 }
 
 /// The structural command families planned for the first rewrite milestones.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     Insert,
@@ -36,6 +38,7 @@ pub enum Kind {
 }
 
 /// The selected resolve strategy for the rewrite.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Strategy {
     /// Jobs record commands independently, then a later resolve phase batches all command buffers
@@ -44,6 +47,7 @@ pub enum Strategy {
 }
 
 /// One visible chunk state produced by command resolution.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ChunkState {
     table_index: TableIndex,
@@ -74,6 +78,7 @@ impl ChunkState {
 }
 
 /// Errors while resolving deferred command buffers.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
     MissingTable { table_index: TableIndex },
@@ -103,11 +108,17 @@ pub struct Insert<T> {
 }
 
 impl<T> Insert<T> {
+    #[doc(hidden)]
     pub const fn new() -> Self {
         Self {
             marker: PhantomData,
         }
     }
+}
+
+/// Create a typed insert descriptor for one scheduled function.
+pub const fn insert<T>() -> Insert<T> {
+    Insert::new()
 }
 
 impl<T> Initialize for Insert<T>
@@ -131,6 +142,7 @@ pub struct Remove<F = crate::v2::query::AllowAll> {
 }
 
 impl<F> Remove<F> {
+    #[doc(hidden)]
     pub const fn new(filter: F) -> Self {
         Self { filter }
     }
@@ -138,6 +150,11 @@ impl<F> Remove<F> {
     pub const fn filter(&self) -> &F {
         &self.filter
     }
+}
+
+/// Create a filtered remove descriptor for one scheduled function.
+pub const fn remove<F>(filter: F) -> Remove<F> {
+    Remove::new(filter)
 }
 
 impl<F> Initialize for Remove<F>
@@ -163,6 +180,7 @@ where
 }
 
 /// Type-level column declaration and row application for typed inserts.
+#[doc(hidden)]
 pub trait Columns: Sized + Send + 'static {
     fn metas() -> impl Iterator<Item = Meta>;
 
@@ -219,6 +237,7 @@ impl_columns_tuples!(
 );
 
 /// One planned command descriptor attached to a resolve family.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
     Insert(InsertPlan),
@@ -250,6 +269,7 @@ type ResolveRows =
     fn(&mut dyn Any, &mut Table, Option<&key::Keys>) -> Result<Box<[ChunkState]>, ResolveError>;
 
 /// One typed insert plan resolved during initialization.
+#[doc(hidden)]
 #[derive(Clone)]
 pub struct InsertPlan {
     table_index: TableIndex,
@@ -312,6 +332,7 @@ impl InsertPlan {
 }
 
 /// One remove plan resolved during initialization.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovePlan {
     allowed_table_indices: Box<[TableIndex]>,
@@ -324,6 +345,7 @@ impl RemovePlan {
 }
 
 /// A batch of local command buffers merged for one resolve phase.
+#[doc(hidden)]
 #[derive(Debug)]
 pub struct Batch {
     entries: Box<[Entry]>,
@@ -371,6 +393,7 @@ impl Batch {
 }
 
 /// One local per-job command buffer.
+#[doc(hidden)]
 #[derive(Debug)]
 pub struct Buffer {
     entries: Box<[Entry]>,

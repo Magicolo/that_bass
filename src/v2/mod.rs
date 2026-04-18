@@ -17,6 +17,20 @@
 //! - keep benchmark-specific logic outside the library in `benches/`,
 //! - let module names carry context so public type names can stay short and clear.
 //!
+//! Recommended surface for the first `v2` iteration:
+//!
+//! - [`Store`], [`Configuration`], and [`ChunkPlan`] for setup,
+//! - [`Store::register`], [`Store::register_row`], and [`Store::initialize_global`] for schema
+//!   declaration,
+//! - [`command`] for deferred structural edits,
+//! - [`query`] for chunk-stream and singleton descriptors,
+//! - [`Builder`] and [`Schedule`] for plan construction,
+//! - [`Executor`], [`Options`], and [`Callbacks`] for execution,
+//! - [`Key`] and [`Keys`] for opt-in managed identity.
+//!
+//! Most other modules remain available only to support tests, focused examples, and the ongoing
+//! rewrite. They should be treated as advanced/internal until the public surface expands.
+//!
 //! Module map:
 //!
 //! - `command`: injected command initialization, deferred command vocabulary, and batched resolve
@@ -81,12 +95,21 @@
 //! runtime is intentionally free to execute non-deterministically.
 
 pub mod command;
+#[doc(hidden)]
 pub mod instrumentation;
+#[doc(hidden)]
 pub mod key;
 pub mod query;
+#[doc(hidden)]
 pub mod runtime;
+#[doc(hidden)]
 pub mod schedule;
+#[doc(hidden)]
 pub mod schema;
+#[doc(hidden)]
 pub mod store;
 
-pub use self::store::{ChunkPlan, Configuration, Store};
+pub use self::key::{Key, Keys};
+pub use self::runtime::{Callbacks, Executor, FunctionContext, Options, Report, ResolveContext};
+pub use self::schedule::{Builder, Error as ScheduleError, FunctionIndex, ResolveIndex, Schedule};
+pub use self::store::{ChunkPlan, Configuration, GlobalError, Store};

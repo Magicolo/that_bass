@@ -26,6 +26,7 @@ use core::{
 use std::collections::BTreeSet;
 
 /// The access level a future query item may request.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Access {
     Read,
@@ -42,6 +43,7 @@ impl Access {
 }
 
 /// One declared access requirement produced by a query descriptor.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DeclaredAccess {
     identifier: TypeId,
@@ -113,6 +115,7 @@ impl From<key::Error> for Error {
 }
 
 /// Slice-like chunk view behavior shared by real slices, generated rows, and optional wrappers.
+#[doc(hidden)]
 pub trait View: Sized {
     type Element;
     type IntoIter: DoubleEndedIterator<Item = Self::Element> + ExactSizeIterator + FusedIterator;
@@ -176,6 +179,7 @@ impl<'job> View for Rows<'job> {
 ///
 /// When the wrapped sub-query is absent from the matched table, this view still exposes the chunk
 /// length and yields `None` for every iterated row position.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Optional<V> {
     value: Option<V>,
@@ -250,6 +254,7 @@ impl<V: View> View for Optional<V> {
     }
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub enum OptionalIter<I, T> {
     Present(PresentOptionalIter<I>),
@@ -303,6 +308,7 @@ where
 
 impl<I, T> FusedIterator for OptionalIter<I, T> where I: FusedIterator<Item = T> {}
 
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct PresentOptionalIter<I> {
     iterator: I,
@@ -343,6 +349,7 @@ where
 
 impl<I> FusedIterator for PresentOptionalIter<I> where I: FusedIterator {}
 
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct MissingOptionalIter<T> {
     remaining: usize,
@@ -381,28 +388,33 @@ impl<T> ExactSizeIterator for MissingOptionalIter<T> {
 impl<T> FusedIterator for MissingOptionalIter<T> {}
 
 /// A request for transient row handles aligned with a chunk's inhabited prefix.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct RowsRequest;
 
 /// A read-only chunk-slice query item.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Read<T> {
     marker: PhantomData<fn() -> T>,
 }
 
 /// A mutable chunk-slice query item.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Write<T> {
     marker: PhantomData<fn() -> T>,
 }
 
 /// A query item wrapper that yields a zip-friendly optional view.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OptionQuery<Q> {
     query: Q,
 }
 
 /// A singleton-table query descriptor that expects exactly one matching row in one matching table.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct One<T> {
     access: Access,
@@ -410,22 +422,26 @@ pub struct One<T> {
 }
 
 /// A table-level admission filter requiring the presence of one type.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Has<T> {
     marker: PhantomData<fn() -> T>,
 }
 
 /// A negated table-level filter.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Not<F> {
     filter: F,
 }
 
 /// The default filter that admits every table.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct AllowAll;
 
 /// The analyzed filter constraints for conservative disjointness proofs.
+#[doc(hidden)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FilterPlan {
     required_identifiers: BTreeSet<TypeId>,
@@ -459,6 +475,7 @@ impl FilterPlan {
 }
 
 /// The analyzed form of one conjunctive query.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Analysis {
     declared_accesses: Box<[DeclaredAccess]>,
@@ -491,6 +508,7 @@ impl Analysis {
 }
 
 /// One conjunctive query stream with optional table-level filters.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct All<Q, F = AllowAll> {
     query: Q,
@@ -556,6 +574,7 @@ where
     })
 }
 
+#[doc(hidden)]
 pub trait Filter: Sized {
     fn matches(&self, table: &Table) -> bool;
 
@@ -627,6 +646,7 @@ impl_filter_tuple!(
     (F0: f0, F1: f1, F2: f2, F3: f3)
 );
 
+#[doc(hidden)]
 pub trait Query {
     type Item<'table, 'job>
     where
@@ -647,6 +667,7 @@ pub trait Query {
     ) -> Result<Self::Item<'table, 'job>, Error>;
 }
 
+#[doc(hidden)]
 pub trait LookupQuery {
     type Item<'table, 'job>
     where
@@ -910,6 +931,7 @@ impl<T: 'static> One<T> {
     }
 }
 
+#[doc(hidden)]
 pub trait QueryTuple {
     type Item<'table, 'job>
     where
@@ -930,6 +952,7 @@ pub trait QueryTuple {
     ) -> Result<Self::Item<'table, 'job>, Error>;
 }
 
+#[doc(hidden)]
 pub trait LookupTuple {
     type Item<'table, 'job>
     where

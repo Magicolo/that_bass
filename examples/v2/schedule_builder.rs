@@ -1,5 +1,5 @@
 use core::num::NonZeroUsize;
-use that_bass::v2::{command, query, schedule::Builder, schema::Meta, Configuration, Store};
+use that_bass::v2::{command, query, Configuration, Store};
 
 #[repr(C)]
 struct Position {
@@ -18,13 +18,13 @@ pub fn run() {
         Configuration::default().with_target_chunk_byte_count(non_zero_usize(8 * 1024)),
     );
     store
-        .register_table([Meta::of::<Position>()])
+        .register::<Position>()
         .expect("example table registration should succeed");
     store
-        .register_table([Meta::of::<Position>(), Meta::of::<Velocity>()])
+        .register_row::<(Position, Velocity)>()
         .expect("example table registration should succeed");
 
-    let mut builder = Builder::new(&mut store);
+    let mut builder = store.builder();
     let integrate_index = builder.push_query(
         "integrate",
         query::all((
@@ -38,7 +38,7 @@ pub fn run() {
         query::all(query::rows()).expect("example query declaration should succeed"),
     );
     builder
-        .add_insert(spawn_index, command::Insert::<(Position, Velocity)>::new())
+        .add_insert(spawn_index, command::insert::<(Position, Velocity)>())
         .expect("typed insert should resolve to a known table");
     let clamp_index = builder.push_query(
         "clamp",
@@ -50,35 +50,9 @@ pub fn run() {
     println!("  function count: {}", schedule.function_count());
     println!("  resolve count: {}", schedule.resolve_count());
     println!("  edge count: {}", schedule.edge_count());
-    println!(
-        "  integrate known tables: {:?}",
-        schedule
-            .function(integrate_index)
-            .expect("integrate function should exist")
-            .known_tables()
-    );
-    println!(
-        "  spawn resolve dependencies: {:?}",
-        schedule
-            .resolve_for_function(spawn_index)
-            .expect("spawn resolve should exist")
-            .dependencies()
-    );
-    println!(
-        "  spawn planned commands: {:?}",
-        schedule
-            .resolve_for_function(spawn_index)
-            .expect("spawn resolve should exist")
-            .command_plans()
-    );
-    println!(
-        "  clamp known tables: {:?}",
-        schedule
-            .function(clamp_index)
-            .expect("clamp function should exist")
-            .known_tables()
-    );
-    println!("  edges: {:?}", schedule.edges());
+    println!("  integrate function index: {}", integrate_index.value());
+    println!("  spawn function index: {}", spawn_index.value());
+    println!("  clamp function index: {}", clamp_index.value());
 }
 
 fn non_zero_usize(value: usize) -> NonZeroUsize {

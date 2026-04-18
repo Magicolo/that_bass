@@ -1,10 +1,7 @@
 use std::num::NonZeroUsize;
 use that_bass::v2::{
-    command, query,
-    runtime::{Callbacks, Executor, FunctionContext, Options, ResolveContext},
-    schedule::Builder,
-    schema::Meta,
-    Configuration, Store,
+    command, query, Callbacks, Configuration, Executor, FunctionContext, FunctionIndex, Options,
+    Store,
 };
 
 #[derive(Clone, Copy)]
@@ -22,82 +19,49 @@ struct Spawner {
 
 pub fn run() {
     let mut store = Store::with_configuration(test_configuration());
-    let spawner_table_index = store
-        .register_table([Meta::of::<Spawner>()])
-        .expect("example table registration should succeed");
     store
-        .table_mut(spawner_table_index)
-        .expect("registered table should stay addressable")
-        .push_chunk();
-
-    let mut builder = Builder::new(&mut store);
-    let spawn_index = builder.push_query(
-        "spawn",
-        query::all(query::read::<Spawner>()).expect("example query declaration should succeed"),
-    );
+        .initialize_global(Spawner { count: 1 })
+        .expect("global initialization should succeed");
+    let mut builder = store.builder();
+    let spawn_index = builder
+        .push("spawn", query::one::<Spawner>())
+        .expect("singleton input should be valid");
     let clamp_index = builder.push_query(
         "clamp",
         query::all(query::read::<Position>()).expect("example query declaration should succeed"),
     );
     builder
-        .add_insert(spawn_index, command::Insert::<(Position,)>::new())
+        .add_insert(spawn_index, command::insert::<(Position,)>())
         .expect("typed insert should resolve to one known table");
     let schedule = builder.build();
     let callbacks = DemoCallbacks {
         spawn_index,
         inserted_position: Position { x: 1.0, y: 2.0 },
     };
-    let report = Executor::with_options(
-        Options::default()
-            .with_worker_count(non_zero_usize(2))
-            .with_record_trace(true),
-    )
-    .run(&schedule, &mut store, &callbacks);
+    let report = Executor::with_options(Options::default().with_worker_count(non_zero_usize(2)))
+        .run(&schedule, &mut store, &callbacks);
 
     println!("Executor runtime");
     println!("  function count: {}", schedule.function_count());
     println!("  created job count: {}", report.created_job_count());
     println!("  injected job count: {}", report.injected_job_count());
     println!("  steal count: {}", report.steal_count());
-    println!(
-        "  clamp known tables: {:?}",
-        schedule
-            .function(clamp_index)
-            .expect("clamp function should exist")
-            .known_tables()
-    );
-    println!("  trace: {:?}", report.trace());
+    println!("  clamp function index: {}", clamp_index.value());
 }
 
 struct DemoCallbacks {
-    spawn_index: that_bass::v2::schedule::FunctionIndex,
+    spawn_index: FunctionIndex,
     inserted_position: Position,
 }
 
 impl Callbacks for DemoCallbacks {
     fn run_function(&self, mut context: FunctionContext<'_, '_>) {
-        println!(
-            "  function {:?} on table {:?} chunk {:?} worker {}",
-            context.function_index(),
-            context.table_index(),
-            context.chunk_index(),
-            context.worker_index(),
-        );
-
         if context.function_index() == self.spawn_index {
             context
                 .insert::<(Position,)>()
                 .expect("spawn function should expose its typed insert buffer")
                 .one((self.inserted_position,));
         }
-    }
-
-    fn run_resolve(&self, context: ResolveContext<'_>) {
-        println!(
-            "  resolve {:?} on worker {}",
-            context.resolve_index(),
-            context.worker_index(),
-        );
     }
 }
 
