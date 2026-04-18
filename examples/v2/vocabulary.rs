@@ -10,7 +10,8 @@ pub fn run() {
     let velocity_access = Access::Read;
     let rows_request = query::rows();
     let optional_velocity = query::option(query::read::<u32>());
-    let singleton_position = query::one(query::read::<u64>());
+    let singleton_position = query::one::<u64>();
+    let singleton_position_mut = query::one_mut::<u64>();
     let query_shape = query::all((rows_request, query::read::<u32>(), optional_velocity))
         .expect("query declaration should succeed")
         .filter(query::has::<u64>());
@@ -25,6 +26,7 @@ pub fn run() {
     println!("  query rows request: {rows_request:?}");
     println!("  optional query item: {optional_velocity:?}");
     println!("  one query item: {singleton_position:?}");
+    println!("  one mutable query item: {singleton_position_mut:?}");
     println!("  analyzed conjunctive query: {:?}", query_shape.analysis());
     println!("  command kind: {remove_command_kind:?}");
     println!("  empty remove buffer length: {}", remove_buffer.len());

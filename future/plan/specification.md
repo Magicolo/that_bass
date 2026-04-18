@@ -39,7 +39,7 @@ The selected direction is:
 
 Current implementation status in `src/v2/`:
 
-- Tasks `00` through `08` are implemented in the isolated rewrite lane.
+- Tasks `00` through `09` are implemented in the isolated rewrite lane.
 - The current `v2` surface now includes the foundation boundary, metadata and row vocabulary,
   single-allocation chunk storage, keyless row views and remove buffers, the first typed query
   surface, reusable schedule-family planning with monotone dependency paths, and a frame-local
@@ -50,8 +50,10 @@ Current implementation status in `src/v2/`:
   `get_or_create_table(...)`, filtered remove planning, store-backed structural resolution,
   explicit `Keys` initialization through `Store::initialize_keys()`, schedule-level key injection,
   runtime `Keys` access in function contexts, inline keyed insert/remove synchronization during
-  resolve, and keyed random lookup through `query::All::get(...)`.
-- Tasks `09` and later remain planned work.
+  resolve, keyed random lookup through `query::All::get(...)`, `Store::initialize_global(...)`,
+  standalone singleton-table queries through `query::one::<T>()` / `query::one_mut::<T>()`, and
+  mixed stream-plus-singleton schedule planning.
+- Tasks `10` and later remain planned work.
 
 ## Goals
 
@@ -513,7 +515,8 @@ Required MVP combinators:
 - `query::rows()`
 - `query::option(...)`
 - `query::all(...)`
-- `query::one(...)`
+- `query::one::<T>()`
+- `query::one_mut::<T>()`
 
 Why `query::all(...)` exists:
 
@@ -522,6 +525,11 @@ Why `query::all(...)` exists:
 - it leaves room for future dynamic query forms.
 - it is the one fallible query constructor, so invalid overlapping live access is rejected before
   any `All` query exists.
+
+Important global-query rule:
+
+- `query::all(...)` is only for one chunk stream,
+- singleton inputs are declared beside that stream, not inside it.
 
 ## Query Safety Rule
 
@@ -939,10 +947,34 @@ Implications:
 Convenience APIs such as:
 
 ```rust
-query::one(query::read::<Physics>())
+query::one::<Physics>()
 ```
 
 are encouraged, but they are syntax over the same table machinery.
+
+The selected injection direction is:
+
+```rust
+schedule.push(
+    (
+        query::write::<Position>(),
+        query::one::<Time>(),
+    ),
+    |(positions, time)| {
+        let _ = (positions, time);
+    },
+);
+```
+
+not:
+
+```rust
+query::all((query::write::<Position>(), query::one::<Time>()))
+```
+
+because a conjunctive chunk stream should not try to intersect ordinary chunk tables with a
+singleton table. Singleton-aware schedule registration should also reuse `query::one::<T>()`
+validation so malformed singleton tables are rejected before execution.
 
 ## Column Decomposition
 

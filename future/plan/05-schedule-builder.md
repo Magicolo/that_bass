@@ -36,6 +36,8 @@ Build the reusable schedule representation that:
 7. Only resolve phases perform structural mutation; ordinary jobs do not mutate topology directly.
 8. Typed command families such as `Insert<T>` should let the schedule know their target table
    before first execution when possible.
+9. Singleton-table side inputs such as `query::one::<T>()` should be planned beside chunk streams,
+   not folded into `query::all(...)`.
 
 ## Two-Level Model
 
@@ -267,9 +269,10 @@ Important clarification:
 5. Define and test `covers(general, specific)` for broad-versus-precise dependencies.
 6. Define plan-time conflict edges between families.
 7. Define runtime dependency templates for per-chunk execution jobs and function-level batched resolve families, using hierarchical dependency paths rather than leaf-only resource names.
-8. Define a stable schedule object that can be reused across frames.
-9. Cache known eligible tables during initialization when that information is statically available.
-10. Add tests for:
+8. Define per-job static dependencies for non-chunk resources such as `Keys` and singleton tables.
+9. Define a stable schedule object that can be reused across frames.
+10. Cache known eligible tables during initialization when that information is statically available.
+11. Add tests for:
    - no conflict between pure reads,
    - chunk-scoped ordering between same-writer families,
    - broad chunk/store writers conflicting correctly with descendant accesses,
@@ -318,7 +321,10 @@ The current repository now implements this task in `src/v2/schedule.rs` with:
   families,
 - typed `Insert<T>` predeclaration through `Builder::add_insert(...)`,
 - typed insert initialization through catalog-backed `get_or_create_table(...)` planning,
-- and statically known table caching for query families.
+- statically known table caching for query families,
+- mixed stream-plus-singleton input planning through `Builder::push(...)`,
+- and per-job static dependencies so singleton-table and `Keys` access survive runtime chunk
+  expansion instead of remaining only at the family-planning level.
 
 The supporting metadata layer in `src/v2/schema.rs` now exposes the monotone dependency paths that
 Task 05 expects, rather than the earlier "ancestor reads plus leaf write" representation.

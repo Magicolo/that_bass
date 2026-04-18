@@ -40,7 +40,7 @@ Before reading these files, use:
 - [08-managed-keys.md](/home/goulade/Projects/rust/that_bass/future/plan/08-managed-keys.md)
   - `Keys` resource, `Key` columns, and reverse mapping.
 - [09-global-tables.md](/home/goulade/Projects/rust/that_bass/future/plan/09-global-tables.md)
-  - Table-backed globals and `query::one(...)`.
+  - Table-backed globals, `Store::initialize_global(...)`, and `query::one::<T>()`.
 - [10-validation-and-migration.md](/home/goulade/Projects/rust/that_bass/future/plan/10-validation-and-migration.md)
   - Validation, migration, and documentation discipline.
 - [11-direct-exclusive-api.md](/home/goulade/Projects/rust/that_bass/future/plan/11-direct-exclusive-api.md)

@@ -41,7 +41,8 @@ The exact API syntax can evolve. The MVP needs the following concepts:
 - `query::rows()`
 - `query::option(...)`
 - `query::all(...)`
-- `query::one(...)`
+- `query::one::<T>()`
+- `query::one_mut::<T>()`
 - filter combinators such as `query::has::<T>()` and `query::not(...)`
 
 The design must avoid this ambiguity:
@@ -171,7 +172,7 @@ MVP support should preserve the existing mental model:
 
 That matches the current crate and the chosen chunk-based model well.
 
-## `query::one(...)`
+## `query::one::<T>()`
 
 Because singletons are modeled as normal tables, the query layer needs a convenience wrapper that means:
 
@@ -179,6 +180,12 @@ Because singletons are modeled as normal tables, the query layer needs a conveni
 - produce a single view rather than a chunk stream.
 
 This is a query-level convenience, not a special storage path.
+
+Important correction:
+
+- `query::one::<T>()` is not a sub-query inside `query::all(...)`,
+- it is a separate singleton input,
+- mixed functions should inject it beside the chunk stream.
 
 ## Optional And Missing Data
 
@@ -304,13 +311,13 @@ The current implementation does the following:
    - `query::Write<T>`
    - `query::RowsRequest`
    - `query::OptionQuery<Q>`
-   - `query::One<Q>`
+   - standalone singleton descriptors such as `query::One<T>`
 2. exposes the public constructors:
    - `query::read::<T>()`
    - `query::write::<T>()`
    - `query::rows()`
    - `query::option(...)`
-   - `query::one(...)`
+   - `query::one::<T>()`
    - `query::all(...)`
 3. implements `query::Optional<_>` as a zip-friendly optional view that yields `Option`s of the sub-query's iterated item type,
 4. implements table-level filters through:

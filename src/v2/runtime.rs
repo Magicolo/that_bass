@@ -1314,21 +1314,20 @@ fn function_job_dependencies(
     let function = schedule
         .function(function_index)
         .expect("function dependency projection should address an existing function");
-    let Some(query_analysis) = function.query_analysis() else {
-        return Box::new([]);
-    };
-    let mut dependencies = Vec::new();
+    let mut dependencies = function.static_job_dependencies().to_vec();
 
-    for declared_access in query_analysis.declared_accesses() {
-        let Some(dependency) = seed_table.dependency_for_identifier(
-            schedule.root_identifier(),
-            declared_access.identifier(),
-            declared_access.access(),
-            chunk_index,
-        ) else {
-            continue;
-        };
-        push_dependency_if_missing(&mut dependencies, dependency);
+    if let Some(query_analysis) = function.query_analysis() {
+        for declared_access in query_analysis.declared_accesses() {
+            let Some(dependency) = seed_table.dependency_for_identifier(
+                schedule.root_identifier(),
+                declared_access.identifier(),
+                declared_access.access(),
+                chunk_index,
+            ) else {
+                continue;
+            };
+            push_dependency_if_missing(&mut dependencies, dependency);
+        }
     }
 
     dependencies.into_boxed_slice()

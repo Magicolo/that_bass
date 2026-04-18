@@ -239,6 +239,8 @@ The current repository now implements this task in `src/v2/runtime.rs` with:
 - worker-local and shared `VecDeque` ready queues protected by `parking_lot::Mutex`,
 - stealing by taking independent jobs from other workers when the local queue is empty,
 - one runtime function job per seeded chunk and one runtime resolve job per function family,
+- per-job dependency synthesis that merges chunk-specific dependencies with schedule-time static
+  job dependencies such as singleton-table or `Keys` access,
 - explicit readiness tracking with successor lists and per-job predecessor counters,
 - runtime-owned command resolution that mutates `Store` directly and reports resulting
   `VisibleChunk` values through `runtime::Outcome`,

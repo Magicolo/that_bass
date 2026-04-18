@@ -75,7 +75,7 @@ At minimum benchmark:
 - same-frame insert then downstream query,
 - remove-heavy workloads,
 - keyed versus keyless tables,
-- singleton-table access through `query::one(...)`.
+- singleton-table access through `Store::initialize_global(...)` plus `query::one::<T>()`.
 
 Tests in this rewrite should use `checkito` heavily rather than ad hoc arbitrary values.
 Unsafe-sensitive paths should also receive targeted Miri coverage.

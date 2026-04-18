@@ -200,45 +200,6 @@ fn disjoint_filter_split_is_accepted_for_same_written_type() {
     assert!(!left.conflicts_with(&right));
 }
 
-#[test]
-fn one_query_projects_one_row_as_a_single_item() {
-    let mut table = make_table([Meta::of::<Position>()]);
-    let chunk_index = push_chunk_with_minimum_capacity(&mut table, 1);
-    write_positions(&mut table, chunk_index, &[Position { x: 9.0, y: 10.0 }]);
-
-    let query = query::all(query::one(query::read::<Position>()))
-        .expect("query declaration should succeed");
-    let position = query
-        .project_chunk(&mut table, chunk_index)
-        .expect("one query projection should succeed");
-
-    assert_eq!(position, &Position { x: 9.0, y: 10.0 });
-}
-
-#[test]
-fn one_query_rejects_chunks_with_more_than_one_row() {
-    let mut table = make_table([Meta::of::<Position>()]);
-    let chunk_index = push_chunk_with_minimum_capacity(&mut table, 2);
-    write_positions(
-        &mut table,
-        chunk_index,
-        &[Position { x: 1.0, y: 2.0 }, Position { x: 3.0, y: 4.0 }],
-    );
-
-    let query = query::all(query::one(query::read::<Position>()))
-        .expect("query declaration should succeed");
-    let table_index = table.index();
-
-    assert_eq!(
-        query.project_chunk(&mut table, chunk_index),
-        Err(Error::InvalidOneCardinality {
-            table_index,
-            chunk_index,
-            count: 2,
-        })
-    );
-}
-
 fn make_table<const COLUMN_COUNT: usize>(metas: [Meta; COLUMN_COUNT]) -> Table {
     let mut catalog = Catalog::new();
     catalog

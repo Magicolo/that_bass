@@ -5,6 +5,7 @@
 //! - typed read and write descriptors,
 //! - generated row-handle requests,
 //! - optional sub-queries that remain zip-friendly,
+//! - standalone singleton-table descriptors,
 //! - table-level filters,
 //! - conjunctive query composition,
 //! - and conservative access-conflict analysis.
@@ -71,13 +72,20 @@ pub enum Error {
         right_type_name: &'static str,
         right_access: Access,
     },
+    MissingOneTable {
+        type_name: &'static str,
+    },
+    MultipleOneTables {
+        type_name: &'static str,
+        table_indices: Box<[TableIndex]>,
+    },
+    InvalidOneRowCount {
+        type_name: &'static str,
+        table_index: TableIndex,
+        count: usize,
+    },
     TableDoesNotMatch {
         table_index: TableIndex,
-    },
-    InvalidOneCardinality {
-        table_index: TableIndex,
-        chunk_index: ChunkIndex,
-        count: usize,
     },
     MissingKeyedTable {
         table_index: TableIndex,
@@ -394,10 +402,11 @@ pub struct OptionQuery<Q> {
     query: Q,
 }
 
-/// A query item wrapper that expects exactly one row in the matched chunk.
+/// A singleton-table query descriptor that expects exactly one matching row in one matching table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct One<Q> {
-    query: Q,
+pub struct One<T> {
+    access: Access,
+    marker: PhantomData<fn() -> T>,
 }
 
 /// A table-level admission filter requiring the presence of one type.
@@ -509,8 +518,18 @@ pub const fn option<Q>(query: Q) -> OptionQuery<Q> {
     OptionQuery { query }
 }
 
-pub const fn one<Q>(query: Q) -> One<Q> {
-    One { query }
+pub const fn one<T>() -> One<T> {
+    One {
+        access: Access::Read,
+        marker: PhantomData,
+    }
+}
+
+pub const fn one_mut<T>() -> One<T> {
+    One {
+        access: Access::Write,
+        marker: PhantomData,
+    }
 }
 
 pub const fn has<T>() -> Has<T> {
@@ -834,73 +853,60 @@ where
     }
 }
 
-impl<Q> Query for One<Q>
-where
-    Q: Query,
-    for<'table, 'job> Q::Item<'table, 'job>: View,
-{
-    type Item<'table, 'job>
-        = <Q::Item<'table, 'job> as View>::Element
-    where
-        Self: 'table;
-
-    fn collect_declared_accesses(&self, declared_accesses: &mut Vec<DeclaredAccess>) {
-        self.query.collect_declared_accesses(declared_accesses);
-    }
-
-    fn matches_table(&self, table: &Table) -> bool {
-        self.query.matches_table(table)
-    }
-
-    unsafe fn project_chunk<'table, 'job>(
-        &self,
-        table: *mut Table,
-        chunk_index: ChunkIndex,
-    ) -> Result<Self::Item<'table, 'job>, Error> {
-        // Safety: the caller ensures projection aliasing has already been validated.
-        let view = unsafe { self.query.project_chunk(table, chunk_index)? };
-        let count = view.len();
-        if count != 1 {
-            // Safety: the caller ensures `table` remains a valid pointer here.
-            let table_index = unsafe { (&*table).index() };
-            return Err(Error::InvalidOneCardinality {
-                table_index,
-                chunk_index,
-                count,
-            });
-        }
-
-        view.into_view_iter().next().ok_or_else(|| {
-            let table_index = unsafe { (&*table).index() };
-            Error::InvalidOneCardinality {
-                table_index,
-                chunk_index,
-                count,
-            }
-        })
+impl<T> One<T> {
+    pub const fn access(&self) -> Access {
+        self.access
     }
 }
 
-impl<Q> LookupQuery for One<Q>
-where
-    Q: LookupQuery,
-{
-    type Item<'table, 'job>
-        = Q::Item<'table, 'job>
-    where
-        Self: 'table;
-
-    fn matches_table(&self, table: &Table) -> bool {
-        self.query.matches_table(table)
+impl<T: 'static> One<T> {
+    pub fn matches_table(&self, table: &Table) -> bool {
+        table.inline_meta_for::<T>().is_some()
     }
 
-    unsafe fn project_row<'table, 'job>(
-        &self,
-        table: *const Table,
-        chunk_index: ChunkIndex,
-        row_index: usize,
-    ) -> Result<Self::Item<'table, 'job>, Error> {
-        unsafe { self.query.project_row(table, chunk_index, row_index) }
+    pub fn table_index(&self, store: &Store) -> Result<TableIndex, Error> {
+        let table = resolve_one_table::<T>(store)?;
+        resolve_one_row::<T>(table)?;
+
+        Ok(table.index())
+    }
+
+    pub fn get<'table>(&self, store: &'table Store) -> Result<&'table T, Error> {
+        let table = resolve_one_table::<T>(store)?;
+        let (chunk_index, row_index) = resolve_one_row::<T>(table)?;
+
+        table
+            .slice::<T>(chunk_index)
+            .map_err(Error::from)?
+            .get(row_index)
+            .ok_or(Error::Chunk(ChunkError::RowIndexOutsideInitializedPrefix {
+                row_index,
+                count: table
+                    .chunk(chunk_index)
+                    .expect("resolved one row chunk should stay addressable")
+                    .count(),
+            }))
+    }
+
+    pub fn get_mut<'table>(&self, store: &'table mut Store) -> Result<&'table mut T, Error> {
+        let table_index = resolve_one_table_index::<T>(store)?;
+        let table = store.table_mut(table_index).ok_or(Error::MissingOneTable {
+            type_name: type_name::<T>(),
+        })?;
+        let (chunk_index, row_index) = resolve_one_row::<T>(table)?;
+        let count = table
+            .chunk(chunk_index)
+            .expect("resolved one row chunk should stay addressable")
+            .count();
+
+        table
+            .slice_mut::<T>(chunk_index)
+            .map_err(Error::from)?
+            .get_mut(row_index)
+            .ok_or(Error::Chunk(ChunkError::RowIndexOutsideInitializedPrefix {
+                row_index,
+                count,
+            }))
     }
 }
 
@@ -1189,6 +1195,70 @@ where
                 .project_row(table_pointer, chunk_index, row_index)
         }
     }
+}
+
+fn resolve_one_table<T: 'static>(store: &Store) -> Result<&Table, Error> {
+    let table_index = resolve_one_table_index::<T>(store)?;
+
+    store.table(table_index).ok_or(Error::MissingOneTable {
+        type_name: type_name::<T>(),
+    })
+}
+
+fn resolve_one_table_index<T: 'static>(store: &Store) -> Result<TableIndex, Error> {
+    let mut first_table_index = None;
+    let mut ambiguous_table_indices = None;
+
+    for table in store.tables() {
+        if table.inline_meta_for::<T>().is_none() {
+            continue;
+        }
+
+        let table_index = table.index();
+        match (&mut first_table_index, &mut ambiguous_table_indices) {
+            (None, None) => first_table_index = Some(table_index),
+            (Some(existing_table_index), None) => {
+                ambiguous_table_indices = Some(vec![*existing_table_index, table_index]);
+            }
+            (_, Some(table_indices)) => table_indices.push(table_index),
+        }
+    }
+
+    match (first_table_index, ambiguous_table_indices) {
+        (None, None) => Err(Error::MissingOneTable {
+            type_name: type_name::<T>(),
+        }),
+        (Some(table_index), None) => Ok(table_index),
+        (_, Some(table_indices)) => Err(Error::MultipleOneTables {
+            type_name: type_name::<T>(),
+            table_indices: table_indices.into_boxed_slice(),
+        }),
+    }
+}
+
+fn resolve_one_row<T: 'static>(table: &Table) -> Result<(ChunkIndex, usize), Error> {
+    let mut found_chunk_index = None;
+    let mut total_row_count = 0usize;
+
+    for chunk in table.chunks() {
+        total_row_count += chunk.count();
+        if chunk.count() != 0 {
+            found_chunk_index = Some(chunk.chunk_index());
+        }
+    }
+
+    if total_row_count != 1 {
+        return Err(Error::InvalidOneRowCount {
+            type_name: type_name::<T>(),
+            table_index: table.index(),
+            count: total_row_count,
+        });
+    }
+
+    Ok((
+        found_chunk_index.expect("a one-row table should expose the inhabited chunk"),
+        0,
+    ))
 }
 
 fn build_analysis<Q, F>(query: &Q, filter: &F) -> Result<Analysis, Error>

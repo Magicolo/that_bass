@@ -1,6 +1,7 @@
 mod chunk_layout;
 mod command_resolution;
 mod executor_runtime;
+mod global_tables;
 mod instrumentation;
 mod keyless_rows;
 mod managed_keys;
@@ -39,6 +40,9 @@ fn main() {
     println!();
 
     command_resolution::run();
+    println!();
+
+    global_tables::run();
     println!();
 
     vocabulary::run();

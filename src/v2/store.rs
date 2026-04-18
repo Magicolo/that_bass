@@ -5,11 +5,12 @@
 //! - a `Store` root type for the rewrite boundary,
 //! - a configuration object with a benchmarkable chunk-byte target,
 //! - a chunk-capacity planner that follows the selected specification,
-//! - and the initialization-time table registration surface used by scheduled injections.
+//! - the initialization-time table registration surface used by scheduled injections,
+//! - and a direct exclusive-mode helper for singleton-like global tables.
 
 use crate::v2::instrumentation::{NoopSink, Sink};
 use crate::v2::key;
-use crate::v2::schema::{Catalog, DefinitionError, Meta, Table, TableIndex};
+use crate::v2::schema::{Catalog, ChunkError, DefinitionError, Meta, Table, TableIndex};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -22,6 +23,29 @@ pub struct Store {
     catalog: Catalog,
     keys: Option<key::Keys>,
     tables: Vec<Table>,
+}
+
+/// Errors produced while initializing or resetting a singleton-like global table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GlobalError {
+    Definition(DefinitionError),
+    Chunk(ChunkError),
+    InvalidRowCount {
+        table_index: TableIndex,
+        count: usize,
+    },
+}
+
+impl From<DefinitionError> for GlobalError {
+    fn from(error: DefinitionError) -> Self {
+        Self::Definition(error)
+    }
+}
+
+impl From<ChunkError> for GlobalError {
+    fn from(error: ChunkError) -> Self {
+        Self::Chunk(error)
+    }
 }
 
 impl Default for Store {
@@ -103,6 +127,32 @@ impl Store {
             .get_or_create_table(&mut self.tables, metas, self.configuration)
     }
 
+    pub fn initialize_global<T>(&mut self, value: T) -> Result<TableIndex, GlobalError>
+    where
+        T: Send + 'static,
+    {
+        let table_index = self.get_or_create_table([Meta::of::<T>()])?;
+        let table = self
+            .table_mut(table_index)
+            .expect("registered global table should stay addressable");
+        let existing_row = find_single_row(table)?;
+
+        if let Some((chunk_index, row_index)) = existing_row {
+            table.swap_remove_row(chunk_index, row_index)?;
+        }
+
+        let (chunk_index, row_index) = ensure_append_slot(table);
+        // Safety: the chosen slot is the append position of a chunk inside the current
+        // initialized-prefix state, and the row is published only after the addressed singleton
+        // value has been written.
+        unsafe {
+            table.write::<T>(chunk_index, row_index, value)?;
+            table.assume_initialized_prefix(chunk_index, row_index + 1)?;
+        }
+
+        Ok(table_index)
+    }
+
     pub fn table_shape_count(&self) -> usize {
         self.catalog.table_shape_count()
     }
@@ -111,6 +161,43 @@ impl Store {
         self.configuration
             .plan_chunk_capacity_for_row_width(inline_row_width)
     }
+}
+
+fn find_single_row(
+    table: &Table,
+) -> Result<Option<(crate::v2::schema::ChunkIndex, usize)>, GlobalError> {
+    let mut found_chunk_index = None;
+    let mut total_row_count = 0usize;
+
+    for chunk in table.chunks() {
+        total_row_count += chunk.count();
+        if chunk.count() != 0 {
+            found_chunk_index = Some(chunk.chunk_index());
+        }
+    }
+
+    match total_row_count {
+        0 => Ok(None),
+        1 => Ok(Some((
+            found_chunk_index.expect("one-row global table should expose its inhabited chunk"),
+            0,
+        ))),
+        count => Err(GlobalError::InvalidRowCount {
+            table_index: table.index(),
+            count,
+        }),
+    }
+}
+
+fn ensure_append_slot(table: &mut Table) -> (crate::v2::schema::ChunkIndex, usize) {
+    for chunk in table.chunks() {
+        if !chunk.is_full() {
+            return (chunk.chunk_index(), chunk.count());
+        }
+    }
+
+    let chunk_index = table.push_chunk();
+    (chunk_index, 0)
 }
 
 /// The mutable tuning data that should remain easy to benchmark and override.

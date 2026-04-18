@@ -43,20 +43,26 @@ Cost:
 
 That cost is acceptable for the first version because it keeps the architecture uniform while the real performance bottlenecks are still being measured.
 
-## `query::one(...)`
+## `query::one::<T>()`
 
 The key convenience API for globals is:
 
 ```rust
-query::one(query::read::<Physics>())
-query::one(query::write::<Physics>())
+query::one::<Physics>()
+query::one_mut::<Physics>()
 ```
 
 Intended semantics:
 
 - exactly one row is expected,
-- the query layer produces a single view rather than a chunk stream,
+- the query layer resolves one singleton table separately from chunk-stream queries,
 - scheduling and conflict analysis still treat the access through the same table model.
+
+Important rule:
+
+- `query::one::<T>()` is not part of `query::all(...)`,
+- `query::all(...)` is for one conjunctive chunk stream,
+- singleton inputs are injected beside the stream, not inside it.
 
 Possible failure modes that the API must define:
 
@@ -65,6 +71,8 @@ Possible failure modes that the API must define:
 - wrong table state.
 
 Do not leave those implicit.
+Singleton-aware schedule planning should reuse the same validation so malformed singleton tables are
+rejected when the function is registered, not only later at direct query time.
 
 ## Scheduler Implications
 
@@ -80,13 +88,12 @@ This consistency is one of the main reasons to keep globals inside the table mod
 
 ```rust
 schedule.push(
-    query::all((
-        query::write::<Position>(),
-        query::read::<Velocity>(),
-        query::one(query::read::<DeltaTime>()),
-    ))
-    .expect("query declaration should succeed"),
-    |positions, velocities, dt| {
+    (
+        query::all((query::write::<Position>(), query::read::<Velocity>()))
+            .expect("query declaration should succeed"),
+        query::one::<DeltaTime>(),
+    ),
+    |(positions, velocities, dt)| {
         for (position, velocity) in positions.zip(velocities) {
             position.x += velocity.x * dt.seconds;
             position.y += velocity.y * dt.seconds;
@@ -124,13 +131,16 @@ Bad future boundary:
 ## Implementation Checklist
 
 1. Ensure singleton-like tables can be declared through the same table machinery.
-2. Implement `query::one(...)`.
+2. Implement `Store::initialize_global(...)`.
+3. Implement `query::one::<T>()` and `query::one_mut::<T>()`.
 3. Define and test cardinality failure behavior.
-4. Confirm scheduler conflict logic treats singleton tables exactly like others.
+4. Confirm mixed stream-plus-singleton scheduling does not try to intersect globals into
+   `query::all(...)`.
+5. Confirm scheduler conflict logic treats singleton tables exactly like others.
 5. Add example tests for:
    - one global read,
    - one global write,
-   - mixed chunk stream plus `query::one(...)`,
+   - mixed chunk stream plus `query::one::<T>()`,
    - cardinality error cases.
 
 ## Pitfalls
@@ -139,7 +149,16 @@ Bad future boundary:
 
 That would undermine the chosen uniform model.
 
-### Pitfall: Making `query::one(...)` a scheduler special case
+### Pitfall: Pushing `query::one::<T>()` inside `query::all(...)`
+
+That confuses two different ideas:
+
+- one conjunctive chunk stream,
+- one singleton side input.
+
+Keep them separate.
+
+### Pitfall: Making `query::one::<T>()` a scheduler special case
 
 It is a query convenience, not a separate dependency class.
 
@@ -152,5 +171,21 @@ The rewrite already has enough moving parts. Keep this simple first.
 This task is done when:
 
 - globals and singleton-like data can be stored and queried through ordinary tables,
-- `query::one(...)` exists with explicit behavior,
+- `Store::initialize_global(...)` exists,
+- `query::one::<T>()` exists with explicit behavior,
 - the scheduler treats those accesses through the same resource model as all other table data.
+
+## Implementation Review
+
+The current repository now implements this task with:
+
+- `Store::initialize_global(...)` in `src/v2/store.rs`,
+- standalone singleton descriptors, `query::one::<T>()` and `query::one_mut::<T>()`, in
+  `src/v2/query.rs`,
+- singleton-table lookup and cardinality checks in `src/v2/query.rs`,
+- mixed stream-plus-singleton planning in `src/v2/schedule.rs`, reusing the same singleton
+  cardinality validation during registration,
+- per-job static dependencies so singleton and `Keys` access reach runtime jobs instead of staying
+  only at the family-planning level,
+- focused coverage in `tests/v2/global_tables.rs`,
+- and a runnable API example in `examples/v2/global_tables.rs`.

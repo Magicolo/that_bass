@@ -24,9 +24,9 @@
 //! - `instrumentation`: measurement categories and public diagnostics hooks.
 //! - `key`: managed stable-identity data, including `Key`, the `Keys` resource, reservation, and
 //!   reverse lookup.
-//! - `query`: typed query descriptors, inline dense-slice projections, optional chunk views,
-//!   filters, access analysis validated at `query::all(...)` construction time, and keyed
-//!   random-access lookup.
+//! - `query`: typed chunk-stream descriptors, standalone singleton-table descriptors,
+//!   inline dense-slice projections, optional chunk views, filters, access analysis validated at
+//!   `query::all(...)` construction time, and keyed random-access lookup.
 //! - `runtime`: frame-local executor runtime, work stealing, runtime reports, store-backed
 //!   batched resolve, and resolve-driven chunk injection.
 //! - `schedule`: reusable schedule families, happens-before edges, conflict planning, and the

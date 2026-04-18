@@ -2,6 +2,7 @@ mod chunk_layout;
 mod command_resolution;
 mod executor_runtime;
 mod foundation;
+mod global_tables;
 mod keyless_rows;
 mod managed_keys;
 mod metadata;
