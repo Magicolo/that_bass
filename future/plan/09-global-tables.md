@@ -188,4 +188,4 @@ The current repository now implements this task with:
 - per-job static dependencies so singleton and `Keys` access reach runtime jobs instead of staying
   only at the family-planning level,
 - focused coverage in `tests/v2/global_tables.rs`,
-- and a runnable API example in `examples/v2/global_tables.rs`.
+- and a runnable cheat-sheet walkthrough in `examples/v2/main.rs`.

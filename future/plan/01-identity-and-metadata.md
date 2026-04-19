@@ -291,7 +291,8 @@ The following concrete actions were taken to satisfy this task:
 - added `tests/v2/metadata.rs` to cover table-shape interning, `Meta` handling, `Key` handling,
   `Row` packing, `Column` wrappers, resource generation, hierarchical dependency generation,
   duplicate-meta rejection, and inline-versus-sidecar accounting,
-- added `examples/v2/metadata.rs` so the current metadata API is visible in runnable sample usage,
+- folded the runnable metadata walkthrough into `examples/v2/main.rs` so the single `v2` cheat
+  sheet covers the current metadata API,
 - updated `AGENTS.md` and the `v2` module docs so newcomers can find the new surface quickly.
 
 ## Done Criteria

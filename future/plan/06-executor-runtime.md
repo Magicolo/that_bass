@@ -271,7 +271,8 @@ The following concrete actions were taken to satisfy this task:
 - implemented runtime-owned batched command resolution and resolve-driven injection of new
   downstream chunk jobs during the same frame,
 - added `tests/v2/executor_runtime.rs` for seeded execution, stealing, and injection behavior,
-- added `examples/v2/executor_runtime.rs` to keep the public runtime surface visible,
+- folded the runnable executor walkthrough into `examples/v2/main.rs` so the single `v2` cheat
+  sheet keeps the public runtime surface visible,
 - added `benches/v2/runtime.rs` so many-job and injection-heavy executor costs are benchmarkable,
 - and updated the schedule builder so typed insert planning refreshes known-table and dependency
   metadata for already-registered matching query families.

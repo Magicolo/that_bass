@@ -300,7 +300,7 @@ The current implementation lives primarily in:
 
 - `src/v2/query.rs`
 - `tests/v2/query_surface.rs`
-- `examples/v2/query_surface.rs`
+- `examples/v2/main.rs`
 
 ## Actions Taken
 

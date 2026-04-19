@@ -371,7 +371,8 @@ The following concrete actions were taken to satisfy this task:
   mutate tables,
 - added `tests/v2/command_resolution.rs` for same-frame visibility, filtered remove behavior, and
   one-resolve-many-buffers coverage,
-- added `examples/v2/command_resolution.rs` so the Task 07 public surface remains runnable.
+- folded the runnable command-resolution walkthrough into `examples/v2/main.rs` so the single
+  `v2` cheat sheet still covers the Task 07 public surface.
 
 Current status:
 

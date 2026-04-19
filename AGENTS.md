@@ -52,7 +52,7 @@ Primary source references:
 | `src/v1/core/utility.rs` | Unsafe helpers, sorted-set helpers, requeue/fold helpers | `src/v1/core/utility.rs:16-74`, `src/v1/core/utility.rs:74-163`, `src/v1/core/utility.rs:171-230` |
 | `that_base_derive/src/lib.rs` | Procedural macros; emits absolute `that_bass::v1::...` paths for the stable engine | `that_base_derive/src/lib.rs:23`, `that_base_derive/src/lib.rs:37`, `that_base_derive/src/lib.rs:83`, `that_base_derive/src/lib.rs:198` |
 | `tests/` | Integration suites grouped by engine generation; read these before changing semantics | `tests/v1/check.rs`, `tests/v1/query.rs`, `tests/v1/event.rs`, `tests/v1/derive.rs`, `tests/v2/foundation.rs`, `tests/v2/metadata.rs`, `tests/v2/keyless_rows.rs`, `tests/v2/query_surface.rs`, `tests/v2/global_tables.rs`, `tests/v2/schedule_builder.rs`, `tests/v2/executor_runtime.rs`, `tests/v2/command_resolution.rs`, `tests/v2/managed_keys.rs` |
-| `examples/v2/` | Runnable sample usage for the rewrite lane; keep the newcomer-facing examples aligned with the recommended `v2` surface, and keep the lower-level focused examples clearly secondary | `examples/v2/main.rs`, `examples/v2/store_planning.rs`, `examples/v2/metadata.rs`, `examples/v2/keyless_rows.rs`, `examples/v2/managed_keys.rs`, `examples/v2/query_surface.rs`, `examples/v2/global_tables.rs`, `examples/v2/schedule_builder.rs`, `examples/v2/executor_runtime.rs`, `examples/v2/command_resolution.rs`, `examples/v2/instrumentation.rs`, `examples/v2/vocabulary.rs` |
+| `examples/v2/` | Runnable cheat sheet for the rewrite lane; keep `examples/v2/main.rs` aligned with the recommended `v2` surface and use it as the single newcomer walkthrough | `examples/v2/main.rs` |
 | `future/` | Architecture proposals and rewrite planning docs | `future/README.md`, `future/06-recommended-roadmap.md`, `future/plan/specification.md`, `future/plan/validation-matrix.md` |
 
 Inactive or misleading files:
@@ -275,7 +275,7 @@ These rules matter more than style. Breaking any of them is likely UB or subtle 
 - `benches/v2/runtime.rs` measures many-job runtime behavior, worker-count sweeps, and injection-policy sweeps.
 - `benches/v2/workloads.rs` measures scan-heavy row widths, dominant-versus-medium table layouts, keyed-column versus keyless scan cost, singleton access, and remove-heavy runtime behavior.
 - `future/plan/validation-matrix.md` is the concrete map from rewrite concerns to tests, focused Miri suites, examples, and benchmarks. Read it when deciding how to validate a `v2` change.
-- `examples/v2/` is the executable API-evolution trace for the rewrite lane. `main.rs` and the examples it chains together should stay focused on the recommended first-iteration surface, while lower-level focused examples can remain in the directory as secondary references. When `v2` public behavior or naming changes, update these examples in the same patch.
+- `examples/v2/main.rs` is the executable cheat sheet for the rewrite lane. It should stay focused on the recommended first-iteration surface while still showing the most important non-trivial capabilities and tradeoffs. When `v2` public behavior or naming changes, update this file in the same patch.
 
 ## Recommended Workflow For Agents
 

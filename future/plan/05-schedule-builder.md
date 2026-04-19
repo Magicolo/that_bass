@@ -344,8 +344,8 @@ The following concrete actions were taken to satisfy this task:
 - added `tests/v2/schedule_builder.rs` to cover pure-read non-conflict, broad-versus-descendant
   conflict, empty-path barriers, `covers(...)`, typed insert planning, resolve visibility edges,
   and schedule stability across chunk-count changes,
-- added `examples/v2/schedule_builder.rs` so the public `v2` schedule surface is visible in the
-  runnable example set,
+- folded the runnable schedule-builder walkthrough into `examples/v2/main.rs` so the single `v2`
+  cheat sheet shows the public schedule surface,
 - updated `AGENTS.md`, `src/v2/mod.rs`, and the metadata docs so the implemented dependency model
   matches the selected design.
 

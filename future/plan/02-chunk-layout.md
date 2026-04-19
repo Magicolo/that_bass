@@ -289,7 +289,8 @@ The following concrete actions were taken to satisfy this task:
   - chunk growth behavior,
   - dense-prefix slices,
   - and `swap_remove` semantics,
-- added `examples/v2/chunk_layout.rs` so newcomers can see the Task 02 surface in runnable form,
+- folded the runnable chunk-layout walkthrough into `examples/v2/main.rs` so the single `v2`
+  cheat sheet covers the Task 02 surface,
 - extended `benches/v2/foundation.rs` with chunk-allocation and bootstrap-growth benchmarks,
 - updated `AGENTS.md` and the `v2` module docs to point at the new chunk-layout surface.
 

@@ -245,7 +245,7 @@ The current implementation lives primarily in:
 - `src/v2/query.rs`
 - `src/v2/command.rs`
 - `tests/v2/keyless_rows.rs`
-- `examples/v2/keyless_rows.rs`
+- `examples/v2/main.rs`
 
 ## Actions Taken
 

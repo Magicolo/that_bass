@@ -106,11 +106,7 @@ Primary proof points:
 - `tests/v2/chunk_layout.rs`
 - `tests/v2/keyless_rows.rs`
 - `tests/v2/query_surface.rs`
-- `examples/v2/store_planning.rs`
-- `examples/v2/metadata.rs`
-- `examples/v2/chunk_layout.rs`
-- `examples/v2/keyless_rows.rs`
-- `examples/v2/query_surface.rs`
+- `examples/v2/main.rs`
 
 ### Tasks `05` to `07`
 
@@ -119,9 +115,7 @@ Primary proof points:
 - `tests/v2/schedule_builder.rs`
 - `tests/v2/executor_runtime.rs`
 - `tests/v2/command_resolution.rs`
-- `examples/v2/schedule_builder.rs`
-- `examples/v2/executor_runtime.rs`
-- `examples/v2/command_resolution.rs`
+- `examples/v2/main.rs`
 - `benches/v2/runtime.rs`
 
 ### Tasks `08` to `09`
@@ -130,8 +124,7 @@ Primary proof points:
 
 - `tests/v2/managed_keys.rs`
 - `tests/v2/global_tables.rs`
-- `examples/v2/managed_keys.rs`
-- `examples/v2/global_tables.rs`
+- `examples/v2/main.rs`
 - `benches/v2/workloads.rs`
 
 ### Task `10`
