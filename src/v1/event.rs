@@ -1,8 +1,8 @@
 use super::{
+    Database, Datum,
     core::utility::{get_unchecked, sorted_difference, sorted_symmetric_difference_by},
     key::Key,
     table::{self, Table},
-    Database, Datum,
 };
 use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
 use std::{
@@ -662,19 +662,20 @@ macro_rules! event {
                 events: &'a [Raw],
                 context: ProcessContext<'a>,
             ) -> impl Iterator<Item = Self> + 'a {
-                events
-                    .iter()
-                    .filter_map(move |event| {
-                        let &Raw::$raw { keys, $table_f } = event else {
-                            return None;
-                        };
-                        Some($types(&context, $table_f).map(move |r#type| Self {
-                            keys: keys.count as _,
-                            r#type,
-                            $table_f,
-                        }))
-                    })
-                    .flatten()
+                [].into_iter()
+                // events
+                //     .iter()
+                //     .filter_map(move |event| {
+                //         let &Raw::$raw { keys, $table_f } = event else {
+                //             return None;
+                //         };
+                //         Some($types(&context, $table_f).map(move |r#type| Self {
+                //             keys: keys.count as _,
+                //             r#type,
+                //             $table_f,
+                //         }))
+                //     })
+                //     .flatten()
             }
         }
 
@@ -687,22 +688,23 @@ macro_rules! event {
                 events: &'a [Raw],
                 context: ProcessContext<'a>,
             ) -> impl Iterator<Item = Self> + 'a {
-                events
-                    .iter()
-                    .filter_map(move |event| {
-                        let &Raw::$raw { keys, $table_f } = event else {
-                            return None;
-                        };
-                        let keys = context.keys(keys);
-                        Some($types(&context, $table_f).flat_map(move |r#type| {
-                            keys.iter().map(move |&key| Self {
-                                key,
-                                r#type,
-                                $table_f,
-                            })
-                        }))
-                    })
-                    .flatten()
+                [].into_iter()
+                // events
+                //     .iter()
+                //     .filter_map(move |event| {
+                //         let &Raw::$raw { keys, $table_f } = event else {
+                //             return None;
+                //         };
+                //         let keys = context.keys(keys);
+                //         Some($types(&context, $table_f).flat_map(move |r#type| {
+                //             keys.iter().map(move |&key| Self {
+                //                 key,
+                //                 r#type,
+                //                 $table_f,
+                //             })
+                //         }))
+                //     })
+                //     .flatten()
             }
         }
 

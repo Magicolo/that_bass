@@ -2,7 +2,7 @@
 name = "that_bass"
 version = "0.1.0"
 authors = ["Magicolo <magicololand@gmail.com>"]
-edition = "2021"
+edition = "2024"
 readme = "README.md"
 documentation = "https://docs.rs/that_bass/latest/that_bass/"
 license = "MIT"
@@ -13,6 +13,7 @@ build = "build.rs"
 that_base_derive = { path = "./that_base_derive" }
 parking_lot = "0.12.5"
 slice-dst = "1.6.0"
+itertools = "0.14.0"
 
 [dev-dependencies]
 intx = "0.1.0"
