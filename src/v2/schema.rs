@@ -23,7 +23,7 @@ use crate::v2::{
 };
 use core::{
     alloc::Layout,
-    any::{type_name, TypeId},
+    any::{TypeId, type_name},
     iter::FusedIterator,
     marker::PhantomData,
     mem::{align_of, needs_drop, size_of},
@@ -570,10 +570,12 @@ impl<'job> Rows<'job> {
                 .expect("subrow start index must remain representable")
         };
 
-        debug_assert!(usize::try_from(row_index_start)
-            .ok()
-            .and_then(|start| start.checked_add(count))
-            .is_some());
+        debug_assert!(
+            usize::try_from(row_index_start)
+                .ok()
+                .and_then(|start| start.checked_add(count))
+                .is_some()
+        );
 
         Self::new(
             self.table_index,

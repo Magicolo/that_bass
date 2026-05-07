@@ -16,12 +16,12 @@ use parking_lot::Mutex;
 use resources::Resources;
 use std::{
     alloc::{Layout, LayoutError},
-    any::{type_name, TypeId},
+    any::{TypeId, type_name},
     collections::BTreeMap,
     error, fmt,
     mem::{needs_drop, size_of},
     num::NonZeroUsize,
-    ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
+    ptr::{NonNull, copy, drop_in_place, slice_from_raw_parts_mut},
 };
 pub use that_base_derive::{Datum, Filter, Template};
 
@@ -447,11 +447,11 @@ mod next_chunk_based {
     use core::{
         alloc::Layout,
         marker::PhantomData,
-        mem::{forget, ManuallyDrop},
+        mem::{ManuallyDrop, forget},
         ops::Deref,
-        ptr::{drop_in_place, null_mut, NonNull},
+        ptr::{NonNull, drop_in_place, null_mut},
         slice::{from_raw_parts, from_ref},
-        sync::atomic::{AtomicPtr, AtomicU32, AtomicU8, Ordering},
+        sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, Ordering},
     };
     use parking_lot::RwLock;
     use std::{
@@ -777,15 +777,15 @@ mod next_chunk_based {
 mod store {
     use core::{
         alloc::{Layout, LayoutError},
-        any::{type_name, TypeId},
+        any::{TypeId, type_name},
         cell::OnceCell,
         marker::PhantomData,
-        mem::{needs_drop, ManuallyDrop},
+        mem::{ManuallyDrop, needs_drop},
         num::NonZeroUsize,
         ops::{Deref, DerefMut},
-        ptr::{copy, drop_in_place, slice_from_raw_parts_mut, NonNull},
+        ptr::{NonNull, copy, drop_in_place, slice_from_raw_parts_mut},
         slice::{from_raw_parts, from_raw_parts_mut},
-        sync::atomic::{AtomicU32, AtomicU8},
+        sync::atomic::{AtomicU8, AtomicU32},
     };
     use parking_lot::{Mutex, RwLock};
     use std::{

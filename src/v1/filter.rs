@@ -1,8 +1,8 @@
 use super::{
+    Database,
     core::{tuple::tuples, utility},
     table::Table,
     template::{ShareMeta, Template},
-    Database,
 };
 use std::{any::TypeId, marker::PhantomData};
 

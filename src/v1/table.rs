@@ -1,24 +1,24 @@
 use super::{
+    Database, Datum, Error, Meta,
     core::{
         iterate::FullIterator,
         utility::{get_unchecked, sorted_contains},
         view_vec::{self, ViewVec},
     },
     key::Key,
-    Database, Datum, Error, Meta,
 };
 use parking_lot::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use slice_dst::SliceWithHeader;
 use std::{
-    alloc::{alloc, dealloc, Layout, LayoutError},
+    alloc::{Layout, LayoutError, alloc, dealloc},
     any::TypeId,
     num::NonZeroUsize,
     ops::{Deref, DerefMut},
-    ptr::{copy_nonoverlapping, NonNull},
+    ptr::{NonNull, copy_nonoverlapping},
     slice::{from_raw_parts, from_raw_parts_mut},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -215,9 +215,11 @@ impl Tables<'_> {
     #[inline]
     pub(crate) fn find_or_add(&mut self, metas: &[&'static Meta]) -> Table {
         // Verifies that `metas` is sorted and deduplicated.
-        debug_assert!(metas
-            .windows(2)
-            .all(|metas| metas[0].identifier() < metas[1].identifier()));
+        debug_assert!(
+            metas
+                .windows(2)
+                .all(|metas| metas[0].identifier() < metas[1].identifier())
+        );
 
         let mut index = 0;
         loop {

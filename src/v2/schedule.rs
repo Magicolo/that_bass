@@ -18,7 +18,7 @@ use crate::v2::{
     schema::{DefinitionError, Dependency, Resource, ResourceId, Table, TableIndex},
     store::Store,
 };
-use core::any::{type_name, TypeId};
+use core::any::{TypeId, type_name};
 
 /// The ordering source that establishes one happens-before edge.
 #[doc(hidden)]

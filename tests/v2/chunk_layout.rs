@@ -1,8 +1,8 @@
 use checkito::Check;
 use std::num::NonZeroUsize;
 use that_bass::v2::{
-    schema::{Catalog, ColumnIndex, Meta},
     Configuration,
+    schema::{Catalog, ColumnIndex, Meta},
 };
 
 #[derive(Debug, Clone, PartialEq)]

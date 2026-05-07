@@ -2,8 +2,8 @@ use parking_lot::Mutex;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use that_bass::v2::{
-    command, query, Builder, Callbacks, Configuration, Executor, FunctionContext, FunctionIndex,
-    Key, Options, Store,
+    Builder, Callbacks, Configuration, Executor, FunctionContext, FunctionIndex, Key, Options,
+    Store, command, query,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]

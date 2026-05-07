@@ -1,8 +1,8 @@
 use std::num::NonZeroUsize;
 use that_bass::v2::{
+    Configuration,
     query::{self, Error, View},
     schema::{Catalog, ChunkIndex, Meta, Table},
-    Configuration,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]

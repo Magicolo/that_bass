@@ -1,6 +1,6 @@
 use parking_lot::Mutex;
 use std::{
-    alloc::{alloc, dealloc, Layout},
+    alloc::{Layout, alloc, dealloc},
     collections::BTreeMap,
     marker::PhantomData,
     mem::{needs_drop, replace},

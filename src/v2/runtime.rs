@@ -32,8 +32,8 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     mem::take,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::Instant,

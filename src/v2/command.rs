@@ -14,7 +14,7 @@ use crate::v2::{
     store::Store,
 };
 use core::{
-    any::{type_name, Any, TypeId},
+    any::{Any, TypeId, type_name},
     marker::PhantomData,
 };
 use std::collections::BTreeMap;

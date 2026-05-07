@@ -1,8 +1,8 @@
 use checkito::{Check, Generate};
 use std::num::NonZeroUsize;
 use that_bass::v2::{
-    instrumentation::{Category, FOUNDATION_MEASUREMENT_CATEGORIES},
     ChunkPlan, Configuration, Store,
+    instrumentation::{Category, FOUNDATION_MEASUREMENT_CATEGORIES},
 };
 
 #[test]

@@ -1,11 +1,11 @@
 use checkito::Check;
 use std::num::NonZeroUsize;
 use that_bass::v2::{
+    Configuration, Store,
     query::{self, Access, Error},
     schedule::{Builder, Error as ScheduleError},
     schema::{Meta, Resource, ResourceId},
     store::GlobalError,
-    Configuration, Store,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]

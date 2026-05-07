@@ -1,11 +1,11 @@
 use super::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, ONE},
+    Database, Error,
+    core::utility::{ONE, fold_swap, get_unchecked, get_unchecked_mut},
     event::Events,
     filter::Filter,
     key::{Key, Keys},
     table::{self, Column, Table, Tables},
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
-    Database, Error,
 };
 use parking_lot::{RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{
@@ -13,7 +13,7 @@ use std::{
     marker::PhantomData,
     mem::MaybeUninit,
     num::NonZeroUsize,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 
 /// Adds template `A` and removes template `R` to accumulated keys that satisfy

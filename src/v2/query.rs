@@ -13,12 +13,11 @@
 pub use crate::v2::schema::{Row, Rows};
 
 use crate::v2::{
-    key,
+    Store, key,
     schema::{ChunkError, ChunkIndex, Table, TableIndex},
-    Store,
 };
 use core::{
-    any::{type_name, TypeId},
+    any::{TypeId, type_name},
     iter::FusedIterator,
     marker::PhantomData,
     slice::{Iter, IterMut},

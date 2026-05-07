@@ -1,8 +1,8 @@
 use super::{
+    Database, Datum, Error, Meta,
     core::{tuple::tuples, utility::get_unchecked},
     key::Key,
     table::Table,
-    Database, Datum, Error, Meta,
 };
 use std::{marker::PhantomData, sync::Arc};
 

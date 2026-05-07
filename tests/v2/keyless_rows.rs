@@ -1,10 +1,10 @@
 use checkito::Check;
 use std::num::NonZeroUsize;
 use that_bass::v2::{
+    Configuration,
     command::RemoveRows,
     query,
     schema::{Catalog, ChunkError, ChunkIndex, Meta, Table},
-    Configuration,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]

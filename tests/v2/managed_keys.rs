@@ -5,13 +5,12 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use that_bass::v2::{
-    command,
+    Configuration, Store, command,
     key::{self, Entry},
     query,
     runtime::{Callbacks, Executor, FunctionContext, Options},
     schedule::{Builder, FunctionIndex},
     schema::{Meta, Row, Table},
-    Configuration, Store,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]

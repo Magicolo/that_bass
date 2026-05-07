@@ -2,11 +2,10 @@ use checkito::Check;
 use parking_lot::Mutex;
 use std::{num::NonZeroUsize, thread, time::Duration};
 use that_bass::v2::{
-    command, query,
+    Configuration, Store, command, query,
     runtime::{Callbacks, Executor, FunctionContext, Options, ResolveContext},
     schedule::Builder,
     schema::{ChunkIndex, Meta, Table, TableIndex},
-    Configuration, Store,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]

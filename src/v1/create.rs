@@ -1,14 +1,14 @@
 use super::{
+    Database, Error,
     event::Events,
     key::{Key, Keys},
     table::Table,
     template::{ApplyContext, InitializeContext, ShareMeta, Template},
-    Database, Error,
 };
 use parking_lot::RwLockUpgradableReadGuard;
 use std::{
     num::NonZeroUsize,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 
 pub struct Create<'d, T: Template> {

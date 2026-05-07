@@ -6,6 +6,7 @@ pub mod boba {
     use core::{
         any::TypeId,
         cell::UnsafeCell,
+        convert::Infallible,
         hash::Hash,
         sync::atomic::{AtomicU32, Ordering},
     };
@@ -405,9 +406,12 @@ pub mod boba {
             Self: Sized;
     }
 
-    pub trait Path: Sized {
+    pub trait Path: Sized + Clone {
         type Error;
+
         fn try_from_parts(parts: impl Iterator<Item = Part>) -> Result<Self, Self::Error>;
+
+        fn parent(&self) -> Option<Self>;
     }
 
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -573,6 +577,24 @@ pub mod boba {
         }
     }
 
+    impl Path for Vec<Part> {
+        type Error = Infallible;
+
+        fn try_from_parts(parts: impl Iterator<Item = Part>) -> Result<Self, Self::Error> {
+            Ok(parts.collect())
+        }
+
+        fn parent(&self) -> Option<Self> {
+            if self.is_empty() {
+                return None;
+            }
+
+            let mut parent = self.clone();
+            parent.pop();
+            core::option::Option::Some(parent)
+        }
+    }
+
     impl<T> Key<Option<Option<T>>> for Flat {
         type Value = Option<T>;
 
@@ -618,11 +640,83 @@ pub mod boba {
             .flat()
     }
 
-    pub struct Lock<T, P = Vec<usize>>(AtomicU32, UnsafeCell<T>, HashMap<P, u8>);
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum LockError<E> {
+        Path(E),
+        MissingPath,
+        TooManyLocks,
+        ConflictingPath,
+    }
+
+    pub struct Lock<T, P = Vec<Part>>(AtomicU32, UnsafeCell<T>, HashMap<P, u32>);
     pub struct Guard<'a, T>(&'a AtomicU32, u32, T);
 
     impl<T, P: Path + Hash + Eq> Lock<T, P> {
-        pub fn lock<K: Key<*mut T>>(&self, key: &K) -> Result<Guard<'_, K::Value>, P::Error> {
+        /// Builds the immutable path-to-mask table used by `bits`.
+        ///
+        /// The inputs are the paths that must become one-bit leaf locks. Each
+        /// ancestor path receives the union of the descendant leaf bits. This
+        /// is intentionally precomputed instead of allocated lazily in
+        /// `bits` so a guard can never hold an ancestor mask that omits
+        /// a newly-created child bit.
+        pub fn new(
+            value: T,
+            leaf_paths: impl IntoIterator<Item = P>,
+        ) -> Result<Self, LockError<P::Error>> {
+            let mut masks = HashMap::new();
+            let mut next_bit = 0;
+
+            for leaf in leaf_paths {
+                if let core::option::Option::Some((_, is_leaf)) = masks.get(&leaf) {
+                    if *is_leaf {
+                        continue;
+                    }
+
+                    return Err(LockError::ConflictingPath);
+                }
+
+                if next_bit == u32::BITS {
+                    return Err(LockError::TooManyLocks);
+                }
+
+                let bit = 1_u32 << next_bit;
+                next_bit += 1;
+
+                masks.insert(leaf.clone(), (bit, true));
+
+                let mut path = leaf;
+                while let core::option::Option::Some(parent) = path.parent() {
+                    match masks.entry(parent.clone()) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if entry.get().1 {
+                                return Err(LockError::ConflictingPath);
+                            }
+
+                            entry.get_mut().0 |= bit;
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert((bit, false));
+                        }
+                    }
+
+                    path = parent;
+                }
+            }
+
+            Ok(Self(
+                AtomicU32::new(0),
+                UnsafeCell::new(value),
+                masks
+                    .into_iter()
+                    .map(|(path, (bits, _))| (path, bits))
+                    .collect(),
+            ))
+        }
+
+        pub fn lock<K: Key<*mut T>>(
+            &self,
+            key: &K,
+        ) -> Result<Guard<'_, K::Value>, LockError<P::Error>> {
             let bits = self.bits(key)?;
             loop {
                 match self.try_lock_once(key, bits) {
@@ -635,7 +729,7 @@ pub mod boba {
         pub fn try_lock<K: Key<*mut T>>(
             &self,
             key: &K,
-        ) -> Result<Option<Guard<'_, K::Value>>, P::Error> {
+        ) -> Result<Option<Guard<'_, K::Value>>, LockError<P::Error>> {
             Ok(self.try_lock_once(key, self.bits(key)?).ok())
         }
 
@@ -644,9 +738,11 @@ pub mod boba {
             key: &K,
             bits: u32,
         ) -> Result<Guard<'_, K::Value>, u32> {
+            debug_assert_ne!(bits, 0);
+
             let mut old = self.0.load(Ordering::Acquire);
             loop {
-                if old & bits == old {
+                if old & bits == 0 {
                     match self.0.compare_exchange_weak(
                         old,
                         old | bits,
@@ -662,16 +758,15 @@ pub mod boba {
             }
         }
 
-        fn bits<K: Key<*mut T>>(&self, key: &K) -> Result<u32, P::Error> {
-            // TODO: Map the key to bits using a path.
-            let path = P::try_from_parts(key.parts())?;
-            todo!()
+        fn bits<K: Key<*mut T>>(&self, key: &K) -> Result<u32, LockError<P::Error>> {
+            let path = P::try_from_parts(key.parts()).map_err(LockError::Path)?;
+            self.2.get(&path).copied().ok_or(LockError::MissingPath)
         }
     }
 
     impl<T> Drop for Guard<'_, T> {
         fn drop(&mut self) {
-            self.0.fetch_nand(self.1, Ordering::AcqRel);
+            self.0.fetch_and(!self.1, Ordering::AcqRel);
             atomic_wait::wake_all(self.0);
         }
     }
@@ -686,14 +781,21 @@ pub mod boba {
             Column(usize, usize),
         }
 
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Error {
+            InvalidPath,
+        }
+
         pub struct Tables;
         pub struct Columns;
     }
 
-    impl FromIterator<Part> for path::Path {
-        fn from_iter<I: IntoIterator<Item = Part>>(iter: I) -> Self {
+    impl Path for path::Path {
+        type Error = path::Error;
+
+        fn try_from_parts(parts: impl Iterator<Item = Part>) -> Result<Self, Self::Error> {
             let mut path = Self::Store;
-            for at in iter {
+            for at in parts {
                 path = match (path, at) {
                     (Self::Store, Part::Field(field)) if field == TypeId::of::<path::Tables>() => {
                         Self::Tables
@@ -705,10 +807,69 @@ pub mod boba {
                         Self::Columns(table)
                     }
                     (Self::Columns(table), Part::At(column)) => Self::Column(table, column),
-                    _ => panic!("invalid path"),
+                    _ => return Err(path::Error::InvalidPath),
                 };
             }
-            path
+
+            Ok(path)
+        }
+
+        fn parent(&self) -> Option<Self> {
+            match *self {
+                Self::Store => None,
+                Self::Tables => core::option::Option::Some(Self::Store),
+                Self::Table(_) => core::option::Option::Some(Self::Tables),
+                Self::Columns(table) => core::option::Option::Some(Self::Table(table)),
+                Self::Column(table, _) => core::option::Option::Some(Self::Columns(table)),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn key_path<K: Key<*mut Boba>>(key: &K) -> Vec<Part> {
+            match Vec::<Part>::try_from_parts(key.parts()) {
+                Ok(path) => path,
+                Err(error) => match error {},
+            }
+        }
+
+        #[test]
+        fn lock_bits_use_leaf_and_ancestor_masks() {
+            let lock = Lock::new(
+                Boba::default(),
+                [key_path(&boba::A), key_path(&boba::B), key_path(&boba::C)],
+            )
+            .unwrap();
+
+            let a = lock.bits(&boba::A).unwrap();
+            let b = lock.bits(&boba::B).unwrap();
+            let c = lock.bits(&boba::C).unwrap();
+            let root = lock.bits(&()).unwrap();
+
+            assert_eq!(a.count_ones(), 1);
+            assert_eq!(b.count_ones(), 1);
+            assert_eq!(c.count_ones(), 1);
+            assert_eq!(root, a | b | c);
+        }
+
+        #[test]
+        fn lock_rejects_more_than_thirty_two_leaf_masks() {
+            let result = Lock::<(), Vec<Part>>::new(
+                (),
+                (0..=u32::BITS).map(|index| vec![Part::At(index as usize)]),
+            );
+
+            assert!(matches!(result, Err(LockError::TooManyLocks)));
+        }
+
+        #[test]
+        fn lock_rejects_paths_that_are_both_leaf_and_parent() {
+            let result = Lock::<(), Vec<Part>>::new((), [vec![Part::At(0)], vec![]]);
+
+            assert!(matches!(result, Err(LockError::ConflictingPath)));
         }
     }
 }

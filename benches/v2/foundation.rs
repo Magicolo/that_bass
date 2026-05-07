@@ -3,7 +3,7 @@ use std::hint::black_box;
 use std::num::NonZeroUsize;
 use that_bass::{
     v1::Database,
-    v2::{schema::Catalog, schema::Meta, Configuration},
+    v2::{Configuration, schema::Catalog, schema::Meta},
 };
 
 pub fn benchmark(criterion: &mut Criterion) {

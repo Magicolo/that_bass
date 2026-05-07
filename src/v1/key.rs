@@ -1,16 +1,16 @@
 use super::{
+    Database, Error,
     core::{
         utility::get_unchecked,
         view_vec::{self, ViewVec},
     },
-    Database, Error,
 };
 use parking_lot::RwLock;
 use std::{
     ops::Range,
     sync::{
-        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::*},
         Arc,
+        atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering::*},
     },
 };
 

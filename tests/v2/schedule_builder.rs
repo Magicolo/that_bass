@@ -1,10 +1,9 @@
 use checkito::Check;
 use std::num::NonZeroUsize;
 use that_bass::v2::{
-    command, query,
+    Configuration, Store, command, query,
     schedule::{self, Builder, Edge, Node, Ordering, Reason},
     schema::{Dependency, Meta, Resource, ResourceId},
-    Configuration, Store,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -264,17 +263,19 @@ fn conflicting_functions_produce_resolve_to_function_edges() {
     );
     let schedule = builder.build();
 
-    assert!(schedule.edges().contains(&Edge::new(
-        Node::Resolve(
-            schedule
-                .function(integrate_index)
-                .expect("integrate function should exist")
-                .resolve_index()
-        ),
-        Node::Function(clamp_index),
-        Ordering::ImplicitDeclarationOrder,
-        Reason::Conflict,
-    )));
+    assert!(
+        schedule.edges().contains(&Edge::new(
+            Node::Resolve(
+                schedule
+                    .function(integrate_index)
+                    .expect("integrate function should exist")
+                    .resolve_index()
+            ),
+            Node::Function(clamp_index),
+            Ordering::ImplicitDeclarationOrder,
+            Reason::Conflict,
+        ))
+    );
 }
 
 #[test]
@@ -297,22 +298,24 @@ fn conflicting_resolve_families_produce_resolve_to_resolve_edges() {
         .expect("typed insert should resolve to one known table");
     let schedule = builder.build();
 
-    assert!(schedule.edges().contains(&Edge::new(
-        Node::Resolve(
-            schedule
-                .function(first_function_index)
-                .expect("first function should exist")
-                .resolve_index()
-        ),
-        Node::Resolve(
-            schedule
-                .function(second_function_index)
-                .expect("second function should exist")
-                .resolve_index()
-        ),
-        Ordering::ImplicitDeclarationOrder,
-        Reason::Conflict,
-    )));
+    assert!(
+        schedule.edges().contains(&Edge::new(
+            Node::Resolve(
+                schedule
+                    .function(first_function_index)
+                    .expect("first function should exist")
+                    .resolve_index()
+            ),
+            Node::Resolve(
+                schedule
+                    .function(second_function_index)
+                    .expect("second function should exist")
+                    .resolve_index()
+            ),
+            Ordering::ImplicitDeclarationOrder,
+            Reason::Conflict,
+        ))
+    );
 }
 
 #[test]

@@ -1,10 +1,10 @@
 use super::{
-    core::utility::{fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked, ONE},
+    Database,
+    core::utility::{ONE, fold_swap, get_unchecked, get_unchecked_mut, swap_unchecked},
     event::Events,
     filter::Filter,
     key::{Key, Keys},
     table::{self, Table, Tables},
-    Database,
 };
 use parking_lot::{RwLockUpgradableReadGuard, RwLockWriteGuard};
 use std::{collections::HashSet, num::NonZeroUsize, sync::atomic::Ordering};

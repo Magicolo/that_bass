@@ -2,11 +2,10 @@ use criterion::{BatchSize, BenchmarkId, Criterion};
 use std::hint::black_box;
 use std::num::NonZeroUsize;
 use that_bass::v2::{
-    command, query,
+    Configuration, Store, command, query,
     runtime::{Callbacks, Executor, FunctionContext, Injection, Options, ResolveContext},
     schedule::Builder,
     schema::{Meta, Table},
-    Configuration, Store,
 };
 
 #[repr(C)]

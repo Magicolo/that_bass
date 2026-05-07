@@ -1,8 +1,8 @@
+use Or::*;
 use std::{
     hint::unreachable_unchecked,
     ops::{Deref, DerefMut},
 };
-use Or::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Or<L, R> {

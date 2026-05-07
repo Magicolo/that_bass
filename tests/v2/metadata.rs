@@ -1,13 +1,13 @@
 use checkito::Check;
 use core::any::type_name;
 use that_bass::v2::{
+    Configuration,
     key::Key,
     query::Access,
     schema::{
         Catalog, ChunkIndex, Column, DefinitionError, Dependency, Meta, Resource, RowLayout,
         Storage, StoreIndex, TableIndex,
     },
-    Configuration,
 };
 
 #[repr(C)]
