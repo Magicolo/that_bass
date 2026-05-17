@@ -2,6 +2,7 @@ use crate::v4::{
     At, Error, Row, Store, Table, query, template,
     utility::{ranges, sort},
 };
+use core::{iter, slice::Iter};
 
 pub struct Query<'a, Q: query::Query> {
     query: Q,
@@ -67,12 +68,32 @@ impl Store {
     }
 }
 
+pub struct Iterator<'a, Q: query::Query> {
+    query: &'a Q,
+    states: Iter<'a, (u32, Q::State)>,
+    tables: &'a mut [Table],
+}
+
+impl<'a, Q: query::Query> iter::Iterator for Iterator<'a, Q> {
+    type Item = Q::Item<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+        // TODO: The `&mut` requirement and `Iterator` signature makes this
+        // iterator impossible...
+        // let (table, state) = self.states.next()?;
+        // let table = unsafe { self.tables.get_unchecked_mut(*table as usize)
+        // }; Some(self.query.get(state, table))
+    }
+}
+
 impl<'a, Q: query::Query> Query<'a, Q> {
-    pub fn iter(&mut self) -> impl Iterator<Item = Q::Item<'_>> {
-        self.states.iter().map(|(table, state)| {
-            let table = unsafe { self.tables.get_unchecked_mut(*table as usize) };
-            self.query.get(state, table)
-        })
+    pub fn iter(&mut self) -> Iterator<'_, Q> {
+        Iterator {
+            query: &self.query,
+            states: self.states.iter(),
+            tables: &mut self.tables,
+        }
     }
 }
 
