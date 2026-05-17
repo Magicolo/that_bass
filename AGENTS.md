@@ -6,7 +6,7 @@
 
 Primary source references:
 
-- Crate root wiring and experiments: `src/lib.rs:1-3`, `src/lib.rs:5-877`
+- Crate root wiring and experiments: `src/lib.rs:1-3`, `src/lib.rs:5-1309`
 - Current stable engine (`v1`): `src/v1/mod.rs:1-334`
 - Proc-macro crate: `that_base_derive/src/lib.rs:23-356`
 
@@ -21,7 +21,7 @@ Primary source references:
 - Present but unfinished:
   - `Defer` exists but is `todo!()` and should be treated as unusable (`src/v1/defer.rs:55-116`).
   - A `Row` derive exists in the proc-macro crate but is not re-exported by `that_bass::v1`, is explicitly postponed in the roadmap, and its tests are commented out (`src/v1/mod.rs:133`, `that_base_derive/src/lib.rs:198`, `tests/v1/derive.rs:131-181`).
-  - `src/lib.rs` contains experimental `boba` and `v3` work. In `boba`, `Lock<T, P>` is a multi-lock sketch: `Lock::new` precomputes path-to-bit masks from registered leaf paths, ancestor paths store the union of descendant leaf bits, and `Lock::bits` is a read-only path-to-mask lookup. The current experiment is limited to 32 leaf masks (`src/lib.rs:640-756`).
+  - `src/lib.rs` contains experimental `boba` and `v3` work. In `boba`, `Lock<T>` is a multi-lock sketch backed by a lock-free skeleton: `Shape::build` constructs static child edges and dynamic child slots, `Shape::refresh_shape` updates dynamic lengths and installs child nodes with atomic pointers, `Skeleton::plan` maps `Key<*mut T>` parts to either static conflict bits or a dynamic parent-gate plan, and `Lock` validates a skeleton version after acquiring the relevant bit. The current experiment is limited to 32 allocated path bits and uses `TooManyLocks` when the skeleton outgrows one `AtomicU32` (`src/lib.rs:673-1228`).
 - Roadmap direction:
   - Stay table-based and locality-first for now.
   - Add better deferred orchestration, query combinators, richer transforms, generative testing, and possibly event filters.
@@ -35,7 +35,7 @@ Primary source references:
 
 | Path | Role | Key references |
 | --- | --- | --- |
-| `src/lib.rs` | Crate root; exposes the isolated `v1`, `v2`, and `v3` module trees plus the experimental `boba` multi-lock sketch | `src/lib.rs:1-3`, `src/lib.rs:5-877` |
+| `src/lib.rs` | Crate root; exposes the isolated `v1`, `v2`, and `v3` module trees plus the experimental `boba` multi-lock sketch | `src/lib.rs:1-3`, `src/lib.rs:5-1309` |
 | `src/v1/mod.rs` | Current stable engine root, `Database`, `Meta`, `Datum`, roadmap notes, dead experimental sketches | `src/v1/mod.rs:26`, `src/v1/mod.rs:232`, `src/v1/mod.rs:253` |
 | `src/v1/create.rs` | Deferred create queue and resolution | `src/v1/create.rs:14`, `src/v1/create.rs:26`, `src/v1/create.rs:135` |
 | `src/v1/query.rs` | Query engine, split iteration, keyed joins via `By`, lock orchestration | `src/v1/query.rs:19`, `src/v1/query.rs:150`, `src/v1/query.rs:188`, `src/v1/query.rs:461`, `src/v1/query.rs:681`, `src/v1/query.rs:1015` |
