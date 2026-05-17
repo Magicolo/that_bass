@@ -1391,27 +1391,30 @@ pub mod store {
         alloc::{Layout, LayoutError},
         any::{Any, TypeId},
         cmp::min,
+        iter::{FusedIterator, from_fn},
         marker::PhantomData,
-        mem::needs_drop,
+        mem::{needs_drop, replace, take},
         num::TryFromIntError,
-        ops::Deref,
+        ops::{Deref, Range},
         ptr::{NonNull, copy_nonoverlapping, slice_from_raw_parts_mut},
         slice::from_raw_parts,
     };
     use std::alloc::{alloc, dealloc};
 
+    #[derive(Default)]
     pub struct Store {
         tables: Vec<Table>,
     }
 
     pub struct Table {
         count: u32,
+        pending: u32,
         capacity: u32,
         data: NonNull<u8>,
         columns: Box<[Column]>,
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     pub struct Meta {
         identifier: TypeId,
         size: usize,
@@ -1438,20 +1441,18 @@ pub mod store {
         data: NonNull<u8>,
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Row<'a> {
         row: u32,
-        index: u32,
-        table: &'a Table,
+        table: u32,
+        _marker: PhantomData<&'a ()>,
     }
 
-    #[derive(Clone, Copy)]
-    pub struct Rows<'a>(At<'a, Table>);
-
-    pub struct RowIter<'a> {
-        row: u32,
-        index: u32,
-        table: &'a Table,
+    #[derive(Clone)]
+    pub struct Rows<'a> {
+        rows: Range<u32>,
+        table: u32,
+        _marker: PhantomData<&'a ()>,
     }
 
     pub enum Error {
@@ -1467,6 +1468,8 @@ pub mod store {
         FailedToDrop,
         VectorOverflow,
         FailedToAllocate,
+        FailedToResolve,
+        FailedToReserve,
     }
 
     pub struct At<'a, T: ?Sized>(u32, &'a T);
@@ -1510,19 +1513,19 @@ pub mod store {
                     .count
                     .checked_next_power_of_two()
                     .ok_or(Error::VectorOverflow)?;
-                let layouts = (
-                    self.meta.layout(self.capacity).map_err(Error::Layout)?,
-                    self.meta.layout(capacity).map_err(Error::Layout)?,
-                );
-                let source = self.data;
-                let target = unsafe { allocate(layouts.1)? };
-                self.meta.initialize(source, target, old, capacity);
-                unsafe { dealloc(target.as_ptr(), layouts.0) };
-                self.data = target;
+                self.data = self
+                    .meta
+                    .resize(self.data, old, (self.capacity, capacity))?;
                 self.capacity = capacity;
-                debug_assert!(self.count < self.capacity);
+                debug_assert!(self.count <= self.capacity);
             }
             Ok(())
+        }
+    }
+
+    impl Drop for Vector {
+        fn drop(&mut self) {
+            let _ = self.meta.resize(self.data, self.count, (self.capacity, 0));
         }
     }
 
@@ -1552,56 +1555,37 @@ pub mod store {
         }
     }
 
-    impl PartialEq for Row<'_> {
-        fn eq(&self, other: &Self) -> bool {
-            (self.index, self.row).eq(&(other.index, other.row))
-        }
-    }
-
-    impl Eq for Row<'_> {}
-
-    impl PartialOrd for Row<'_> {
-        fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-            (self.index, self.row).partial_cmp(&(other.index, other.row))
-        }
-    }
-
-    impl Ord for Row<'_> {
-        fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-            (self.index, self.row).cmp(&(other.index, other.row))
-        }
-    }
-
-    impl<'a> IntoIterator for Rows<'a> {
-        type IntoIter = RowIter<'a>;
-        type Item = Row<'a>;
-
-        fn into_iter(self) -> Self::IntoIter {
-            RowIter {
-                row: 0,
-                index: self.0.index(),
-                table: self.0.value(),
+    impl Rows<'_> {
+        const fn new(rows: Range<u32>, table: u32) -> Self {
+            Self {
+                rows,
+                table,
+                _marker: PhantomData,
             }
         }
     }
 
-    impl<'a> Iterator for RowIter<'a> {
+    impl<'a> Iterator for Rows<'a> {
         type Item = Row<'a>;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if self.row < self.table.count {
-                let row = Row {
-                    row: self.row,
-                    index: self.index,
-                    table: self.table,
-                };
-                self.row = self.row.saturating_add(1);
-                Some(row)
-            } else {
-                None
-            }
+            Some(Row::new(self.rows.next()?, self.table))
         }
     }
+
+    impl ExactSizeIterator for Rows<'_> {
+        fn len(&self) -> usize {
+            self.rows.len()
+        }
+    }
+
+    impl DoubleEndedIterator for Rows<'_> {
+        fn next_back(&mut self) -> Option<Self::Item> {
+            Some(Row::new(self.rows.next_back()?, self.table))
+        }
+    }
+
+    impl FusedIterator for Rows<'_> {}
 
     impl Meta {
         pub fn of<T: 'static>() -> Self {
@@ -1647,9 +1631,10 @@ pub mod store {
                 self.layout(capacities.0).map_err(Error::Layout)?,
                 self.layout(capacities.1).map_err(Error::Layout)?,
             );
+            let source = data;
             let target = unsafe { allocate(layouts.1)? };
-            self.initialize(data, target, count, capacities.1);
-            unsafe { dealloc(data.as_ptr(), layouts.0) };
+            self.initialize(source, target, count, capacities.1);
+            unsafe { deallocate(source, layouts.0) };
             Ok(target)
         }
 
@@ -1658,14 +1643,9 @@ pub mod store {
         }
 
         unsafe fn copy(&self, source: NonNull<u8>, target: NonNull<u8>, count: u32) -> bool {
-            if self.size > 0 && count > 0 {
-                unsafe {
-                    copy_nonoverlapping(
-                        source.as_ptr(),
-                        target.as_ptr(),
-                        count as usize * self.size,
-                    )
-                };
+            let count = self.size * count as usize;
+            if count > 0 {
+                unsafe { copy_nonoverlapping(source.as_ptr(), target.as_ptr(), count) };
                 true
             } else {
                 false
@@ -1709,7 +1689,7 @@ pub mod store {
         }
 
         unsafe fn set(&self, data: NonNull<u8>, value: Box<dyn Any>) -> bool {
-            if self.identifier == value.type_id() {
+            if self.identifier == (*value).type_id() {
                 unsafe { (self.functions.set)(value, data) };
                 true
             } else {
@@ -1718,7 +1698,7 @@ pub mod store {
         }
 
         unsafe fn set_at(&self, data: NonNull<u8>, value: Box<dyn Any>, index: u32) -> bool {
-            if self.identifier == value.type_id() {
+            if self.identifier == (*value).type_id() {
                 unsafe { (self.functions.set)(value, self.offset(data, index)) };
                 true
             } else {
@@ -1728,6 +1708,10 @@ pub mod store {
     }
 
     impl Store {
+        pub const fn new() -> Self {
+            Self { tables: Vec::new() }
+        }
+
         fn find_table(&self, metas: &[Meta]) -> Option<u32> {
             self.tables
                 .iter()
@@ -1747,6 +1731,7 @@ pub mod store {
         fn new(metas: impl IntoIterator<Item = Meta>) -> Result<Self, Error> {
             Ok(Self {
                 count: 0,
+                pending: 0,
                 capacity: 0,
                 data: NonNull::dangling(),
                 columns: metas.into_iter().map(Column::new).collect::<Box<[_]>>(),
@@ -1757,42 +1742,78 @@ pub mod store {
             find(&self.columns, identifier, |column| column.meta.identifier)
         }
 
-        fn reserve(&mut self, count: u32) -> Result<(), Error> {
-            let old = self.count;
-            let new = self.count.checked_add(count).ok_or(Error::TableOverflow)?;
-            self.count = new;
-
-            if self.count > self.capacity {
-                let capacity = self
-                    .count
-                    .checked_next_power_of_two()
-                    .ok_or(Error::TableOverflow)?;
-                self.data = resize(&mut self.columns, self.data, old, self.capacity, capacity)?;
-                self.capacity = capacity;
-            }
-            debug_assert!(self.count < self.capacity);
-            Ok(())
+        pub const fn count(&self) -> u32 {
+            self.count
         }
 
-        fn release(&mut self, start: u32, count: u32) {
-            if count == 0 {
+        pub const fn capacity(&self) -> u32 {
+            self.capacity
+        }
+
+        fn reserve(&mut self, count: u32) -> Result<Range<u32>, Error> {
+            let old = self.pending;
+            let new = self
+                .pending
+                .checked_add(count)
+                .ok_or(Error::TableOverflow)?;
+            self.pending = new;
+            Ok(old..new)
+        }
+
+        fn ensure(&mut self) -> Result<bool, Error> {
+            if self.pending > self.capacity {
+                let capacity = self
+                    .pending
+                    .checked_next_power_of_two()
+                    .ok_or(Error::TableOverflow)?;
+                self.data = resize(
+                    &mut self.columns,
+                    self.data,
+                    self.count,
+                    (self.capacity, capacity),
+                )?;
+                self.capacity = capacity;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        fn commit(&mut self) -> Range<u32> {
+            debug_assert!(self.count <= self.pending);
+            let rows = self.count..self.pending;
+            self.count = self.pending;
+            rows
+        }
+
+        fn release(&mut self, rows: Range<u32>) {
+            if rows.is_empty() {
                 return;
             }
 
-            let end = start.saturating_add(count);
-            debug_assert!(end <= self.count);
+            let count = rows.end.saturating_sub(rows.start);
+            debug_assert!(rows.end <= self.pending);
 
-            let copy = self.count.saturating_sub(end).min(count);
-            let copy = (self.count - copy, copy);
+            let copy = self.pending.saturating_sub(rows.end).min(count);
+            let copy = (self.pending - copy, copy);
             for column in &mut self.columns {
-                unsafe { column.meta.drop_at(column.data, start, count) };
+                unsafe { column.meta.drop_at(column.data, rows.start, count) };
                 unsafe {
                     column
                         .meta
-                        .copy_at((column.data, copy.0), (column.data, start), copy.1)
+                        .copy_at((column.data, copy.0), (column.data, rows.start), copy.1)
                 };
             }
-            self.count -= count;
+            // TODO: Are these saturating_sub correct? Should I handle errors instead with
+            // `checked_sub`?
+            self.pending = self.pending.saturating_sub(count);
+            self.count = self.count.saturating_sub(count).min(self.pending);
+        }
+    }
+
+    impl Drop for Table {
+        fn drop(&mut self) {
+            let _ = resize(&mut self.columns, self.data, self.count, (self.capacity, 0));
         }
     }
 
@@ -1804,6 +1825,10 @@ pub mod store {
             }
         }
 
+        pub const fn meta(&self) -> &Meta {
+            &self.meta
+        }
+
         unsafe fn get<T: 'static>(&self, row: u32) -> &T {
             debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
             unsafe { self.data.cast::<T>().add(row as usize).as_ref() }
@@ -1811,6 +1836,9 @@ pub mod store {
 
         unsafe fn get_all<T: 'static>(&self, count: u32) -> &[T] {
             debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
+            if count == 0 {
+                return &[];
+            }
             unsafe { from_raw_parts(self.data.cast::<T>().as_ptr(), count as usize) }
         }
 
@@ -1855,18 +1883,20 @@ pub mod store {
     }
 
     impl Row<'_> {
-        pub fn get<T: 'static>(&self) -> Option<&T> {
-            let column = find(&self.table.columns, TypeId::of::<T>(), |column| {
-                column.meta.identifier
-            })?;
-            Some(unsafe { column.data.cast::<T>().add(self.row as usize).as_ref() })
+        const fn new(row: u32, table: u32) -> Self {
+            Self {
+                row,
+                table,
+                _marker: PhantomData,
+            }
         }
 
-        pub fn get_with(&self, identifier: TypeId) -> Option<&dyn Any> {
-            let column = find(&self.table.columns, identifier, |column| {
-                column.meta.identifier
-            })?;
-            Some(unsafe { column.meta.get_at(column.data, self.row) })
+        pub const fn row(&self) -> u32 {
+            self.row
+        }
+
+        pub const fn table(&self) -> u32 {
+            self.table
         }
     }
 
@@ -1874,6 +1904,7 @@ pub mod store {
         use super::*;
 
         pub struct Query<'a, Q: query::Query> {
+            query: Q,
             states: Box<[(u32, Q::State<'a>)]>,
             tables: &'a [Table],
         }
@@ -1903,6 +1934,7 @@ pub mod store {
                         })
                         .collect(),
                     tables: &self.tables,
+                    query,
                 }
             }
 
@@ -1947,63 +1979,47 @@ pub mod store {
         }
 
         impl<'a, T: template::Template> Insert<'a, T> {
-            pub fn one(&mut self, item: T::Item) -> Result<Row<'_>, Error> {
+            pub fn one(&mut self, item: T::Item) -> Result<Row<'a>, Error> {
                 let table = unsafe { self.tables.get_unchecked_mut(self.table as usize) };
-                let row = table.count;
-                table.reserve(1)?;
-                if unsafe { self.template.defer(&mut self.state, item) } {
+                let row = table.reserve(1)?.next().ok_or(Error::FailedToReserve)?;
+                if self.template.defer(&mut self.state, item) {
                     Ok(Row {
                         row,
-                        index: self.table,
-                        table,
+                        table: self.table,
+                        _marker: PhantomData,
                     })
                 } else {
                     todo!()
                 }
             }
+
+            pub fn resolve(mut self) -> Result<(), Error> {
+                let table = unsafe { self.tables.get_unchecked_mut(self.table as usize) };
+                table.ensure()?;
+                unsafe { self.template.resolve(&mut self.state, table) };
+                table.commit();
+                Ok(())
+            }
         }
 
         impl<'a> Remove<'a> {
-            fn one(&mut self, row: Row) {
-                self.rows.push((row.index, row.row));
+            pub fn one(&mut self, row: Row) {
+                self.rows.push((row.table, row.row));
             }
 
-            fn resolve(&mut self) -> u32 {
+            pub fn resolve(&mut self) -> u32 {
                 self.rows.sort();
-
-                let mut table = u32::MAX;
-                let mut start = u32::MAX;
-                let mut count = 0u32;
                 let mut total = 0u32;
-                for (index, row) in self.rows.drain(..).rev() {
-                    if index == table {
-                        match start - row {
-                            // Duplicate row.
-                            0 => continue,
-                            1 => (start, count) = (row, count + 1),
-                            _ => {
-                                if let Some(table) = self.tables.get_mut(table as usize) {
-                                    table.release(start, count);
-                                    total = total.saturating_add(count);
-                                }
-                                (start, count) = (row, 1);
-                            }
-                        }
-                    } else {
-                        if let Some(table) = self.tables.get_mut(table as usize) {
-                            table.release(start, count);
-                            total = total.saturating_add(count);
-                        }
-                        (table, start, count) = (index, row, 1);
-                    }
-                }
-                if count > 0 {
+                // Reverse iteration is important here both for more optimal removal and
+                // correctness. Removing rows in ascending order will mess up the indices of the
+                // rows that come after. Also, the `ranges` function has been designed for a
+                // reverse iterator.
+                for (table, rows) in ranges(self.rows.drain(..).rev()) {
                     if let Some(table) = self.tables.get_mut(table as usize) {
-                        table.release(start, count);
-                        total = total.saturating_add(count);
+                        total = total.saturating_add(rows.end.saturating_sub(rows.start));
+                        table.release(rows);
                     }
                 }
-
                 total
             }
         }
@@ -2020,41 +2036,34 @@ pub mod store {
             fn declare(&self) -> impl Iterator<Item = Meta>;
             fn initialize(&self, table: &mut super::Table) -> Option<Self::State>;
             fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool;
-            unsafe fn resolve(
-                &self,
-                state: &mut Self::State,
-                table: &mut super::Table,
-                row: u32,
-            ) -> bool;
+            unsafe fn resolve(&self, state: &mut Self::State, table: &mut super::Table) -> bool;
         }
 
-        pub struct Column<T>(PhantomData<T>);
+        pub struct Column<T: ?Sized>(PhantomData<T>);
 
         impl Template for Meta {
             type Item = Box<dyn Any>;
             type State = (Vector, u32);
 
             fn declare(&self) -> impl Iterator<Item = Meta> {
-                [*self].into_iter()
+                [self.clone()].into_iter()
             }
 
             fn initialize(&self, table: &mut Table) -> Option<Self::State> {
-                Some((Vector::new(*self), table.column(self.identifier)?.index()))
+                Some((
+                    Vector::new(self.clone()),
+                    table.column(self.identifier)?.index(),
+                ))
             }
 
             fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
                 state.0.push(item).is_ok()
             }
 
-            unsafe fn resolve(
-                &self,
-                state: &mut Self::State,
-                table: &mut super::Table,
-                row: u32,
-            ) -> bool {
+            unsafe fn resolve(&self, state: &mut Self::State, table: &mut super::Table) -> bool {
                 let column = unsafe { table.columns.get_unchecked_mut(state.1 as usize) };
                 debug_assert_eq!(self.identifier, column.meta.identifier);
-                unsafe { state.0.move_at(column.data, row) }
+                unsafe { state.0.move_at(column.data, table.count) }
             }
         }
 
@@ -2078,16 +2087,11 @@ pub mod store {
                 true
             }
 
-            unsafe fn resolve(
-                &self,
-                state: &mut Self::State,
-                table: &mut super::Table,
-                row: u32,
-            ) -> bool {
+            unsafe fn resolve(&self, state: &mut Self::State, table: &mut super::Table) -> bool {
                 if let Some(source) = NonNull::new(state.0.as_mut_ptr()) {
                     if let Ok(count) = state.0.len().try_into() {
                         let column = unsafe { table.columns.get_unchecked_mut(state.1 as usize) };
-                        if unsafe { column.copy(source, row, count) } {
+                        if unsafe { column.copy(source, table.count, count) } {
                             unsafe { state.0.set_len(0) };
                             return true;
                         }
@@ -2117,8 +2121,8 @@ pub mod store {
                         $((self.$index.defer(&mut _state.$index, _item.$index)) &)* true
                     }
 
-                    unsafe fn resolve(&self, _state: &mut Self::State, _table: &mut super::Table, _row: u32) -> bool{
-                        $((unsafe { self.$index.resolve(&mut _state.$index, _table, _row) }) |)* true
+                    unsafe fn resolve(&self, _state: &mut Self::State, _table: &mut super::Table) -> bool{
+                        $((unsafe { self.$index.resolve(&mut _state.$index, _table) }) |)* true
                     }
                 }
             };
@@ -2145,10 +2149,27 @@ pub mod store {
             fn get<'a>(&self, state: &Self::State<'a>) -> Self::Item<'a>;
         }
 
-        pub struct Read<T>(PhantomData<T>);
+        pub struct Read<T: ?Sized>(PhantomData<T>);
+        #[derive(Clone, Copy)]
         pub struct Row;
+        #[derive(Clone, Copy)]
         pub struct Table;
+        #[derive(Clone)]
         pub struct Column(Meta);
+
+        impl<T: ?Sized> Clone for Read<T> {
+            fn clone(&self) -> Self {
+                Self(self.0)
+            }
+        }
+
+        impl<T: ?Sized> Copy for Read<T> {}
+
+        impl Column {
+            pub const fn meta(&self) -> &Meta {
+                &self.0
+            }
+        }
 
         impl<T: 'static> Query for Read<T> {
             type Item<'a> = &'a [T];
@@ -2171,11 +2192,11 @@ pub mod store {
             type State<'a> = super::Rows<'a>;
 
             fn initialize<'a>(&self, table: At<'a, super::Table>) -> Option<Self::State<'a>> {
-                Some(super::Rows(table))
+                Some(super::Rows::new(0..table.value().count, table.index()))
             }
 
             fn get<'a>(&self, state: &Self::State<'a>) -> Self::Item<'a> {
-                *state
+                state.clone()
             }
         }
 
@@ -2218,15 +2239,64 @@ pub mod store {
     }
 
     unsafe fn allocate(layout: Layout) -> Result<NonNull<u8>, Error> {
-        NonNull::new(unsafe { alloc(layout) }).ok_or(Error::FailedToAllocate)
+        if layout.size() == 0 {
+            Ok(NonNull::dangling())
+        } else {
+            NonNull::new(unsafe { alloc(layout) }).ok_or(Error::FailedToAllocate)
+        }
+    }
+
+    unsafe fn deallocate(data: NonNull<u8>, layout: Layout) -> bool {
+        if data == NonNull::dangling() || layout.size() == 0 {
+            false
+        } else {
+            unsafe { dealloc(data.as_ptr(), layout) };
+            true
+        }
+    }
+
+    /// The `pairs` iterator must be sorted by `pair.0` (ascending or
+    /// descending), then by `pair.1` descending.
+    fn ranges(
+        pairs: impl IntoIterator<Item = (u32, u32)>,
+    ) -> impl Iterator<Item = (u32, Range<u32>)> {
+        let mut table = u32::MAX;
+        let mut start = u32::MAX;
+        let mut count = 0u32;
+        let mut iterator = pairs.into_iter();
+        from_fn(move || {
+            loop {
+                match iterator.next() {
+                    Some(pair) if pair.0 == table => match start - pair.1 {
+                        // Duplicate row.
+                        0 => continue,
+                        1 => (start, count) = (pair.1, count + 1),
+                        _ if count > 0 => {
+                            let range = start..start + replace(&mut count, 1);
+                            start = pair.1;
+                            break Some((table, range));
+                        }
+                        _ => (start, count) = (pair.1, 1),
+                    },
+                    Some(pair) if count > 0 => {
+                        let rows = start..start + replace(&mut count, 1);
+                        let table = replace(&mut table, pair.0);
+                        start = pair.1;
+                        break Some((table, rows));
+                    }
+                    Some(pair) => (table, start, count) = (pair.0, pair.1, 1),
+                    None if count > 0 => break Some((table, start..start + take(&mut count))),
+                    None => break None,
+                }
+            }
+        })
     }
 
     fn resize(
         columns: &mut [Column],
         data: NonNull<u8>,
         count: u32,
-        old: u32,
-        new: u32,
+        capacities: (u32, u32),
     ) -> Result<NonNull<u8>, Error> {
         fn next(
             columns: &mut [Column],
@@ -2264,11 +2334,9 @@ pub mod store {
             data,
             (Layout::new::<()>(), Layout::new::<()>()),
             count,
-            (old, new),
+            capacities,
         )?;
-        if layout.size() > 0 {
-            unsafe { dealloc(data.as_ptr(), layout) };
-        }
+        unsafe { deallocate(data, layout) };
         Ok(data)
     }
 
