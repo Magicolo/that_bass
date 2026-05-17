@@ -1,9 +1,9 @@
-use core::any::{Any, TypeId};
-use core::ptr::NonNull;
-use core::ptr::slice_from_raw_parts_mut;
-use core::slice::from_raw_parts;
-
 use super::meta::Meta;
+use core::{
+    any::{Any, TypeId},
+    ptr::{NonNull, slice_from_raw_parts_mut},
+    slice::{from_raw_parts, from_raw_parts_mut},
+};
 
 pub struct Column {
     pub(crate) meta: Meta,
@@ -29,10 +29,12 @@ impl Column {
 
     pub(crate) unsafe fn get_all<T: 'static>(&self, count: u32) -> &[T] {
         debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
-        if count == 0 {
-            return &[];
-        }
         unsafe { from_raw_parts(self.data.cast::<T>().as_ptr(), count as usize) }
+    }
+
+    pub(crate) unsafe fn get_all_mut<T: 'static>(&self, count: u32) -> &mut [T] {
+        debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
+        unsafe { from_raw_parts_mut(self.data.cast::<T>().as_ptr(), count as usize) }
     }
 
     pub(crate) unsafe fn set<T: 'static>(&self, item: T, row: u32) {
