@@ -17,6 +17,7 @@ orn = "1.0.0"
 atomic-wait = "1.1.0"
 hecs = "0.11.0"
 itertools = "0.14.0"
+thiserror = "2.0.0"
 
 [dev-dependencies]
 intx = "0.1.0"
@@ -24,6 +25,7 @@ checkito = "5.0.0"
 criterion = "0.8.2"
 skeptic = "0.13.7"
 rayon = "1.11.0"
+anyhow = "1.0.0"
 
 [build-dependencies]
 skeptic = "0.13"

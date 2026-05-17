@@ -15,6 +15,14 @@ pub struct Row;
 pub struct Table;
 pub struct Column(Meta);
 
+pub const fn read<T: ?Sized>() -> Read<T> {
+    Read(PhantomData)
+}
+
+pub const fn column(meta: Meta) -> Column {
+    Column(meta)
+}
+
 impl<T: ?Sized> Clone for Read<T> {
     fn clone(&self) -> Self {
         Self(self.0)

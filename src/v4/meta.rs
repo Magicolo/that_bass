@@ -16,7 +16,7 @@ struct Functions {
 
 #[derive(Clone)]
 pub struct Meta {
-    pub(crate) identifier: TypeId,
+    pub identifier: TypeId,
     pub(crate) size: usize,
     pub(crate) drop: bool,
     functions: &'static Functions,

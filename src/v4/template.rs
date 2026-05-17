@@ -18,6 +18,10 @@ pub trait Template {
 
 pub struct Column<T: ?Sized>(PhantomData<T>);
 
+pub const fn column<T>() -> Column<T> {
+    Column(PhantomData)
+}
+
 impl Template for Meta {
     type Item = Box<dyn Any>;
     type State = (Vector, u32);

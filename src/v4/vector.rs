@@ -1,4 +1,3 @@
-use core::any::Any;
 use core::ptr::NonNull;
 
 use super::error::Error;
@@ -21,14 +20,14 @@ impl Vector {
         }
     }
 
-    pub(crate) fn push(&mut self, item: Box<dyn Any>) -> Result<(), Error> {
+    pub(crate) fn push(&mut self, item: Box<dyn core::any::Any>) -> Result<(), Error> {
         if self.meta.identifier == item.type_id() {
             let index = self.count;
             self.reserve(1)?;
             unsafe { self.meta.set_at(self.data, item, index) };
             Ok(())
         } else {
-            Err(Error::InvalidItem(item))
+            Err(Error::InvalidItem)
         }
     }
 

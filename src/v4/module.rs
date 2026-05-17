@@ -71,7 +71,9 @@ impl Store {
 }
 
 impl<'a, Q: query::Query> Query<'a, Q> {
-    pub fn iter(&self) {}
+    pub fn iter(&self) -> impl Iterator<Item = Q::Item<'a>> + '_ {
+        self.states.iter().map(|(_, state)| self.query.get(state))
+    }
 }
 
 impl<'a, T: template::Template> Insert<'a, T> {
