@@ -1,11 +1,12 @@
-use crate::v4::utility::ranges;
-use crate::v4::utility::sort;
-use crate::v4::{At, Error, Row, Store, Table, query, template};
+use crate::v4::{
+    At, Error, Row, Store, Table, query, template,
+    utility::{ranges, sort},
+};
 
 pub struct Query<'a, Q: query::Query> {
     query: Q,
-    states: Box<[(u32, Q::State<'a>)]>,
-    tables: &'a [Table],
+    states: Box<[(u32, Q::State)]>,
+    tables: &'a mut [Table],
 }
 
 pub struct Insert<'a, T: template::Template> {
@@ -21,18 +22,14 @@ pub struct Remove<'a> {
 }
 
 impl Store {
-    pub fn query<Q: query::Query>(&self, query: Q) -> Query<'_, Q> {
+    pub fn query<Q: query::Query>(&mut self, query: Q) -> Query<'_, Q> {
         Query {
             states: self
                 .tables
                 .iter()
-                .enumerate()
-                .filter_map(|(index, table)| {
-                    let table = At(u32::try_from(index).ok()?, table);
-                    Some((table.index(), query.initialize(table)?))
-                })
+                .filter_map(|table| Some((table.index(), query.initialize(table)?)))
                 .collect(),
-            tables: &self.tables,
+            tables: &mut self.tables,
             query,
         }
     }
@@ -47,7 +44,7 @@ impl Store {
                     .len()
                     .try_into()
                     .map_err(Error::TablesOverflow)?;
-                self.tables.push(Table::new(metas)?);
+                self.tables.push(Table::new(index, metas)?);
                 index
             }
         };
@@ -71,8 +68,11 @@ impl Store {
 }
 
 impl<'a, Q: query::Query> Query<'a, Q> {
-    pub fn iter(&self) -> impl Iterator<Item = Q::Item<'a>> + '_ {
-        self.states.iter().map(|(_, state)| self.query.get(state))
+    pub fn iter(&mut self) -> impl Iterator<Item = Q::Item<'_>> {
+        self.states.iter().map(|(table, state)| {
+            let table = unsafe { self.tables.get_unchecked_mut(*table as usize) };
+            self.query.get(state, table)
+        })
     }
 }
 

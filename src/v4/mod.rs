@@ -1,20 +1,20 @@
 pub mod column;
 pub mod error;
 pub mod meta;
-pub mod row;
-pub mod table;
-pub mod utility;
-pub mod vector;
-
 pub mod module;
 pub mod query;
+pub mod row;
+pub mod table;
 pub mod template;
+pub mod utility;
+pub mod vector;
 
 pub use column::Column;
 pub use error::Error;
 pub use meta::Meta;
-pub use row::{At, Row, Rows};
+pub use row::{Row, Rows};
 pub use table::Table;
+pub use utility::{At, AtMut};
 pub use vector::Vector;
 
 #[derive(Default)]

@@ -1,17 +1,20 @@
-use super::{column::Column, error::Error, meta::Meta, row::At, utility::resize};
+use super::{column::Column, error::Error, meta::Meta, utility::resize};
+use crate::v4::{At, utility};
 use core::{any::TypeId, ops::Range, ptr::NonNull};
 
 pub struct Table {
-    pub(crate) count: u32,
+    index: u32,
+    count: u32,
     pending: u32,
     capacity: u32,
     data: NonNull<u8>,
-    pub(crate) columns: Box<[Column]>,
+    columns: Box<[Column]>,
 }
 
 impl Table {
-    pub(super) fn new(metas: impl IntoIterator<Item = Meta>) -> Result<Self, Error> {
+    pub(super) fn new(index: u32, metas: impl IntoIterator<Item = Meta>) -> Result<Self, Error> {
         Ok(Self {
+            index,
             count: 0,
             pending: 0,
             capacity: 0,
@@ -21,11 +24,19 @@ impl Table {
     }
 
     pub(super) fn column(&self, identifier: TypeId) -> Option<At<Column>> {
-        super::utility::find(&self.columns, identifier, |column| column.meta.identifier)
+        utility::find(&self.columns, identifier, |column| column.meta.identifier)
     }
 
-    pub(crate) fn columns(&self) -> &[Column] {
+    pub fn columns(&self) -> &[Column] {
         &self.columns
+    }
+
+    pub fn columns_mut(&mut self) -> &mut [Column] {
+        &mut self.columns
+    }
+
+    pub const fn index(&self) -> u32 {
+        self.index
     }
 
     pub const fn count(&self) -> u32 {

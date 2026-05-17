@@ -1,20 +1,20 @@
+use crate::v4::{Meta, Rows, column, table};
 use core::{any::TypeId, marker::PhantomData};
 
-use crate::v4::{At, Meta, Rows};
-
 pub trait Query {
-    type State<'a>;
+    type State;
     type Item<'a>;
 
-    fn initialize<'a>(&self, table: At<'a, crate::v4::Table>) -> Option<Self::State<'a>>;
-    fn get<'a>(&self, state: &Self::State<'a>) -> Self::Item<'a>;
+    fn initialize(&self, table: &table::Table) -> Option<Self::State>;
+    fn get<'a>(&self, state: &Self::State, table: &'a mut table::Table) -> Self::Item<'a>;
 }
 
 pub struct Read<T: ?Sized>(PhantomData<T>);
 pub struct Write<T: ?Sized>(PhantomData<T>);
 pub struct Row;
 pub struct Table;
-pub struct Column(Meta);
+pub struct ReadWith(Meta);
+pub struct WriteWith(Meta);
 
 pub const fn read<T: ?Sized>() -> Read<T> {
     Read(PhantomData)
@@ -24,8 +24,12 @@ pub const fn write<T: ?Sized>() -> Write<T> {
     Write(PhantomData)
 }
 
-pub const fn column(meta: Meta) -> Column {
-    Column(meta)
+pub const fn read_with(meta: Meta) -> ReadWith {
+    ReadWith(meta)
+}
+
+pub const fn write_with(meta: Meta) -> WriteWith {
+    WriteWith(meta)
 }
 
 impl<T: ?Sized> Clone for Read<T> {
@@ -44,7 +48,7 @@ impl<T: ?Sized> Clone for Write<T> {
 
 impl<T: ?Sized> Copy for Write<T> {}
 
-impl Column {
+impl ReadWith {
     pub const fn meta(&self) -> &Meta {
         &self.0
     }
@@ -52,71 +56,88 @@ impl Column {
 
 impl<T: 'static> Query for Read<T> {
     type Item<'a> = &'a [T];
-    type State<'a> = (&'a crate::v4::Table, &'a crate::v4::Column);
+    type State = u32;
 
-    fn initialize<'a>(&self, table: At<'a, crate::v4::Table>) -> Option<Self::State<'a>> {
-        Some((
-            table.value(),
-            table.value().column(TypeId::of::<T>())?.value(),
-        ))
+    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
+        Some(table.column(TypeId::of::<T>())?.index())
     }
 
-    fn get<'a>(&self, state: &Self::State<'a>) -> Self::Item<'a> {
-        unsafe { state.1.get_all(state.0.count()) }
+    fn get<'a>(&self, state: &Self::State, table: &'a mut table::Table) -> Self::Item<'a> {
+        unsafe {
+            table
+                .columns()
+                .get_unchecked(*state as usize)
+                .get_all(*state)
+        }
     }
 }
 
 impl<T: 'static> Query for Write<T> {
     type Item<'a> = &'a mut [T];
-    type State<'a> = (&'a crate::v4::Table, &'a crate::v4::Column);
+    type State = u32;
 
-    fn initialize<'a>(&self, table: At<'a, crate::v4::Table>) -> Option<Self::State<'a>> {
-        Some((
-            table.value(),
-            table.value().column(TypeId::of::<T>())?.value(),
-        ))
+    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
+        Some(table.column(TypeId::of::<T>())?.index())
     }
 
-    fn get<'a>(&self, state: &Self::State<'a>) -> Self::Item<'a> {
-        unsafe { state.1.get_all_mut(state.0.count()) }
+    fn get<'a>(&self, state: &Self::State, table: &'a mut table::Table) -> Self::Item<'a> {
+        unsafe {
+            table
+                .columns_mut()
+                .get_unchecked_mut(*state as usize)
+                .get_all_mut(*state)
+        }
     }
 }
 
 impl Query for Row {
     type Item<'a> = Rows<'a>;
-    type State<'a> = Rows<'a>;
+    type State = ();
 
-    fn initialize<'a>(&self, table: At<'a, crate::v4::Table>) -> Option<Self::State<'a>> {
-        Some(Rows::new(0..table.value().count(), table.index()))
+    fn initialize(&self, _: &table::Table) -> Option<Self::State> {
+        Some(())
     }
 
-    fn get<'a>(&self, state: &Self::State<'a>) -> Self::Item<'a> {
-        state.clone()
+    fn get<'a>(&self, _: &Self::State, table: &'a mut table::Table) -> Self::Item<'a> {
+        Rows::new(0..table.count(), table.index())
     }
 }
 
 impl Query for Table {
-    type Item<'a> = &'a crate::v4::Table;
-    type State<'a> = &'a crate::v4::Table;
+    type Item<'a> = &'a table::Table;
+    type State = ();
 
-    fn initialize<'a>(&self, table: At<'a, crate::v4::Table>) -> Option<Self::State<'a>> {
-        Some(table.value())
+    fn initialize(&self, _: &table::Table) -> Option<Self::State> {
+        Some(())
     }
 
-    fn get<'a>(&self, state: &Self::State<'a>) -> Self::Item<'a> {
-        state
+    fn get<'a>(&self, _: &Self::State, table: &'a mut table::Table) -> Self::Item<'a> {
+        table
     }
 }
 
-impl Query for Column {
-    type Item<'a> = &'a crate::v4::Column;
-    type State<'a> = &'a crate::v4::Column;
+impl Query for ReadWith {
+    type Item<'a> = &'a column::Column;
+    type State = u32;
 
-    fn initialize<'a>(&self, table: At<'a, crate::v4::Table>) -> Option<Self::State<'a>> {
-        Some(table.value().column(self.0.identifier)?.value())
+    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
+        Some(table.column(self.0.identifier)?.index())
     }
 
-    fn get<'a>(&self, state: &Self::State<'a>) -> Self::Item<'a> {
-        state
+    fn get<'a>(&self, state: &Self::State, table: &'a mut table::Table) -> Self::Item<'a> {
+        unsafe { table.columns().get_unchecked(*state as usize) }
+    }
+}
+
+impl Query for WriteWith {
+    type Item<'a> = &'a mut column::Column;
+    type State = u32;
+
+    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
+        Some(table.column(self.0.identifier)?.index())
+    }
+
+    fn get<'a>(&self, state: &Self::State, table: &'a mut table::Table) -> Self::Item<'a> {
+        unsafe { table.columns_mut().get_unchecked_mut(*state as usize) }
     }
 }

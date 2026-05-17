@@ -1,14 +1,65 @@
-use core::alloc::Layout;
-use core::iter::from_fn;
-use core::ops::Range;
-use core::ptr::NonNull;
-use core::{mem::replace, mem::take};
+use super::{column::Column, error::Error, meta::Meta};
+use core::{
+    alloc::Layout,
+    iter::from_fn,
+    mem::{replace, take},
+    ops::{Deref, DerefMut, Range},
+    ptr::NonNull,
+};
 use std::alloc::{alloc, dealloc};
 
-use super::column::Column;
-use super::error::Error;
-use super::meta::Meta;
-use super::row::At;
+pub struct At<'a, T: ?Sized>(pub(crate) u32, pub(crate) &'a T);
+pub struct AtMut<'a, T: ?Sized>(pub(crate) u32, pub(crate) &'a mut T);
+
+impl<'a, T: ?Sized> At<'a, T> {
+    pub const fn index(&self) -> u32 {
+        self.0
+    }
+
+    pub const fn value(&self) -> &'a T {
+        self.1
+    }
+}
+
+impl<'a, T: ?Sized> Clone for At<'a, T> {
+    fn clone(&self) -> Self {
+        At(self.0, self.1)
+    }
+}
+
+impl<'a, T: ?Sized> Copy for At<'a, T> {}
+
+impl<T> Deref for At<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.1
+    }
+}
+
+impl<'a, T: ?Sized> AtMut<'a, T> {
+    pub const fn index(&self) -> u32 {
+        self.0
+    }
+
+    pub const fn value(&mut self) -> &mut T {
+        self.1
+    }
+}
+
+impl<T> Deref for AtMut<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.1
+    }
+}
+
+impl<T> DerefMut for AtMut<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.1
+    }
+}
 
 pub(super) fn sort(metas: impl IntoIterator<Item = Meta>) -> Result<Vec<Meta>, Error> {
     let mut metas = metas.into_iter().collect::<Vec<_>>();

@@ -1,7 +1,7 @@
 use super::meta::Meta;
 use core::{
     any::{Any, TypeId},
-    ptr::{NonNull, slice_from_raw_parts_mut},
+    ptr::{NonNull, copy_nonoverlapping, slice_from_raw_parts_mut},
     slice::{from_raw_parts, from_raw_parts_mut},
 };
 
@@ -32,7 +32,7 @@ impl Column {
         unsafe { from_raw_parts(self.data.cast::<T>().as_ptr(), count as usize) }
     }
 
-    pub(crate) unsafe fn get_all_mut<T: 'static>(&self, count: u32) -> &mut [T] {
+    pub(crate) unsafe fn get_all_mut<T: 'static>(&mut self, count: u32) -> &mut [T] {
         debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
         unsafe { from_raw_parts_mut(self.data.cast::<T>().as_ptr(), count as usize) }
     }
@@ -44,11 +44,9 @@ impl Column {
 
     pub(crate) unsafe fn copy<T: 'static>(&self, source: NonNull<T>, row: u32, count: u32) -> bool {
         debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
-        if core::mem::size_of::<T>() > 0 && count > 0 {
+        if size_of::<T>() > 0 && count > 0 {
             let target = unsafe { self.data.cast::<T>().add(row as usize) };
-            unsafe {
-                core::ptr::copy_nonoverlapping(source.as_ptr(), target.as_ptr(), count as usize)
-            };
+            unsafe { copy_nonoverlapping(source.as_ptr(), target.as_ptr(), count as usize) };
             true
         } else {
             false
@@ -57,13 +55,8 @@ impl Column {
 
     pub(crate) unsafe fn drop<T: 'static>(&self, row: u32, count: u32) {
         debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
-        unsafe {
-            slice_from_raw_parts_mut(
-                self.data.cast::<T>().add(row as usize).as_ptr(),
-                count as usize,
-            )
-            .drop_in_place()
-        };
+        let data = unsafe { self.data.cast::<T>().add(row as usize) };
+        unsafe { slice_from_raw_parts_mut(data.as_ptr(), count as usize).drop_in_place() };
     }
 
     pub(crate) unsafe fn get_with(&self, meta: Meta, row: u32) -> &dyn Any {

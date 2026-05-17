@@ -1,10 +1,9 @@
+use crate::v4::{Meta, Table, Vector};
 use core::{
     any::{Any, TypeId},
     marker::PhantomData,
     ptr::NonNull,
 };
-
-use crate::v4::{Meta, Table, Vector};
 
 pub trait Template {
     type Item;
@@ -42,9 +41,10 @@ impl Template for Meta {
     }
 
     unsafe fn resolve(&self, state: &mut Self::State, table: &mut Table) -> bool {
-        let column = unsafe { table.columns.get_unchecked_mut(state.1 as usize) };
+        let count = table.count();
+        let column = unsafe { table.columns_mut().get_unchecked_mut(state.1 as usize) };
         debug_assert_eq!(self.identifier, column.meta.identifier);
-        unsafe { state.0.move_at(column.data, table.count) }
+        unsafe { state.0.move_at(column.data, count) }
     }
 }
 
@@ -71,8 +71,9 @@ impl<T: 'static> Template for Column<T> {
     unsafe fn resolve(&self, state: &mut Self::State, table: &mut Table) -> bool {
         if let Some(source) = NonNull::new(state.0.as_mut_ptr()) {
             if let Ok(count) = state.0.len().try_into() {
-                let column = unsafe { table.columns.get_unchecked_mut(state.1 as usize) };
-                if unsafe { column.copy(source, table.count, count) } {
+                let index = table.count();
+                let column = unsafe { table.columns_mut().get_unchecked_mut(state.1 as usize) };
+                if unsafe { column.copy(source, index, count) } {
                     unsafe { state.0.set_len(0) };
                     return true;
                 }

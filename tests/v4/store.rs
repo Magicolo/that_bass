@@ -103,7 +103,7 @@ fn query_with_column_type() -> anyhow::Result<()> {
     let _insert = store.insert(template::column::<u32>())?;
 
     let meta = that_bass::store::Meta::of::<u32>();
-    let query = store.query(query::column(meta));
+    let query = store.query(query::read_with(meta));
     for column in query.iter() {
         assert_eq!(column.meta().identifier, std::any::TypeId::of::<u32>());
     }
@@ -267,7 +267,7 @@ fn rows_iterator_empty_table() {
 fn column_iterator_empty_table() -> anyhow::Result<()> {
     let mut store = Store::new();
     let _insert = store.insert(template::column::<u32>())?;
-    let query = store.query(query::column(that_bass::store::Meta::of::<u32>()));
+    let query = store.query(query::read_with(that_bass::store::Meta::of::<u32>()));
     for column in query.iter() {
         assert_eq!(column.meta().identifier, std::any::TypeId::of::<u32>());
     }

@@ -1,7 +1,8 @@
-use core::iter::FusedIterator;
-use core::marker::PhantomData;
-use core::ops::Deref;
-use core::ops::Range;
+use core::{
+    iter::FusedIterator,
+    marker::PhantomData,
+    ops::{Deref, DerefMut, Range},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Row<'a> {
@@ -16,8 +17,6 @@ pub struct Rows<'a> {
     table: u32,
     _marker: PhantomData<&'a ()>,
 }
-
-pub struct At<'a, T: ?Sized>(pub(crate) u32, pub(crate) &'a T);
 
 impl Row<'_> {
     pub(crate) const fn new(row: u32, table: u32) -> Self {
@@ -68,29 +67,3 @@ impl DoubleEndedIterator for Rows<'_> {
 }
 
 impl FusedIterator for Rows<'_> {}
-
-impl<'a, T: ?Sized> At<'a, T> {
-    pub const fn index(&self) -> u32 {
-        self.0
-    }
-
-    pub const fn value(&self) -> &'a T {
-        self.1
-    }
-}
-
-impl<'a, T: ?Sized> Clone for At<'a, T> {
-    fn clone(&self) -> Self {
-        At(self.0, self.1)
-    }
-}
-
-impl<'a, T: ?Sized> Copy for At<'a, T> {}
-
-impl<T> Deref for At<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.1
-    }
-}
