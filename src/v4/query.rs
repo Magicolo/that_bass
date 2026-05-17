@@ -11,12 +11,17 @@ pub trait Query {
 }
 
 pub struct Read<T: ?Sized>(PhantomData<T>);
+pub struct Write<T: ?Sized>(PhantomData<T>);
 pub struct Row;
 pub struct Table;
 pub struct Column(Meta);
 
 pub const fn read<T: ?Sized>() -> Read<T> {
     Read(PhantomData)
+}
+
+pub const fn write<T: ?Sized>() -> Write<T> {
+    Write(PhantomData)
 }
 
 pub const fn column(meta: Meta) -> Column {
@@ -30,6 +35,14 @@ impl<T: ?Sized> Clone for Read<T> {
 }
 
 impl<T: ?Sized> Copy for Read<T> {}
+
+impl<T: ?Sized> Clone for Write<T> {
+    fn clone(&self) -> Self {
+        Self(self.0)
+    }
+}
+
+impl<T: ?Sized> Copy for Write<T> {}
 
 impl Column {
     pub const fn meta(&self) -> &Meta {
@@ -50,6 +63,22 @@ impl<T: 'static> Query for Read<T> {
 
     fn get<'a>(&self, state: &Self::State<'a>) -> Self::Item<'a> {
         unsafe { state.1.get_all(state.0.count()) }
+    }
+}
+
+impl<T: 'static> Query for Write<T> {
+    type Item<'a> = &'a mut [T];
+    type State<'a> = (&'a crate::v4::Table, &'a crate::v4::Column);
+
+    fn initialize<'a>(&self, table: At<'a, crate::v4::Table>) -> Option<Self::State<'a>> {
+        Some((
+            table.value(),
+            table.value().column(TypeId::of::<T>())?.value(),
+        ))
+    }
+
+    fn get<'a>(&self, state: &Self::State<'a>) -> Self::Item<'a> {
+        unsafe { state.1.get_all_mut(state.0.count()) }
     }
 }
 
