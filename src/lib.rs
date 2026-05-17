@@ -1386,8 +1386,7 @@ pub mod boba {
     }
 }
 
-pub mod fett {
-    use crate::fett::module::Query;
+pub mod store {
     use core::{
         alloc::{Layout, LayoutError},
         any::{Any, TypeId},
@@ -1395,7 +1394,7 @@ pub mod fett {
         marker::PhantomData,
         mem::needs_drop,
         num::TryFromIntError,
-        ops::{Deref, DerefMut},
+        ops::Deref,
         ptr::{NonNull, copy_nonoverlapping, slice_from_raw_parts_mut},
         slice::from_raw_parts,
     };
