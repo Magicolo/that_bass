@@ -42,12 +42,3 @@ impl Store {
             .ok()
     }
 }
-
-#[test]
-fn boba() -> anyhow::Result<()> {
-    struct Physics {}
-    let mut store = Store::new();
-    store.insert(column::<Physics>())?.one(Physics {})?;
-    let a = store.query(read::<Physics>()).iter().flatten().next();
-    Ok(())
-}
