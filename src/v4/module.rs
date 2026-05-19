@@ -1,7 +1,4 @@
-use crate::v4::{
-    Error, Row, Store, Table, query, template,
-    utility::{ranges, sort},
-};
+use crate::v4::{Error, Row, Store, Table, query, template, utility::ranges};
 use core::{iter, slice::Iter};
 
 pub struct Query<'a, Q: query::Query> {
@@ -38,19 +35,7 @@ impl Store {
     }
 
     pub fn insert<T: template::Template>(&mut self, template: T) -> Result<Insert<'_, T>, Error> {
-        let metas = sort(template.declare())?;
-        let table = match self.find_table(&metas) {
-            Some(index) => index,
-            None => {
-                let index = self
-                    .tables
-                    .len()
-                    .try_into()
-                    .map_err(Error::TablesOverflow)?;
-                self.tables.push(Table::new(index, metas)?);
-                index
-            }
-        };
+        let table = self.find_or_insert_table(template.declare())?;
         let state = template
             .initialize(unsafe { self.tables.get_unchecked_mut(table as usize) })
             .ok_or(Error::FailedToInitialize)?;

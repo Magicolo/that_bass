@@ -61,17 +61,6 @@ impl<T> DerefMut for AtMut<'_, T> {
     }
 }
 
-pub(super) fn sort(metas: impl IntoIterator<Item = Meta>) -> Result<Vec<Meta>, Error> {
-    let mut metas = metas.into_iter().collect::<Vec<_>>();
-    metas.sort_by_key(|meta| meta.identifier);
-    for [left, right] in metas.array_windows::<2>() {
-        if left.identifier == right.identifier {
-            return Err(Error::DuplicateMeta);
-        }
-    }
-    Ok(metas)
-}
-
 pub(super) unsafe fn allocate(layout: Layout) -> Result<NonNull<u8>, Error> {
     if layout.size() == 0 {
         Ok(NonNull::dangling())

@@ -41,4 +41,34 @@ impl Store {
             .try_into()
             .ok()
     }
+
+    fn find_or_insert_table(
+        &mut self,
+        metas: impl IntoIterator<Item = Meta>,
+    ) -> Result<u32, Error> {
+        let metas = sort(metas)?;
+        Ok(match self.find_table(&metas) {
+            Some(index) => index,
+            None => {
+                let index = self
+                    .tables
+                    .len()
+                    .try_into()
+                    .map_err(Error::TablesOverflow)?;
+                self.tables.push(Table::new(index, metas)?);
+                index
+            }
+        })
+    }
+}
+
+fn sort(metas: impl IntoIterator<Item = Meta>) -> Result<Vec<Meta>, Error> {
+    let mut metas = metas.into_iter().collect::<Vec<_>>();
+    metas.sort_by_key(|meta| meta.identifier);
+    for [left, right] in metas.array_windows::<2>() {
+        if left.identifier == right.identifier {
+            return Err(Error::DuplicateMeta);
+        }
+    }
+    Ok(metas)
 }
