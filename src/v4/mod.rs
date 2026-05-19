@@ -9,6 +9,7 @@ pub mod template;
 pub mod utility;
 pub mod vector;
 
+use crate::v4::{query::read, template::column};
 pub use column::Column;
 pub use error::Error;
 pub use meta::Meta;
@@ -40,4 +41,13 @@ impl Store {
             .try_into()
             .ok()
     }
+}
+
+#[test]
+fn boba() -> anyhow::Result<()> {
+    struct Physics {}
+    let mut store = Store::new();
+    store.insert(column::<Physics>())?.one(Physics {})?;
+    let a = store.query(read::<Physics>()).iter().flatten().next();
+    Ok(())
 }

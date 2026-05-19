@@ -15,24 +15,55 @@ pub trait Template {
     unsafe fn resolve(&self, state: &mut Self::State, table: &mut Table) -> bool;
 }
 
+pub struct Key;
 pub struct Column<T: ?Sized>(PhantomData<T>);
+pub struct ColumnWith(Meta);
+
+pub const fn key() -> Key {
+    Key
+}
 
 pub const fn column<T>() -> Column<T> {
     Column(PhantomData)
 }
 
-impl Template for Meta {
+pub const fn column_with(meta: Meta) -> ColumnWith {
+    ColumnWith(meta)
+}
+
+impl Template for Key {
+    type Item = ();
+    type State = ();
+
+    fn declare(&self) -> impl Iterator<Item = Meta> {
+        [].into_iter()
+    }
+
+    fn initialize(&self, table: &mut Table) -> Option<Self::State> {
+        None
+    }
+
+    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
+        true
+    }
+
+    unsafe fn resolve(&self, state: &mut Self::State, table: &mut Table) -> bool {
+        true
+    }
+}
+
+impl Template for ColumnWith {
     type Item = Box<dyn Any>;
     type State = (Vector, u32);
 
     fn declare(&self) -> impl Iterator<Item = Meta> {
-        [self.clone()].into_iter()
+        [self.0.clone()].into_iter()
     }
 
     fn initialize(&self, table: &mut Table) -> Option<Self::State> {
         Some((
-            Vector::new(self.clone()),
-            table.column(self.identifier)?.index(),
+            Vector::new(self.0.clone()),
+            table.column(self.0.identifier)?.index(),
         ))
     }
 
@@ -43,7 +74,7 @@ impl Template for Meta {
     unsafe fn resolve(&self, state: &mut Self::State, table: &mut Table) -> bool {
         let count = table.count();
         let column = unsafe { table.columns_mut().get_unchecked_mut(state.1 as usize) };
-        debug_assert_eq!(self.identifier, column.meta.identifier);
+        debug_assert_eq!(self.0.identifier, column.meta.identifier);
         unsafe { state.0.move_at(column.data, count) }
     }
 }

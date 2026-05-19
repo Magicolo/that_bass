@@ -1,5 +1,5 @@
 use crate::v4::{
-    At, Error, Row, Store, Table, query, template,
+    Error, Row, Store, Table, query, template,
     utility::{ranges, sort},
 };
 use core::{iter, slice::Iter};
@@ -24,6 +24,8 @@ pub struct Remove<'a> {
 
 impl Store {
     pub fn query<Q: query::Query>(&mut self, query: Q) -> Query<'_, Q> {
+        // TODO: Query constuction must be failible if the same `Meta` is mentioned
+        // twice. Perhaps add `query::Query::declare` like in `template::Template`.
         Query {
             states: self
                 .tables
