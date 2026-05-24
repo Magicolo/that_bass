@@ -1,8 +1,10 @@
 pub mod column;
 pub mod error;
+pub mod insert;
 pub mod meta;
 pub mod module;
 pub mod query;
+pub mod remove;
 pub mod row;
 pub mod state;
 pub mod table;

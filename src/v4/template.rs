@@ -12,7 +12,7 @@ pub trait Template {
     fn declare(&self) -> impl Iterator<Item = Meta>;
     fn initialize(&self, table: &mut Table) -> Option<Self::State>;
     fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool;
-    unsafe fn resolve(&self, state: &mut Self::State, table: &mut Table) -> bool;
+    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool;
 }
 
 pub struct Key;
@@ -47,7 +47,7 @@ impl Template for Key {
         true
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, table: &mut Table) -> bool {
+    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
         true
     }
 }
@@ -71,9 +71,9 @@ impl Template for ColumnWith {
         state.0.push(item).is_ok()
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, table: &mut Table) -> bool {
+    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
         let count = table.count();
-        let column = unsafe { table.columns_mut().get_unchecked_mut(state.1 as usize) };
+        let column = unsafe { table.columns().get_unchecked(state.1 as usize) };
         debug_assert_eq!(self.0.identifier, column.meta.identifier);
         unsafe { state.0.move_at(column.data, count) }
     }
@@ -99,11 +99,11 @@ impl<T: 'static> Template for Column<T> {
         true
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, table: &mut Table) -> bool {
+    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
         if let Some(source) = NonNull::new(state.0.as_mut_ptr()) {
             if let Ok(count) = state.0.len().try_into() {
                 let index = table.count();
-                let column = unsafe { table.columns_mut().get_unchecked_mut(state.1 as usize) };
+                let column = unsafe { table.columns().get_unchecked(state.1 as usize) };
                 if unsafe { column.copy(source, index, count) } {
                     unsafe { state.0.set_len(0) };
                     return true;
@@ -134,7 +134,7 @@ macro_rules! tuple {
                 $((self.$index.defer(&mut _state.$index, _item.$index)) &)* true
             }
 
-            unsafe fn resolve(&self, _state: &mut Self::State, _table: &mut Table) -> bool {
+            unsafe fn resolve(&self, _state: &mut Self::State, _table: &Table) -> bool {
                 $((unsafe { self.$index.resolve(&mut _state.$index, _table) }) |)* true
             }
         }
