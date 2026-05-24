@@ -1,7 +1,7 @@
 use crate::v4::{Error, Meta, Rows, Store, column, module, table, utility::Push};
 use core::{any::TypeId, iter, marker::PhantomData, slice::Iter};
 
-pub trait Boba {
+pub trait Access {
     type State;
     type Item<'a>
     where
@@ -13,19 +13,19 @@ pub trait Boba {
         Self: 'a;
 }
 
-pub struct Query<'a, Q: Boba> {
-    query: &'a Q,
-    states: &'a [(u32, Q::State)],
+pub struct Query<'a, A: Access> {
+    query: &'a A,
+    states: &'a [(u32, A::State)],
     tables: &'a [table::Table],
 }
 
-pub struct Iterator<'a, Q: Boba> {
-    query: &'a Q,
-    states: Iter<'a, (u32, Q::State)>,
+pub struct Iterator<'a, A: Access> {
+    query: &'a A,
+    states: Iter<'a, (u32, A::State)>,
     tables: &'a [table::Table],
 }
 
-pub struct Module<Q = ()>(pub(crate) Q);
+pub struct Module<A = ()>(pub(crate) A);
 
 pub struct Read<T: ?Sized>(PhantomData<T>);
 pub struct Write<T: ?Sized>(PhantomData<T>);
@@ -40,46 +40,46 @@ impl Module {
     }
 }
 
-impl<Q: Boba> Module<Q> {
-    pub fn read<T: 'static>(self) -> Module<Q::Out>
+impl<A: Access> Module<A> {
+    pub fn read<T: 'static>(self) -> Module<A::Out>
     where
-        Q: Push<Read<T>>,
+        A: Push<Read<T>>,
     {
         self.push(Read(PhantomData))
     }
 
-    pub fn read_with(self, meta: Meta) -> Module<Q::Out>
+    pub fn read_with(self, meta: Meta) -> Module<A::Out>
     where
-        Q: Push<ReadWith>,
+        A: Push<ReadWith>,
     {
         self.push(ReadWith(meta))
     }
 
-    pub fn write<T: 'static>(self) -> Module<Q::Out>
+    pub fn write<T: 'static>(self) -> Module<A::Out>
     where
-        Q: Push<Write<T>>,
+        A: Push<Write<T>>,
     {
         self.push(Write(PhantomData))
     }
 
-    // pub fn write_with(self, meta: Meta) -> Build<(WriteWith, Q)> {
+    // pub fn write_with(self, meta: Meta) -> Build<(WriteWith, A)> {
     //     Build((WriteWith(meta), self.0))
     // }
 
-    fn push<R: Boba>(self, query: R) -> Module<Q::Out>
+    fn push<R: Access>(self, query: R) -> Module<A::Out>
     where
-        Q: Push<R>,
+        A: Push<R>,
     {
         Module(self.0.push(query))
     }
 }
 
-impl<Q: Boba> module::Module for Module<Q> {
+impl<A: Access> module::Module for Module<A> {
     type Item<'a>
-        = Query<'a, Q>
+        = Query<'a, A>
     where
         Self: 'a;
-    type State = (usize, Vec<(u32, Q::State)>);
+    type State = (usize, Vec<(u32, A::State)>);
 
     fn initialize(&self, _: &mut Store) -> Result<Self::State, Error> {
         Ok((0, Vec::new()))
@@ -108,8 +108,8 @@ impl<Q: Boba> module::Module for Module<Q> {
     }
 }
 
-impl<'a, Q: Boba> iter::Iterator for Iterator<'a, Q> {
-    type Item = Q::Item<'a>;
+impl<'a, A: Access> iter::Iterator for Iterator<'a, A> {
+    type Item = A::Item<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
@@ -124,7 +124,7 @@ impl Query<'_, ()> {
     }
 }
 
-impl<'a, Q: Boba> Query<'a, Q> {
+impl<'a, A: Access> Query<'a, A> {
     // pub fn tables(&self) -> impl iter::Iterator<Item = &Table> {
     //     self.states
     //         .iter()
@@ -135,7 +135,7 @@ impl<'a, Q: Boba> Query<'a, Q> {
     //     self.tables().map(|table| table.count() as usize).sum()
     // }
 
-    pub fn iter(&mut self) -> Iterator<'_, Q> {
+    pub fn iter(&mut self) -> Iterator<'_, A> {
         Iterator {
             query: self.query,
             states: self.states.iter(),
@@ -144,7 +144,7 @@ impl<'a, Q: Boba> Query<'a, Q> {
     }
 }
 
-impl Boba for () {
+impl Access for () {
     type Item<'a>
         = ()
     where
@@ -162,12 +162,12 @@ impl Boba for () {
     }
 }
 
-impl<T0: Boba, T1: Boba> Boba for (T0, T1) {
+impl<A0: Access, A1: Access> Access for (A0, A1) {
     type Item<'a>
-        = (T0::Item<'a>, T1::Item<'a>)
+        = (A0::Item<'a>, A1::Item<'a>)
     where
         Self: 'a;
-    type State = (T0::State, T1::State);
+    type State = (A0::State, A1::State);
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
         Some((self.0.initialize(table)?, self.1.initialize(table)?))
@@ -181,7 +181,7 @@ impl<T0: Boba, T1: Boba> Boba for (T0, T1) {
     }
 }
 
-impl<T: 'static> Boba for Read<T> {
+impl<T: 'static> Access for Read<T> {
     type Item<'a>
         = &'a [T]
     where
@@ -201,7 +201,7 @@ impl<T: 'static> Boba for Read<T> {
     }
 }
 
-impl<T: 'static> Boba for Write<T> {
+impl<T: 'static> Access for Write<T> {
     type Item<'a>
         = &'a mut [T]
     where
@@ -221,7 +221,7 @@ impl<T: 'static> Boba for Write<T> {
     }
 }
 
-impl Boba for Row {
+impl Access for Row {
     type Item<'a>
         = Rows<'a>
     where
@@ -240,7 +240,7 @@ impl Boba for Row {
     }
 }
 
-impl Boba for Table {
+impl Access for Table {
     type Item<'a>
         = &'a table::Table
     where
@@ -259,7 +259,7 @@ impl Boba for Table {
     }
 }
 
-impl Boba for ReadWith {
+impl Access for ReadWith {
     type Item<'a>
         = &'a column::Column
     where

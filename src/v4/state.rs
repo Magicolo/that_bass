@@ -169,7 +169,7 @@ where
 }
 
 #[test]
-fn boba() -> Result<(), Error> {
+fn access() -> Result<(), Error> {
     use crate::v4::query::Query;
     let mut s = Store::new();
     let mut b = s.state(
