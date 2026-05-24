@@ -11,6 +11,83 @@ use std::alloc::{alloc, dealloc};
 pub struct At<'a, T: ?Sized>(pub(crate) u32, pub(crate) &'a T);
 pub struct AtMut<'a, T: ?Sized>(pub(crate) u32, pub(crate) &'a mut T);
 
+pub trait Tuple {
+    type Normal;
+    fn normalize(self) -> Self::Normal;
+    fn flatten(tuple: Self::Normal) -> Self;
+}
+
+pub trait Push<T> {
+    type Out;
+    fn push(self, item: T) -> Self::Out;
+}
+
+pub trait Next {
+    type Item<'a>
+    where
+        Self: 'a;
+    type Rest<'a>: Next
+    where
+        Self: 'a;
+
+    fn next(&mut self) -> (Self::Item<'_>, Self::Rest<'_>);
+}
+
+impl<I> Push<I> for () {
+    type Out = (I, Self);
+
+    fn push(self, item: I) -> Self::Out {
+        (item, ())
+    }
+}
+
+impl<I, H, T: Push<I>> Push<I> for (H, T) {
+    type Out = (H, T::Out);
+
+    fn push(self, item: I) -> Self::Out {
+        (self.0, self.1.push(item))
+    }
+}
+
+impl Next for () {
+    type Item<'a> = ();
+    type Rest<'a> = ();
+
+    fn next(&mut self) -> (Self::Item<'_>, Self::Rest<'_>) {
+        ((), ())
+    }
+}
+
+impl<N: Next> Next for &mut N {
+    type Item<'a>
+        = N::Item<'a>
+    where
+        Self: 'a;
+    type Rest<'a>
+        = N::Rest<'a>
+    where
+        Self: 'a;
+
+    fn next(&mut self) -> (Self::Item<'_>, Self::Rest<'_>) {
+        N::next(self)
+    }
+}
+
+impl<H, T: Next> Next for (H, T) {
+    type Item<'a>
+        = &'a mut H
+    where
+        Self: 'a;
+    type Rest<'a>
+        = &'a mut T
+    where
+        Self: 'a;
+
+    fn next(&mut self) -> (Self::Item<'_>, Self::Rest<'_>) {
+        (&mut self.0, &mut self.1)
+    }
+}
+
 impl<'a, T: ?Sized> At<'a, T> {
     pub const fn index(&self) -> u32 {
         self.0
@@ -61,7 +138,23 @@ impl<T> DerefMut for AtMut<'_, T> {
     }
 }
 
-pub(super) unsafe fn allocate(layout: Layout) -> Result<NonNull<u8>, Error> {
+pub(crate) unsafe fn vec_as_slice<T>(vector: *const Vec<T>) -> *const [T] {
+    todo!()
+}
+
+pub(crate) unsafe fn vec_as_slice_mut<T>(vector: *mut Vec<T>) -> *mut [T] {
+    todo!()
+}
+
+pub(crate) unsafe fn box_as_slice<T>(slice: *const Box<[T]>) -> *const [T] {
+    todo!()
+}
+
+pub(crate) unsafe fn box_as_slice_mut<T>(slice: *mut Box<[T]>) -> *mut [T] {
+    todo!()
+}
+
+pub(crate) unsafe fn allocate(layout: Layout) -> Result<NonNull<u8>, Error> {
     if layout.size() == 0 {
         Ok(NonNull::dangling())
     } else {
@@ -69,7 +162,7 @@ pub(super) unsafe fn allocate(layout: Layout) -> Result<NonNull<u8>, Error> {
     }
 }
 
-pub(super) unsafe fn deallocate(data: NonNull<u8>, layout: Layout) -> bool {
+pub(crate) unsafe fn deallocate(data: NonNull<u8>, layout: Layout) -> bool {
     if data == NonNull::dangling() || layout.size() == 0 {
         false
     } else {
@@ -80,7 +173,7 @@ pub(super) unsafe fn deallocate(data: NonNull<u8>, layout: Layout) -> bool {
 
 /// The `pairs` iterator must be sorted by `pair.0` (ascending or
 /// descending), then by `pair.1` descending.
-pub(super) fn ranges(
+pub(crate) fn ranges(
     pairs: impl IntoIterator<Item = (u32, u32)>,
 ) -> impl Iterator<Item = (u32, Range<u32>)> {
     let mut table = u32::MAX;
@@ -114,7 +207,7 @@ pub(super) fn ranges(
     })
 }
 
-pub(super) fn resize(
+pub(crate) fn resize(
     columns: &mut [Column],
     data: NonNull<u8>,
     count: u32,
@@ -162,7 +255,7 @@ pub(super) fn resize(
     Ok(data)
 }
 
-pub(super) fn find<T, K: Ord, F: FnMut(&T) -> K>(
+pub(crate) fn find<T, K: Ord, F: FnMut(&T) -> K>(
     slice: &[T],
     key: K,
     mut map: F,
@@ -174,3 +267,38 @@ pub(super) fn find<T, K: Ord, F: FnMut(&T) -> K>(
     };
     Some(At(index.try_into().ok()?, slice.get(index)?))
 }
+
+macro_rules! tuple {
+    ($($name: ident),*) => {
+        tuple!(@recurse $($name),* [] [()]);
+    };
+    (@recurse [$($flat: ident),*] [$normal: tt]) => {
+        tuple!(@implement [$($flat),*] [$normal]);
+    };
+    (@recurse $name: ident $(, $names: ident)* [$($flat: ident),*] [$normal: tt]) => {
+        tuple!(@recurse $($names),* [$name $(, $flat)*] [($name, $normal)]);
+        tuple!(@implement [$($flat),*] [$normal]);
+    };
+    (@implement [$($flat: ident),*] [$normal: tt]) => {
+        #[allow(non_snake_case)]
+        #[automatically_derived]
+        impl<$($flat,)*> Tuple for ($($flat,)*) {
+            type Normal = $normal;
+
+            fn normalize(self) -> Self::Normal {
+                let ($($flat,)*) = self;
+                $normal
+            }
+
+            fn flatten(tuple: Self::Normal) -> Self {
+                let $normal = tuple;
+                ($($flat,)*)
+            }
+        }
+    }
+}
+
+tuple!(
+    T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18, T19, T20,
+    T21, T22, T23, T24, T25, T26, T27, T28, T29, T30, T31
+);

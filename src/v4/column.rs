@@ -22,17 +22,12 @@ impl Column {
         &self.meta
     }
 
-    pub(crate) unsafe fn get<T: 'static>(&self, row: u32) -> &T {
-        debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
-        unsafe { self.data.cast::<T>().add(row as usize).as_ref() }
-    }
-
-    pub(crate) unsafe fn get_all<T: 'static>(&self, count: u32) -> &[T] {
+    pub(crate) unsafe fn as_ref<T: 'static>(&self, count: u32) -> &[T] {
         debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
         unsafe { from_raw_parts(self.data.cast::<T>().as_ptr(), count as usize) }
     }
 
-    pub(crate) unsafe fn get_all_mut<T: 'static>(&mut self, count: u32) -> &mut [T] {
+    pub(crate) unsafe fn as_mut<T: 'static>(&self, count: u32) -> &mut [T] {
         debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
         unsafe { from_raw_parts_mut(self.data.cast::<T>().as_ptr(), count as usize) }
     }

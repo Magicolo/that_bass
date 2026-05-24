@@ -1,10 +1,108 @@
-use crate::v4::{Error, Row, Store, Table, query, template, utility::ranges};
-use core::{iter, slice::Iter};
+use crate::v4::{Error, Row, Store, Table, template, utility::ranges};
 
-pub struct Query<'a, Q: query::Query> {
-    query: Q,
-    states: Box<[(u32, Q::State)]>,
-    tables: &'a mut [Table],
+pub trait Module {
+    type Item<'a>
+    where
+        Self: 'a;
+    type State;
+
+    fn initialize(&self, store: &mut Store) -> Result<Self::State, Error>;
+    fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error>;
+    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    where
+        Self: 'a;
+}
+
+impl<M: Module> Module for &mut M {
+    type Item<'a>
+        = M::Item<'a>
+    where
+        Self: 'a;
+    type State = M::State;
+
+    fn initialize(&self, store: &mut Store) -> Result<Self::State, Error> {
+        M::initialize(self, store)
+    }
+
+    fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error> {
+        M::update(self, state, store)
+    }
+
+    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    where
+        Self: 'a,
+    {
+        M::get(self, state, store)
+    }
+}
+
+impl<M: Module> Module for &M {
+    type Item<'a>
+        = M::Item<'a>
+    where
+        Self: 'a;
+    type State = M::State;
+
+    fn initialize(&self, store: &mut Store) -> Result<Self::State, Error> {
+        M::initialize(self, store)
+    }
+
+    fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error> {
+        M::update(self, state, store)
+    }
+
+    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    where
+        Self: 'a,
+    {
+        M::get(self, state, store)
+    }
+}
+
+impl Module for () {
+    type Item<'a>
+        = ()
+    where
+        Self: 'a;
+    type State = ();
+
+    fn initialize(&self, _: &mut Store) -> Result<Self::State, Error> {
+        Ok(())
+    }
+
+    fn update(&self, _: &mut Self::State, _: &Store) -> Result<bool, Error> {
+        Ok(false)
+    }
+
+    fn get<'a>(&'a self, _: &'a Self::State, _: &'a Store) -> Self::Item<'a>
+    where
+        Self: 'a,
+    {
+        ()
+    }
+}
+
+impl<M0: Module, M1: Module> Module for (M0, M1) {
+    type Item<'a>
+        = (M0::Item<'a>, M1::Item<'a>)
+    where
+        Self: 'a;
+    type State = (M0::State, M1::State);
+
+    fn initialize(&self, store: &mut Store) -> Result<Self::State, Error> {
+        Ok((self.0.initialize(store)?, self.1.initialize(store)?))
+    }
+
+    fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error> {
+        Ok(self.0.update(&mut state.0, store)? | self.1.update(&mut state.1, store)?)
+    }
+
+    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    where
+        Self: 'a,
+    {
+        (self.0.get(&state.0, store), self.1.get(&state.1, store))
+    }
 }
 
 pub struct Insert<'a, T: template::Template> {
@@ -20,18 +118,17 @@ pub struct Remove<'a> {
 }
 
 impl Store {
-    pub fn query<Q: query::Query>(&mut self, query: Q) -> Query<'_, Q> {
-        // TODO: Query constuction must be failible if the same `Meta` is mentioned
-        // twice. Perhaps add `query::Query::declare` like in `template::Template`.
-        Query {
-            states: self
-                .tables
-                .iter()
-                .filter_map(|table| Some((table.index(), query.initialize(table)?)))
-                .collect(),
-            tables: &mut self.tables,
-            query,
-        }
+    // TODO: This method is not safe because of the implementation `Module for (M0,
+    // M1)` which currently validates `M0` and `M1` individually rather than as a
+    // single unit. This means that one can get two `Query<Write<T>>` items and
+    // alias a reference to the same location, thus violating rust's invariants.
+    pub fn with<M: Module, T, F: FnOnce(M::Item<'_>) -> T>(
+        &mut self,
+        module: M,
+        with: F,
+    ) -> Result<T, Error> {
+        let state = module.initialize(self)?;
+        Ok(with(module.get(&state, self)))
     }
 
     pub fn insert<T: template::Template>(&mut self, template: T) -> Result<Insert<'_, T>, Error> {
@@ -50,35 +147,6 @@ impl Store {
     pub fn remove(&mut self) -> Remove<'_> {
         Remove {
             rows: Vec::new(),
-            tables: &mut self.tables,
-        }
-    }
-}
-
-pub struct Iterator<'a, Q: query::Query> {
-    query: &'a Q,
-    states: Iter<'a, (u32, Q::State)>,
-    tables: &'a mut [Table],
-}
-
-impl<'a, Q: query::Query> iter::Iterator for Iterator<'a, Q> {
-    type Item = Q::Item<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-        // TODO: The `&mut` requirement and `Iterator` signature makes this
-        // iterator impossible...
-        // let (table, state) = self.states.next()?;
-        // let table = unsafe { self.tables.get_unchecked_mut(*table as usize)
-        // }; Some(self.query.get(state, table))
-    }
-}
-
-impl<'a, Q: query::Query> Query<'a, Q> {
-    pub fn iter(&mut self) -> Iterator<'_, Q> {
-        Iterator {
-            query: &self.query,
-            states: self.states.iter(),
             tables: &mut self.tables,
         }
     }

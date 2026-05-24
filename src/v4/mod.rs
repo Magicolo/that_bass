@@ -4,17 +4,18 @@ pub mod meta;
 pub mod module;
 pub mod query;
 pub mod row;
+pub mod state;
 pub mod table;
 pub mod template;
 pub mod utility;
 pub mod vector;
 
-use crate::v4::{query::read, template::column};
 pub use column::Column;
 pub use error::Error;
 pub use meta::Meta;
 pub use row::{Row, Rows};
 pub use table::Table;
+use template::column;
 pub use utility::{At, AtMut};
 pub use vector::Vector;
 
@@ -64,7 +65,7 @@ impl Store {
 
 fn sort(metas: impl IntoIterator<Item = Meta>) -> Result<Vec<Meta>, Error> {
     let mut metas = metas.into_iter().collect::<Vec<_>>();
-    metas.sort_by_key(|meta| meta.identifier);
+    metas.sort_unstable_by_key(|meta| meta.identifier);
     for [left, right] in metas.array_windows::<2>() {
         if left.identifier == right.identifier {
             return Err(Error::DuplicateMeta);

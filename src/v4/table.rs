@@ -4,11 +4,11 @@ use core::{any::TypeId, ops::Range, ptr::NonNull};
 
 pub struct Table {
     index: u32,
-    count: u32,
+    pub(crate) count: u32,
     pending: u32,
     capacity: u32,
     data: NonNull<u8>,
-    columns: Box<[Column]>,
+    pub(crate) columns: Box<[Column]>,
 }
 
 impl Table {
