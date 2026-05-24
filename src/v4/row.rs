@@ -1,8 +1,4 @@
-use core::{
-    iter::FusedIterator,
-    marker::PhantomData,
-    ops::{Deref, DerefMut, Range},
-};
+use core::{iter::FusedIterator, marker::PhantomData, ops::Range};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Row<'a> {

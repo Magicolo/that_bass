@@ -1,4 +1,4 @@
-use super::{column::Column, error::Error, meta::Meta};
+use super::{column::Column, error::Error};
 use core::{
     alloc::Layout,
     iter::from_fn,
@@ -110,7 +110,7 @@ impl<T> Deref for At<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.1
+        self.1
     }
 }
 
@@ -128,13 +128,13 @@ impl<T> Deref for AtMut<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.1
+        self.1
     }
 }
 
 impl<T> DerefMut for AtMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.1
+        self.1
     }
 }
 
@@ -215,7 +215,6 @@ pub(crate) fn resize(
 ) -> Result<NonNull<u8>, Error> {
     fn next(
         columns: &mut [Column],
-        data: NonNull<u8>,
         layouts: (Layout, Layout),
         count: u32,
         capacities: (u32, u32),
@@ -230,7 +229,7 @@ pub(crate) fn resize(
                     .meta
                     .extend(layouts.1, capacities.1)
                     .map_err(Error::Layout)?;
-                let pair = next(tail, data, (old.0, new.0), count, capacities)?;
+                let pair = next(tail, (old.0, new.0), count, capacities)?;
                 let source = head.data;
                 let target = unsafe { pair.1.add(new.1) };
                 head.meta.initialize(source, target, count, capacities.1);
@@ -244,15 +243,14 @@ pub(crate) fn resize(
         })
     }
 
-    let (layout, data) = next(
+    let (old, new) = next(
         columns,
-        data,
         (Layout::new::<()>(), Layout::new::<()>()),
         count,
         capacities,
     )?;
-    unsafe { deallocate(data, layout) };
-    Ok(data)
+    unsafe { deallocate(data, old) };
+    Ok(new)
 }
 
 pub(crate) fn find<T, K: Ord, F: FnMut(&T) -> K>(

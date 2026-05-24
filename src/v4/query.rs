@@ -137,7 +137,7 @@ impl<'a, Q: Boba> Query<'a, Q> {
 
     pub fn iter(&mut self) -> Iterator<'_, Q> {
         Iterator {
-            query: &self.query,
+            query: self.query,
             states: self.states.iter(),
             tables: self.tables,
         }
@@ -159,7 +159,6 @@ impl Boba for () {
     where
         Self: 'a,
     {
-        ()
     }
 }
 

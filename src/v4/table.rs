@@ -23,7 +23,7 @@ impl Table {
         })
     }
 
-    pub(super) fn column(&self, identifier: TypeId) -> Option<At<Column>> {
+    pub(super) fn column(&self, identifier: TypeId) -> Option<At<'_, Column>> {
         utility::find(&self.columns, identifier, |column| column.meta.identifier)
     }
 

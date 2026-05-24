@@ -182,12 +182,12 @@ fn boba() -> Result<(), Error> {
             .push(Query::build().read::<char>())
             .push(Query::build().read::<i32>()),
     )?;
-    let (i, mut b) = b.next();
-    let (i, mut b) = b.next();
-    let (i, mut b) = b.next();
-    let (i, mut b) = b.next();
-    let (i, mut b) = b.next();
-    let (i, mut b) = b.next();
-    let (i, mut b) = b.next();
+    let (_, mut b) = b.next();
+    let (_, mut b) = b.next();
+    let (_, mut b) = b.next();
+    let (_, mut b) = b.next();
+    let (_, mut b) = b.next();
+    let (_, mut b) = b.next();
+    let (_, _b) = b.next();
     Ok(())
 }

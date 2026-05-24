@@ -88,10 +88,7 @@ impl<T: 'static> Template for Column<T> {
     }
 
     fn initialize(&self, table: &mut Table) -> Option<Self::State> {
-        Some((
-            Vec::new(),
-            table.column(TypeId::of::<T>())?.index().try_into().ok()?,
-        ))
+        Some((Vec::new(), table.column(TypeId::of::<T>())?.index()))
     }
 
     fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {

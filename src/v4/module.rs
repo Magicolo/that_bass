@@ -78,7 +78,6 @@ impl Module for () {
     where
         Self: 'a,
     {
-        ()
     }
 }
 
