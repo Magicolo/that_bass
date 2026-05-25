@@ -1,4 +1,4 @@
-use crate::v4::{Error, Store, module, remove::Remove, utility::Push};
+use crate::v4::{Error, Store, module, utility::Push};
 use ref_cast::RefCast;
 
 #[derive(RefCast)]
@@ -177,14 +177,15 @@ where
 
 #[test]
 fn access() -> Result<(), Error> {
-    use crate::v4::query::Query;
-    let mut s = Store::new();
-    let mut state = s.state(
+    use crate::v4::{insert::Insert, query::Query, remove::Remove};
+
+    let mut store = Store::new();
+    let mut state = store.state(
         State::build()
             .push(Query::build().read::<char>().write::<String>())
             .push((Query::build().read::<isize>(), Remove::build()))
             .push(Query::build().read::<[u32; 100]>())
-            .push(Query::build().read::<u8>())
+            .push(Insert::build().key().column::<u8>())
             .push(Query::build().read::<usize>())
             .push(Query::build().read::<char>())
             .push(Query::build().read::<i32>()),
@@ -192,7 +193,9 @@ fn access() -> Result<(), Error> {
     let guard = state.guard();
     let guard = guard.next()?;
     let guard = guard.next()?;
-    let guard = guard.next()?;
+    let mut guard = guard.next()?;
+    let mut insert = guard.get()?;
+    insert.one(((), (1u8, ())));
     let guard = guard.next()?;
     let guard = guard.next()?;
     let guard = guard.next()?;
