@@ -1,4 +1,4 @@
-use super::{column::Column, error::Error};
+use crate::v4::{error::Error, table::Column};
 use core::{
     alloc::Layout,
     iter::from_fn,

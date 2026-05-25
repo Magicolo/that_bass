@@ -1,21 +1,17 @@
-pub mod column;
 pub mod error;
 pub mod insert;
 pub mod meta;
 pub mod module;
 pub mod query;
 pub mod remove;
-pub mod row;
 pub mod state;
 pub mod table;
 pub mod utility;
 pub mod vector;
 
-pub use column::Column;
 pub use error::Error;
 pub use meta::Meta;
-pub use row::{Row, Rows};
-pub use table::Table;
+pub use table::{Row, Rows, Table};
 pub use utility::{At, AtMut};
 pub use vector::Vector;
 

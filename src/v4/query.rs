@@ -1,4 +1,4 @@
-use crate::v4::{Error, Meta, Rows, Store, column, module, table, utility::Push};
+use crate::v4::{Error, Meta, Rows, Store, module, table, utility::Push};
 use core::{any::TypeId, iter, marker::PhantomData, slice::Iter};
 
 pub trait Access {
@@ -144,6 +144,44 @@ impl<'a, A: Access> Query<'a, A> {
     }
 }
 
+impl<A: Access> Access for &A {
+    type Item<'a>
+        = A::Item<'a>
+    where
+        Self: 'a;
+    type State = A::State;
+
+    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
+        A::initialize(self, table)
+    }
+
+    fn get<'a>(&'a self, state: &'a Self::State, table: &'a table::Table) -> Self::Item<'a>
+    where
+        Self: 'a,
+    {
+        A::get(self, state, table)
+    }
+}
+
+impl<A: Access> Access for &mut A {
+    type Item<'a>
+        = A::Item<'a>
+    where
+        Self: 'a;
+    type State = A::State;
+
+    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
+        A::initialize(self, table)
+    }
+
+    fn get<'a>(&'a self, state: &'a Self::State, table: &'a table::Table) -> Self::Item<'a>
+    where
+        Self: 'a,
+    {
+        A::get(self, state, table)
+    }
+}
+
 impl Access for () {
     type Item<'a>
         = ()
@@ -261,7 +299,7 @@ impl Access for Table {
 
 impl Access for ReadWith {
     type Item<'a>
-        = &'a column::Column
+        = &'a table::Column
     where
         Self: 'a;
     type State = u32;
