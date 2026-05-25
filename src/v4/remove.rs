@@ -1,33 +1,50 @@
-use crate::v4::{Row, Store, Table, utility::ranges};
+use crate::v4::{Error, Row, Store, module, utility::ranges};
+
+pub struct Module(());
 
 pub struct Remove<'a> {
-    rows: Vec<(u32, u32)>,
-    tables: &'a mut [Table],
+    state: &'a mut Vec<(u32, u32)>,
 }
 
-impl<'a> Remove<'a> {
-    pub fn one(&mut self, row: Row) {
-        self.rows.push((row.table(), row.row()));
+impl Remove<'_> {
+    pub const fn build() -> Module {
+        Module(())
     }
 
-    pub fn resolve(&mut self) -> u32 {
-        self.rows.sort();
-        let mut total = 0u32;
-        for (table, rows) in ranges(self.rows.drain(..).rev()) {
-            if let Some(table) = self.tables.get_mut(table as usize) {
-                total = total.saturating_add(rows.end.saturating_sub(rows.start));
+    pub fn one(&mut self, row: Row) {
+        self.state.push((row.table(), row.row()));
+    }
+}
+
+impl module::Module for Module {
+    type Item<'a>
+        = Remove<'a>
+    where
+        Self: 'a;
+    type State = Vec<(u32, u32)>;
+
+    fn initialize(&self, _: &mut Store) -> Result<Self::State, Error> {
+        Ok(Vec::new())
+    }
+
+    fn update(&self, _: &mut Self::State, _: &Store) -> Result<bool, Error> {
+        Ok(false)
+    }
+
+    fn get<'a>(&'a self, state: &'a mut Self::State, _: &'a Store) -> Self::Item<'a>
+    where
+        Self: 'a,
+    {
+        Remove { state }
+    }
+
+    fn resolve(&self, state: &mut Self::State, store: &mut Store) -> Result<(), Error> {
+        state.sort();
+        for (table, rows) in ranges(state.drain(..).rev()) {
+            if let Some(table) = store.tables.get_mut(table as usize) {
                 table.release(rows);
             }
         }
-        total
-    }
-}
-
-impl Store {
-    pub fn remove(&mut self) -> Remove<'_> {
-        Remove {
-            rows: Vec::new(),
-            tables: &mut self.tables,
-        }
+        Ok(())
     }
 }

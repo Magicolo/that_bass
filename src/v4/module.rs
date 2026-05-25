@@ -8,9 +8,12 @@ pub trait Module {
 
     fn initialize(&self, store: &mut Store) -> Result<Self::State, Error>;
     fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error>;
-    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, store: &'a Store) -> Self::Item<'a>
     where
         Self: 'a;
+    fn resolve(&self, _: &mut Self::State, _: &mut Store) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 impl<M: Module> Module for &mut M {
@@ -28,11 +31,15 @@ impl<M: Module> Module for &mut M {
         M::update(self, state, store)
     }
 
-    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, store: &'a Store) -> Self::Item<'a>
     where
         Self: 'a,
     {
         M::get(self, state, store)
+    }
+
+    fn resolve(&self, state: &mut Self::State, store: &mut Store) -> Result<(), Error> {
+        M::resolve(self, state, store)
     }
 }
 
@@ -51,11 +58,15 @@ impl<M: Module> Module for &M {
         M::update(self, state, store)
     }
 
-    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, store: &'a Store) -> Self::Item<'a>
     where
         Self: 'a,
     {
         M::get(self, state, store)
+    }
+
+    fn resolve(&self, state: &mut Self::State, store: &mut Store) -> Result<(), Error> {
+        M::resolve(self, state, store)
     }
 }
 
@@ -74,7 +85,7 @@ impl Module for () {
         Ok(false)
     }
 
-    fn get<'a>(&'a self, _: &'a Self::State, _: &'a Store) -> Self::Item<'a>
+    fn get<'a>(&'a self, _: &'a mut Self::State, _: &'a Store) -> Self::Item<'a>
     where
         Self: 'a,
     {
@@ -96,11 +107,20 @@ impl<M0: Module, M1: Module> Module for (M0, M1) {
         Ok(self.0.update(&mut state.0, store)? | self.1.update(&mut state.1, store)?)
     }
 
-    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, store: &'a Store) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        (self.0.get(&state.0, store), self.1.get(&state.1, store))
+        (
+            self.0.get(&mut state.0, store),
+            self.1.get(&mut state.1, store),
+        )
+    }
+
+    fn resolve(&self, state: &mut Self::State, store: &mut Store) -> Result<(), Error> {
+        self.0.resolve(&mut state.0, store)?;
+        self.1.resolve(&mut state.1, store)?;
+        Ok(())
     }
 }
 
@@ -114,7 +134,7 @@ impl Store {
         module: M,
         with: F,
     ) -> Result<T, Error> {
-        let state = module.initialize(self)?;
-        Ok(with(module.get(&state, self)))
+        let mut state = module.initialize(self)?;
+        Ok(with(module.get(&mut state, self)))
     }
 }

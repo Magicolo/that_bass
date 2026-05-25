@@ -1,4 +1,4 @@
-use crate::v4::{Error, Store, module, utility::Push};
+use crate::v4::{Error, Store, module, remove::Remove, utility::Push};
 use ref_cast::RefCast;
 
 #[derive(RefCast)]
@@ -11,10 +11,10 @@ pub struct State<'a, M: module::Module = ()> {
     state: M::State,
 }
 
-pub struct Rest<'a, M: module::Module = ()> {
-    store: &'a Store,
-    module: &'a mut M,
+pub struct Guard<'a, M: module::Module = ()> {
+    module: &'a M,
     state: &'a mut M::State,
+    store: &'a mut Store,
 }
 
 impl State<'_> {
@@ -24,53 +24,12 @@ impl State<'_> {
 }
 
 impl<M: module::Module> State<'_, M> {
-    pub fn get(&mut self) -> Result<M::Item<'_>, Error> {
-        self.update()?;
-        Ok(self.module.get(&self.state, self.store))
-    }
-
-    fn update(&mut self) -> Result<bool, Error> {
-        let mut did = false;
-        while self.module.update(&mut self.state, self.store)? {
-            did = true;
+    pub fn guard(&mut self) -> Guard<'_, M> {
+        Guard {
+            module: &self.module,
+            state: &mut self.state,
+            store: &mut *self.store,
         }
-        Ok(did)
-    }
-}
-
-impl<H: module::Module, T: module::Module> State<'_, (H, T)> {
-    pub fn next<'b>(&'b mut self) -> (H::Item<'b>, Rest<'b, T>) {
-        let Self {
-            store,
-            module,
-            state,
-        } = self;
-        (
-            module.0.get(&state.0, store),
-            Rest {
-                store,
-                module: &mut module.1,
-                state: &mut state.1,
-            },
-        )
-    }
-}
-
-impl<H: module::Module, T: module::Module> Rest<'_, (H, T)> {
-    pub fn next<'b>(&'b mut self) -> (H::Item<'b>, Rest<'b, T>) {
-        let Self {
-            store,
-            module,
-            state,
-        } = self;
-        (
-            module.0.get(&state.0, store),
-            Rest {
-                store,
-                module: &mut module.1,
-                state: &mut state.1,
-            },
-        )
     }
 }
 
@@ -81,6 +40,40 @@ impl Store {
             store: self,
             module: module.0,
         })
+    }
+}
+
+impl<'a, H: module::Module, T: module::Module> Guard<'a, (H, T)> {
+    pub fn get(&mut self) -> Result<H::Item<'_>, Error> {
+        self.update()?;
+        Ok(self.module.0.get(&mut self.state.0, self.store))
+    }
+
+    pub fn next(self) -> Result<Guard<'a, T>, Error> {
+        let Self {
+            module,
+            state,
+            store,
+        } = self;
+        module.0.resolve(&mut state.0, store)?;
+        Ok(Guard {
+            module: &module.1,
+            state: &mut state.1,
+            store,
+        })
+    }
+
+    pub fn with<F: FnOnce(H::Item<'_>)>(mut self, with: F) -> Result<Guard<'a, T>, Error> {
+        with(self.get()?);
+        self.next()
+    }
+
+    fn update(&mut self) -> Result<bool, Error> {
+        let mut did = false;
+        while self.module.0.update(&mut self.state.0, self.store)? {
+            did = true;
+        }
+        Ok(did)
     }
 }
 
@@ -110,6 +103,7 @@ impl<H, T> Module<(H, T)> {
         (Module::ref_cast(head), Module::ref_cast(tail))
     }
 
+    #[allow(dead_code)]
     fn split_mut(&mut self) -> (&mut Module<H>, &mut Module<T>) {
         let Self((head, tail)) = self;
         (Module::ref_cast_mut(head), Module::ref_cast_mut(tail))
@@ -131,11 +125,15 @@ impl module::Module for Module<()> {
         self.0.update(state, store)
     }
 
-    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, store: &'a Store) -> Self::Item<'a>
     where
         Self: 'a,
     {
         self.0.get(state, store)
+    }
+
+    fn resolve(&self, state: &mut Self::State, store: &mut Store) -> Result<(), Error> {
+        self.0.resolve(state, store)
     }
 }
 
@@ -159,12 +157,21 @@ where
         Ok(head.0.update(&mut state.0, store)? | tail.update(&mut state.1, store)?)
     }
 
-    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, store: &'a Store) -> Self::Item<'a>
     where
         Self: 'a,
     {
         let (head, tail) = self.split_ref();
-        (head.0.get(&state.0, store), tail.get(&state.1, store))
+        (
+            head.0.get(&mut state.0, store),
+            tail.get(&mut state.1, store),
+        )
+    }
+
+    fn resolve(&self, state: &mut Self::State, store: &mut Store) -> Result<(), Error> {
+        let (head, tail) = self.split_ref();
+        head.0.resolve(&mut state.0, store)?;
+        tail.resolve(&mut state.1, store)
     }
 }
 
@@ -172,22 +179,23 @@ where
 fn access() -> Result<(), Error> {
     use crate::v4::query::Query;
     let mut s = Store::new();
-    let mut b = s.state(
+    let mut state = s.state(
         State::build()
             .push(Query::build().read::<char>().write::<String>())
-            .push(Query::build().read::<isize>())
+            .push((Query::build().read::<isize>(), Remove::build()))
             .push(Query::build().read::<[u32; 100]>())
             .push(Query::build().read::<u8>())
             .push(Query::build().read::<usize>())
             .push(Query::build().read::<char>())
             .push(Query::build().read::<i32>()),
     )?;
-    let (_, mut b) = b.next();
-    let (_, mut b) = b.next();
-    let (_, mut b) = b.next();
-    let (_, mut b) = b.next();
-    let (_, mut b) = b.next();
-    let (_, mut b) = b.next();
-    let (_, _b) = b.next();
+    let guard = state.guard();
+    let guard = guard.next()?;
+    let guard = guard.next()?;
+    let guard = guard.next()?;
+    let guard = guard.next()?;
+    let guard = guard.next()?;
+    let guard = guard.next()?;
+    let _guard = guard.next()?;
     Ok(())
 }

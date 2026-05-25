@@ -8,7 +8,6 @@ pub mod remove;
 pub mod row;
 pub mod state;
 pub mod table;
-pub mod template;
 pub mod utility;
 pub mod vector;
 
@@ -17,7 +16,6 @@ pub use error::Error;
 pub use meta::Meta;
 pub use row::{Row, Rows};
 pub use table::Table;
-use template::column;
 pub use utility::{At, AtMut};
 pub use vector::Vector;
 

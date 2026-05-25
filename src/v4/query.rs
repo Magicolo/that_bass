@@ -96,7 +96,7 @@ impl<A: Access> module::Module for Module<A> {
         Ok(count < state.1.len())
     }
 
-    fn get<'a>(&'a self, state: &'a Self::State, store: &'a Store) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, store: &'a Store) -> Self::Item<'a>
     where
         Self: 'a,
     {

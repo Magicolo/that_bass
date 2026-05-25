@@ -47,7 +47,7 @@ impl Table {
         self.capacity
     }
 
-    pub(super) fn reserve(&mut self, count: u32) -> Result<Range<u32>, Error> {
+    pub(crate) fn reserve(&mut self, count: u32) -> Result<Range<u32>, Error> {
         let old = self.pending;
         let new = self
             .pending
@@ -57,7 +57,7 @@ impl Table {
         Ok(old..new)
     }
 
-    pub(super) fn ensure(&mut self) -> Result<bool, Error> {
+    pub(crate) fn ensure(&mut self) -> Result<bool, Error> {
         if self.pending > self.capacity {
             let capacity = self
                 .pending
@@ -76,7 +76,7 @@ impl Table {
         }
     }
 
-    pub(super) fn commit(&mut self) -> Range<u32> {
+    pub(crate) fn commit(&mut self) -> Range<u32> {
         debug_assert!(self.count <= self.pending);
         let rows = self.count..self.pending;
         self.count = self.pending;
