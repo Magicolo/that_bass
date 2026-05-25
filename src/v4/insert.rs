@@ -106,6 +106,91 @@ impl<T: Template> module::Module for Module<T> {
     }
 }
 
+impl<T: Template> Template for &T {
+    type Item = T::Item;
+    type State = T::State;
+
+    fn declare(&self) -> impl Iterator<Item = Meta> {
+        T::declare(self)
+    }
+
+    fn initialize(&self, table: &mut Table) -> Option<Self::State> {
+        T::initialize(self, table)
+    }
+
+    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
+        T::defer(self, state, item)
+    }
+
+    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
+        unsafe { T::resolve(self, state, table) }
+    }
+}
+
+impl<T: Template> Template for &mut T {
+    type Item = T::Item;
+    type State = T::State;
+
+    fn declare(&self) -> impl Iterator<Item = Meta> {
+        T::declare(self)
+    }
+
+    fn initialize(&self, table: &mut Table) -> Option<Self::State> {
+        T::initialize(self, table)
+    }
+
+    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
+        T::defer(self, state, item)
+    }
+
+    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
+        unsafe { T::resolve(self, state, table) }
+    }
+}
+
+impl Template for () {
+    type Item = ();
+    type State = ();
+
+    fn declare(&self) -> impl Iterator<Item = Meta> {
+        [].into_iter()
+    }
+
+    fn initialize(&self, _: &mut Table) -> Option<Self::State> {
+        Some(())
+    }
+
+    fn defer(&self, _: &mut Self::State, _: Self::Item) -> bool {
+        true
+    }
+
+    unsafe fn resolve(&self, _: &mut Self::State, _: &Table) -> bool {
+        false
+    }
+}
+
+impl<T0: Template, T1: Template> Template for (T0, T1) {
+    type Item = (T0::Item, T1::Item);
+    type State = (T0::State, T1::State);
+
+    fn declare(&self) -> impl Iterator<Item = Meta> {
+        self.0.declare().chain(self.1.declare())
+    }
+
+    fn initialize(&self, table: &mut Table) -> Option<Self::State> {
+        Some((self.0.initialize(table)?, self.1.initialize(table)?))
+    }
+
+    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
+        self.0.defer(&mut state.0, item.0) && self.1.defer(&mut state.1, item.1)
+    }
+
+    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
+        unsafe { self.0.resolve(&mut state.0, table) && self.1.resolve(&mut state.1, table) }
+    }
+}
+
+// TODO: Implement this when `Keys` will be implemented.
 impl Template for Key {
     type Item = ();
     type State = ();
@@ -185,40 +270,3 @@ impl<T: 'static> Template for Column<T> {
         false
     }
 }
-
-macro_rules! tuple {
-    ($($index:tt: $type:ident),*) => {
-        impl<$($type: Template),*> Template for ($($type,)*) {
-            type Item = ($($type::Item,)*);
-            type State = ($($type::State,)*);
-
-            fn declare(&self) -> impl Iterator<Item = Meta> {
-                let metas = [].into_iter();
-                $(let metas = metas.chain(self.$index.declare());)*
-                metas
-            }
-
-            fn initialize(&self, _table: &mut Table) -> Option<Self::State> {
-                Some(($(self.$index.initialize(_table)?,)*))
-            }
-
-            fn defer(&self, _state: &mut Self::State, _item: Self::Item) -> bool {
-                $((self.$index.defer(&mut _state.$index, _item.$index)) &)* true
-            }
-
-            unsafe fn resolve(&self, _state: &mut Self::State, _table: &Table) -> bool {
-                $((unsafe { self.$index.resolve(&mut _state.$index, _table) }) |)* true
-            }
-        }
-    };
-}
-
-tuple!();
-tuple!(0: T0);
-tuple!(0: T0, 1: T1);
-tuple!(0: T0, 1: T1, 2: T2);
-tuple!(0: T0, 1: T1, 2: T2, 3: T3);
-tuple!(0: T0, 1: T1, 2: T2, 3: T3, 4: T4);
-tuple!(0: T0, 1: T1, 2: T2, 3: T3, 4: T4, 5: T5);
-tuple!(0: T0, 1: T1, 2: T2, 3: T3, 4: T4, 5: T5, 6: T6);
-tuple!(0: T0, 1: T1, 2: T2, 3: T3, 4: T4, 5: T5, 6: T6, 7: T7);
