@@ -165,21 +165,6 @@ impl<M0: Module, M1: Module> Module for (M0, M1) {
     }
 }
 
-impl Store {
-    // TODO: This method is not safe because of the implementation `Module for (M0,
-    // M1)` which currently validates `M0` and `M1` individually rather than as a
-    // single unit. This means that one can get two `Query<Write<T>>` items and
-    // alias a reference to the same location, thus violating rust's invariants.
-    pub fn with<M: Module, T, F: FnOnce(M::Item<'_>) -> T>(
-        &mut self,
-        module: M,
-        with: F,
-    ) -> Result<T, Error> {
-        let mut state = module.initialize(self)?;
-        Ok(with(module.get(&mut state, self)))
-    }
-}
-
 impl Resource {
     pub const fn parent(self) -> Option<Self> {
         match self {
