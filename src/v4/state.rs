@@ -3,7 +3,7 @@ use crate::v4::{
     module::{self, Access, Dependency, Resource},
     utility::Push,
 };
-use core::iter::empty;
+use core::iter::{empty, once};
 use ref_cast::RefCast;
 use std::collections::{HashMap, hash_map::Entry};
 
@@ -84,35 +84,11 @@ impl<'a, H: module::Module, T: module::Module> Guard<'a, (H, T)> {
 
     fn analyze(&mut self) -> Result<(), Error> {
         self.dependencies.clear();
-
-        let dependencies = self.module.0.declare(&self.state.0, self.store);
-        let errors = dependencies.filter_map(|dependency| {
-            let entry = self.dependencies.entry(dependency.resource());
-            match (entry, dependency.access()) {
-                (Entry::Occupied(entry), Access::Read) => match entry.get() {
-                    Access::Read => None,
-                    Access::Write => Some(Error::ReadWriteConflict(
-                        dependency.resource(),
-                        *entry.key(),
-                    )),
-                },
-                (Entry::Occupied(entry), Access::Write) => match dependency.access() {
-                    Access::Read => Some(Error::ReadWriteConflict(
-                        *entry.key(),
-                        dependency.resource(),
-                    )),
-                    Access::Write => Some(Error::WriteWriteConflict(
-                        *entry.key(),
-                        dependency.resource(),
-                    )),
-                },
-                (Entry::Vacant(entry), access) => {
-                    entry.insert(access);
-                    None
-                }
-            }
-        });
-        Error::all(errors).map_or(Ok(()), Err)
+        let error = analyze(
+            &mut self.dependencies,
+            self.module.0.declare(&self.state.0, self.store),
+        );
+        error.map_or(Ok(()), Err)
     }
 
     fn update(&mut self) -> Result<bool, Error> {
@@ -227,5 +203,43 @@ where
         let (head, tail) = self.split_ref();
         head.0.resolve(&mut state.0, store)?;
         tail.resolve(&mut state.1, store)
+    }
+}
+
+fn analyze(
+    map: &mut HashMap<Resource, Access>,
+    dependencies: impl IntoIterator<Item = Dependency>,
+) -> Option<Error> {
+    let errors = dependencies
+        .into_iter()
+        .flat_map(|Dependency { access, resource }| {
+            resource
+                .ancestors()
+                .map(|resource| (resource, Access::Read))
+                .chain(once((resource, access)))
+        })
+        .filter_map(|(resource, access)| conflict(map, resource, access));
+    Error::all(errors)
+}
+
+fn conflict(
+    map: &mut HashMap<Resource, Access>,
+    resource: Resource,
+    access: Access,
+) -> Option<Error> {
+    let entry = map.entry(resource);
+    match (entry, access) {
+        (Entry::Occupied(entry), Access::Read) => match entry.get() {
+            Access::Read => None,
+            Access::Write => Some(Error::ReadWriteConflict(resource, *entry.key())),
+        },
+        (Entry::Occupied(entry), Access::Write) => match access {
+            Access::Read => Some(Error::ReadWriteConflict(*entry.key(), resource)),
+            Access::Write => Some(Error::WriteWriteConflict(*entry.key(), resource)),
+        },
+        (Entry::Vacant(entry), access) => {
+            entry.insert(access);
+            None
+        }
     }
 }

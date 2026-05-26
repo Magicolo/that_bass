@@ -297,13 +297,13 @@ impl<T: 'static> Item for Read<T> {
         state: &Self::State,
         table: &table::Table,
     ) -> impl Iterator<Item = Dependency> {
-        once(Dependency::new(
-            Access::Read,
-            Resource::Column {
+        once(Dependency {
+            access: Access::Read,
+            resource: Resource::Column {
                 table: table.index(),
                 index: *state,
             },
-        ))
+        })
     }
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -331,13 +331,13 @@ impl<T: 'static> Item for Write<T> {
         state: &Self::State,
         table: &table::Table,
     ) -> impl Iterator<Item = Dependency> {
-        once(Dependency::new(
-            Access::Write,
-            Resource::Column {
+        once(Dependency {
+            access: Access::Write,
+            resource: Resource::Column {
                 table: table.index(),
                 index: *state,
             },
-        ))
+        })
     }
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -365,13 +365,13 @@ impl Item for Row {
         state: &Self::State,
         table: &table::Table,
     ) -> impl Iterator<Item = Dependency> {
-        once(Dependency::new(
-            Access::Read,
-            Resource::Column {
+        once(Dependency {
+            access: Access::Read,
+            resource: Resource::Column {
                 table: table.index(),
                 index: *state,
             },
-        ))
+        })
     }
 
     fn initialize(&self, _: &table::Table) -> Option<Self::State> {
@@ -394,12 +394,12 @@ impl Item for Table {
     type State = ();
 
     fn declare(&self, _: &Self::State, table: &table::Table) -> impl Iterator<Item = Dependency> {
-        once(Dependency::new(
-            Access::Read,
-            Resource::Table {
+        once(Dependency {
+            access: Access::Read,
+            resource: Resource::Table {
                 index: table.index(),
             },
-        ))
+        })
     }
 
     fn initialize(&self, _: &table::Table) -> Option<Self::State> {
@@ -426,13 +426,13 @@ impl Item for ReadWith {
         state: &Self::State,
         table: &table::Table,
     ) -> impl Iterator<Item = Dependency> {
-        once(Dependency::new(
-            Access::Read,
-            Resource::Column {
+        once(Dependency {
+            access: Access::Read,
+            resource: Resource::Column {
                 table: table.index(),
                 index: *state,
             },
-        ))
+        })
     }
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {

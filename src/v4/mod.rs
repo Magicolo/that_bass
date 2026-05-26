@@ -109,8 +109,8 @@ mod tests {
                 .push(Query::build().read::<u8>().write::<u8>()),
         )?;
         let guard = state.guard();
-        let guard = guard.next()?;
-        assert!(matches!(guard.next(), Err(Error::ReadWriteConflict(_, _))));
+        let mut guard = guard.next()?;
+        assert!(matches!(guard.get(), Err(Error::ReadWriteConflict(_, _))));
         Ok(())
     }
 }

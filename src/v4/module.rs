@@ -1,13 +1,13 @@
 use crate::v4::{Error, Store};
 use core::{
     fmt::{self, Display},
-    iter::empty,
+    iter::{empty, from_fn},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Dependency {
-    access: Access,
-    resource: Resource,
+    pub access: Access,
+    pub resource: Resource,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -183,34 +183,40 @@ impl Store {
     }
 }
 
-impl Dependency {
-    pub const fn new(access: Access, resource: Resource) -> Self {
-        Self { access, resource }
-    }
-
-    pub const fn resource(&self) -> Resource {
-        self.resource
-    }
-
-    pub const fn access(&self) -> Access {
-        self.access
-    }
-}
-
 impl Display for Dependency {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self, f)
     }
 }
 
 impl Display for Access {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self, f)
     }
 }
 
+impl Resource {
+    pub const fn parent(self) -> Option<Self> {
+        match self {
+            Self::Store => None,
+            Self::Tables => Some(Self::Store),
+            Self::Table { .. } => Some(Self::Tables),
+            Self::Columns { table } => Some(Self::Table { index: table }),
+            Self::Column { table, .. } => Some(Self::Columns { table }),
+        }
+    }
+
+    pub fn ancestors(self) -> impl Iterator<Item = Self> {
+        let mut child = self;
+        from_fn(move || {
+            child = child.parent()?;
+            Some(child)
+        })
+    }
+}
+
 impl Display for Resource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self, f)
     }
 }
