@@ -1,6 +1,5 @@
 use crate::v4::module::Resource;
-use core::{alloc::LayoutError, iter::once, num::TryFromIntError};
-use orn::Or2;
+use core::{alloc::LayoutError, num::TryFromIntError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -32,9 +31,9 @@ pub enum Error {
     FailedToResolve,
     #[error("no available row slot in table")]
     FailedToReserve,
-    #[error("read/write conflict: {0} -> {1}")]
+    #[error("read/write conflict: {0:?} -> {1:?}")]
     ReadWriteConflict(Resource, Resource),
-    #[error("write/write conflict: {0} -> {1}")]
+    #[error("write/write conflict: {0:?} -> {1:?}")]
     WriteWriteConflict(Resource, Resource),
     #[error("errors: {0:?}")]
     All(Vec<Error>),
@@ -56,10 +55,8 @@ impl Error {
 
     fn errors(self) -> impl Iterator<Item = Error> {
         match self {
-            Self::All(errors) => Or2::T0(errors),
-            error => Or2::T1(once(error)),
+            Self::All(errors) => None.into_iter().chain(errors),
+            error => Some(error).into_iter().chain(Vec::new()),
         }
-        .into_iter()
-        .map(|or| or.into())
     }
 }

@@ -1,8 +1,5 @@
 use crate::v4::{Error, Store};
-use core::{
-    fmt::{self, Display},
-    iter::{empty, from_fn},
-};
+use core::iter::{empty, from_fn};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Dependency {
@@ -183,18 +180,6 @@ impl Store {
     }
 }
 
-impl Display for Dependency {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
-    }
-}
-
-impl Display for Access {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
-    }
-}
-
 impl Resource {
     pub const fn parent(self) -> Option<Self> {
         match self {
@@ -212,11 +197,5 @@ impl Resource {
             child = child.parent()?;
             Some(child)
         })
-    }
-}
-
-impl Display for Resource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
     }
 }
