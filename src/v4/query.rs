@@ -27,10 +27,10 @@ pub struct Iterator<'a, A: Access> {
 
 pub struct Module<A = ()>(pub(crate) A);
 
-pub struct Read<T: ?Sized>(PhantomData<T>);
-pub struct Write<T: ?Sized>(PhantomData<T>);
 pub struct Row;
 pub struct Table;
+pub struct Read<T: ?Sized>(PhantomData<T>);
+pub struct Write<T: ?Sized>(PhantomData<T>);
 pub struct ReadWith(Meta);
 pub struct WriteWith(Meta);
 
@@ -41,6 +41,20 @@ impl Module {
 }
 
 impl<A: Access> Module<A> {
+    pub fn row(self) -> Module<A::Out>
+    where
+        A: Push<Row>,
+    {
+        self.push(Row)
+    }
+
+    pub fn table(self) -> Module<A::Out>
+    where
+        A: Push<Table>,
+    {
+        self.push(Table)
+    }
+
     pub fn read<T: 'static>(self) -> Module<A::Out>
     where
         A: Push<Read<T>>,

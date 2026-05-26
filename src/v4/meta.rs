@@ -1,11 +1,13 @@
-use core::alloc::{Layout, LayoutError};
-use core::any::{Any, TypeId};
-use core::mem::needs_drop;
-use core::ptr::NonNull;
-use core::ptr::slice_from_raw_parts_mut;
-
-use super::error::Error;
-use super::utility::{allocate, deallocate};
+use super::{
+    error::Error,
+    utility::{allocate, deallocate},
+};
+use core::{
+    alloc::{Layout, LayoutError},
+    any::{Any, TypeId},
+    mem::needs_drop,
+    ptr::{NonNull, slice_from_raw_parts_mut},
+};
 
 struct Functions {
     layout: fn(u32) -> Result<Layout, LayoutError>,
@@ -16,7 +18,7 @@ struct Functions {
 
 #[derive(Clone)]
 pub struct Meta {
-    pub identifier: TypeId,
+    pub(crate) identifier: TypeId,
     pub(crate) size: usize,
     pub(crate) drop: bool,
     functions: &'static Functions,
