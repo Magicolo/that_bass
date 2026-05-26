@@ -233,7 +233,7 @@ fn conflict(
             Access::Read => None,
             Access::Write => Some(Error::ReadWriteConflict(resource, *entry.key())),
         },
-        (Entry::Occupied(entry), Access::Write) => match access {
+        (Entry::Occupied(entry), Access::Write) => match entry.get() {
             Access::Read => Some(Error::ReadWriteConflict(*entry.key(), resource)),
             Access::Write => Some(Error::WriteWriteConflict(*entry.key(), resource)),
         },
