@@ -1,4 +1,9 @@
-use crate::v4::{Error, Row, Store, module, utility::ranges};
+use crate::v4::{
+    Error, Row, Store,
+    module::{self, Dependency},
+    utility::ranges,
+};
+use core::iter::empty;
 
 pub struct Module(());
 
@@ -23,11 +28,15 @@ impl module::Module for Module {
         Self: 'a;
     type State = Vec<(u32, u32)>;
 
+    fn declare(&self, _: &Self::State, _: &Store) -> impl Iterator<Item = Dependency> {
+        empty()
+    }
+
     fn initialize(&self, _: &mut Store) -> Result<Self::State, Error> {
         Ok(Vec::new())
     }
 
-    fn update(&self, _: &mut Self::State, _: &Store) -> Result<bool, Error> {
+    fn update(&self, _: &mut Self::State, _: &mut Store) -> Result<bool, Error> {
         Ok(false)
     }
 

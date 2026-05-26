@@ -1,5 +1,11 @@
-use crate::v4::{Error, Store, module, utility::Push};
+use crate::v4::{
+    Error, Store,
+    module::{self, Access, Dependency, Resource},
+    utility::Push,
+};
+use core::iter::empty;
 use ref_cast::RefCast;
+use std::collections::{HashMap, hash_map::Entry};
 
 #[derive(RefCast)]
 #[repr(transparent)]
@@ -7,12 +13,14 @@ pub struct Module<M = ()>(M);
 
 pub struct State<'a, M: module::Module = ()> {
     store: &'a mut Store,
+    dependencies: HashMap<Resource, Access>,
     module: M,
     state: M::State,
 }
 
 pub struct Guard<'a, M: module::Module = ()> {
     module: &'a M,
+    dependencies: &'a mut HashMap<Resource, Access>,
     state: &'a mut M::State,
     store: &'a mut Store,
 }
@@ -27,6 +35,7 @@ impl<M: module::Module> State<'_, M> {
     pub fn guard(&mut self) -> Guard<'_, M> {
         Guard {
             module: &self.module,
+            dependencies: &mut self.dependencies,
             state: &mut self.state,
             store: &mut *self.store,
         }
@@ -37,6 +46,7 @@ impl Store {
     pub fn state<M: module::Module>(&mut self, module: Module<M>) -> Result<State<'_, M>, Error> {
         Ok(State {
             state: module.0.initialize(self)?,
+            dependencies: HashMap::new(),
             store: self,
             module: module.0,
         })
@@ -45,13 +55,16 @@ impl Store {
 
 impl<'a, H: module::Module, T: module::Module> Guard<'a, (H, T)> {
     pub fn get(&mut self) -> Result<H::Item<'_>, Error> {
-        self.update()?;
+        if self.update()? {
+            self.analyze()?;
+        }
         Ok(self.module.0.get(&mut self.state.0, self.store))
     }
 
     pub fn next(self) -> Result<Guard<'a, T>, Error> {
         let Self {
             module,
+            dependencies,
             state,
             store,
         } = self;
@@ -59,6 +72,7 @@ impl<'a, H: module::Module, T: module::Module> Guard<'a, (H, T)> {
         Ok(Guard {
             module: &module.1,
             state: &mut state.1,
+            dependencies,
             store,
         })
     }
@@ -66,6 +80,39 @@ impl<'a, H: module::Module, T: module::Module> Guard<'a, (H, T)> {
     pub fn with<F: FnOnce(H::Item<'_>)>(mut self, with: F) -> Result<Guard<'a, T>, Error> {
         with(self.get()?);
         self.next()
+    }
+
+    fn analyze(&mut self) -> Result<(), Error> {
+        self.dependencies.clear();
+
+        let dependencies = self.module.0.declare(&self.state.0, self.store);
+        let errors = dependencies.filter_map(|dependency| {
+            let entry = self.dependencies.entry(dependency.resource());
+            match (entry, dependency.access()) {
+                (Entry::Occupied(entry), Access::Read) => match entry.get() {
+                    Access::Read => None,
+                    Access::Write => Some(Error::ReadWriteConflict(
+                        dependency.resource(),
+                        *entry.key(),
+                    )),
+                },
+                (Entry::Occupied(entry), Access::Write) => match dependency.access() {
+                    Access::Read => Some(Error::ReadWriteConflict(
+                        *entry.key(),
+                        dependency.resource(),
+                    )),
+                    Access::Write => Some(Error::WriteWriteConflict(
+                        *entry.key(),
+                        dependency.resource(),
+                    )),
+                },
+                (Entry::Vacant(entry), access) => {
+                    entry.insert(access);
+                    None
+                }
+            }
+        });
+        Error::all(errors).map_or(Ok(()), Err)
     }
 
     fn update(&mut self) -> Result<bool, Error> {
@@ -117,11 +164,15 @@ impl module::Module for Module<()> {
         Self: 'a;
     type State = <() as module::Module>::State;
 
+    fn declare(&self, _: &Self::State, _: &Store) -> impl Iterator<Item = Dependency> {
+        empty()
+    }
+
     fn initialize(&self, store: &mut Store) -> Result<Self::State, Error> {
         self.0.initialize(store)
     }
 
-    fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error> {
+    fn update(&self, state: &mut Self::State, store: &mut Store) -> Result<bool, Error> {
         self.0.update(state, store)
     }
 
@@ -147,12 +198,16 @@ where
         Self: 'a;
     type State = (H::State, <Module<T> as module::Module>::State);
 
+    fn declare(&self, state: &Self::State, store: &Store) -> impl Iterator<Item = Dependency> {
+        self.0.0.declare(&state.0, store)
+    }
+
     fn initialize(&self, store: &mut Store) -> Result<Self::State, Error> {
         let (head, tail) = self.split_ref();
         Ok((head.0.initialize(store)?, tail.initialize(store)?))
     }
 
-    fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error> {
+    fn update(&self, state: &mut Self::State, store: &mut Store) -> Result<bool, Error> {
         let (head, tail) = self.split_ref();
         Ok(head.0.update(&mut state.0, store)? | tail.update(&mut state.1, store)?)
     }
@@ -173,32 +228,4 @@ where
         head.0.resolve(&mut state.0, store)?;
         tail.resolve(&mut state.1, store)
     }
-}
-
-#[test]
-fn access() -> Result<(), Error> {
-    use crate::v4::{insert::Insert, query::Query, remove::Remove};
-
-    let mut store = Store::new();
-    let mut state = store.state(
-        State::build()
-            .push(Query::build().read::<char>().write::<String>())
-            .push((Query::build().read::<isize>(), Remove::build()))
-            .push(Query::build().read::<[u32; 100]>())
-            .push(Insert::build().key().column::<u8>())
-            .push(Query::build().read::<usize>())
-            .push(Query::build().read::<char>())
-            .push(Query::build().read::<i32>()),
-    )?;
-    let guard = state.guard();
-    let guard = guard.next()?;
-    let guard = guard.next()?;
-    let mut guard = guard.next()?;
-    let mut insert = guard.get()?;
-    insert.one(((), (1u8, ())));
-    let guard = guard.next()?;
-    let guard = guard.next()?;
-    let guard = guard.next()?;
-    let _guard = guard.next()?;
-    Ok(())
 }

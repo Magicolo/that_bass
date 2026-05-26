@@ -1,6 +1,11 @@
-use crate::v4::{Error, Meta, Store, Table, Vector, module, utility::Push};
+use crate::v4::{
+    Error, Meta, Store, Table, Vector,
+    module::{self, Dependency},
+    utility::Push,
+};
 use core::{
     any::{Any, TypeId},
+    iter::{empty, once},
     marker::PhantomData,
     mem::take,
     ptr::NonNull,
@@ -70,6 +75,10 @@ impl<T: Template> module::Module for Module<T> {
         Self: 'a;
     type State = (u32, u32, T::State);
 
+    fn declare(&self, _: &Self::State, _: &Store) -> impl Iterator<Item = Dependency> {
+        empty()
+    }
+
     fn initialize(&self, store: &mut Store) -> Result<Self::State, Error> {
         let table = store.find_or_insert_table(self.0.declare())?;
         let state = self
@@ -79,7 +88,7 @@ impl<T: Template> module::Module for Module<T> {
         Ok((table, 0, state))
     }
 
-    fn update(&self, _: &mut Self::State, _: &Store) -> Result<bool, Error> {
+    fn update(&self, _: &mut Self::State, _: &mut Store) -> Result<bool, Error> {
         Ok(false)
     }
 
@@ -153,7 +162,7 @@ impl Template for () {
     type State = ();
 
     fn declare(&self) -> impl Iterator<Item = Meta> {
-        [].into_iter()
+        empty()
     }
 
     fn initialize(&self, _: &mut Table) -> Option<Self::State> {
@@ -196,7 +205,7 @@ impl Template for Key {
     type State = ();
 
     fn declare(&self) -> impl Iterator<Item = Meta> {
-        [].into_iter()
+        empty()
     }
 
     fn initialize(&self, table: &mut Table) -> Option<Self::State> {
@@ -217,7 +226,7 @@ impl Template for ColumnWith {
     type State = (Vector, u32);
 
     fn declare(&self) -> impl Iterator<Item = Meta> {
-        [self.0.clone()].into_iter()
+        once(self.0.clone())
     }
 
     fn initialize(&self, table: &mut Table) -> Option<Self::State> {
@@ -244,7 +253,7 @@ impl<T: 'static> Template for Column<T> {
     type State = (Vec<Self::Item>, u32);
 
     fn declare(&self) -> impl Iterator<Item = Meta> {
-        [Meta::of::<T>()].into_iter()
+        once(Meta::of::<T>())
     }
 
     fn initialize(&self, table: &mut Table) -> Option<Self::State> {

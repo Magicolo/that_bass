@@ -69,3 +69,48 @@ fn sort(metas: impl IntoIterator<Item = Meta>) -> Result<Vec<Meta>, Error> {
     }
     Ok(metas)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::v4::{insert::Insert, query::Query, remove::Remove, state::State};
+    #[test]
+    fn access() -> Result<(), Error> {
+        let mut store = Store::new();
+        let mut state = store.state(
+            State::build()
+                .push(Query::build().read::<char>().write::<String>())
+                .push((Query::build().read::<isize>(), Remove::build()))
+                .push(Query::build().read::<[u32; 100]>())
+                .push(Insert::build().key().column::<u8>())
+                .push(Query::build().read::<usize>())
+                .push(Query::build().read::<char>())
+                .push(Query::build().read::<i32>()),
+        )?;
+        let guard = state.guard();
+        let guard = guard.next()?;
+        let guard = guard.next()?;
+        let mut guard = guard.next()?;
+        let mut insert = guard.get()?;
+        insert.one(((), (1u8, ())));
+        let guard = guard.next()?;
+        let guard = guard.next()?;
+        let guard = guard.next()?;
+        let _guard = guard.next()?;
+        Ok(())
+    }
+
+    #[test]
+    fn read_write_conflict() -> Result<(), Error> {
+        let mut store = Store::new();
+        let mut state = store.state(
+            State::build()
+                .push(Insert::build().column::<u8>())
+                .push(Query::build().read::<u8>().write::<u8>()),
+        )?;
+        let guard = state.guard();
+        let guard = guard.next()?;
+        assert!(matches!(guard.next(), Err(Error::ReadWriteConflict(_, _))));
+        Ok(())
+    }
+}

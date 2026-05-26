@@ -6,6 +6,7 @@ pub mod boba {
     use core::{
         any::TypeId,
         cell::UnsafeCell,
+        iter::empty,
         ptr::null_mut,
         sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     };
@@ -615,7 +616,7 @@ pub mod boba {
         where
             Self: Sized,
         {
-            [].into_iter()
+            empty()
         }
     }
 
@@ -715,7 +716,7 @@ pub mod boba {
         where
             Self: Sized,
         {
-            [].into_iter()
+            empty()
         }
     }
 
@@ -730,7 +731,7 @@ pub mod boba {
         where
             Self: Sized,
         {
-            [].into_iter()
+            empty()
         }
     }
 

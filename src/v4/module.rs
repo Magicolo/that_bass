@@ -1,4 +1,29 @@
 use crate::v4::{Error, Store};
+use core::{
+    fmt::{self, Display},
+    iter::empty,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct Dependency {
+    access: Access,
+    resource: Resource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub enum Access {
+    Read,
+    Write,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub enum Resource {
+    Store,
+    Tables,
+    Table { index: u32 },
+    Columns { table: u32 },
+    Column { table: u32, index: u32 },
+}
 
 pub trait Module {
     type Item<'a>
@@ -6,8 +31,9 @@ pub trait Module {
         Self: 'a;
     type State;
 
+    fn declare(&self, state: &Self::State, store: &Store) -> impl Iterator<Item = Dependency>;
     fn initialize(&self, store: &mut Store) -> Result<Self::State, Error>;
-    fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error>;
+    fn update(&self, state: &mut Self::State, store: &mut Store) -> Result<bool, Error>;
     fn get<'a>(&'a self, state: &'a mut Self::State, store: &'a Store) -> Self::Item<'a>
     where
         Self: 'a;
@@ -23,11 +49,15 @@ impl<M: Module> Module for &mut M {
         Self: 'a;
     type State = M::State;
 
+    fn declare(&self, state: &Self::State, store: &Store) -> impl Iterator<Item = Dependency> {
+        M::declare(self, state, store)
+    }
+
     fn initialize(&self, store: &mut Store) -> Result<Self::State, Error> {
         M::initialize(self, store)
     }
 
-    fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error> {
+    fn update(&self, state: &mut Self::State, store: &mut Store) -> Result<bool, Error> {
         M::update(self, state, store)
     }
 
@@ -50,11 +80,15 @@ impl<M: Module> Module for &M {
         Self: 'a;
     type State = M::State;
 
+    fn declare(&self, state: &Self::State, store: &Store) -> impl Iterator<Item = Dependency> {
+        M::declare(self, state, store)
+    }
+
     fn initialize(&self, store: &mut Store) -> Result<Self::State, Error> {
         M::initialize(self, store)
     }
 
-    fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error> {
+    fn update(&self, state: &mut Self::State, store: &mut Store) -> Result<bool, Error> {
         M::update(self, state, store)
     }
 
@@ -77,11 +111,15 @@ impl Module for () {
         Self: 'a;
     type State = ();
 
+    fn declare(&self, _: &Self::State, _: &Store) -> impl Iterator<Item = Dependency> {
+        empty()
+    }
+
     fn initialize(&self, _: &mut Store) -> Result<Self::State, Error> {
         Ok(())
     }
 
-    fn update(&self, _: &mut Self::State, _: &Store) -> Result<bool, Error> {
+    fn update(&self, _: &mut Self::State, _: &mut Store) -> Result<bool, Error> {
         Ok(false)
     }
 
@@ -99,11 +137,17 @@ impl<M0: Module, M1: Module> Module for (M0, M1) {
         Self: 'a;
     type State = (M0::State, M1::State);
 
+    fn declare(&self, state: &Self::State, store: &Store) -> impl Iterator<Item = Dependency> {
+        self.0
+            .declare(&state.0, store)
+            .chain(self.1.declare(&state.1, store))
+    }
+
     fn initialize(&self, store: &mut Store) -> Result<Self::State, Error> {
         Ok((self.0.initialize(store)?, self.1.initialize(store)?))
     }
 
-    fn update(&self, state: &mut Self::State, store: &Store) -> Result<bool, Error> {
+    fn update(&self, state: &mut Self::State, store: &mut Store) -> Result<bool, Error> {
         Ok(self.0.update(&mut state.0, store)? | self.1.update(&mut state.1, store)?)
     }
 
@@ -136,5 +180,37 @@ impl Store {
     ) -> Result<T, Error> {
         let mut state = module.initialize(self)?;
         Ok(with(module.get(&mut state, self)))
+    }
+}
+
+impl Dependency {
+    pub const fn new(access: Access, resource: Resource) -> Self {
+        Self { access, resource }
+    }
+
+    pub const fn resource(&self) -> Resource {
+        self.resource
+    }
+
+    pub const fn access(&self) -> Access {
+        self.access
+    }
+}
+
+impl Display for Dependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
+impl Display for Access {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
+impl Display for Resource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt::Debug::fmt(self, f)
     }
 }
