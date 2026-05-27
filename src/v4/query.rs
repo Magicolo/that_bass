@@ -2,7 +2,7 @@ use crate::v4::{
     Error, Meta, Rows, Store,
     module::{self, Access, Dependency, Resource},
     table,
-    utility::Push,
+    utility::{IntoFlat, Push},
 };
 use core::{
     any::TypeId,
@@ -147,13 +147,13 @@ impl<I: Item> module::Module for Module<I> {
     }
 }
 
-impl<'a, I: Item> Iterator for Iter<'a, I> {
-    type Item = I::Item<'a>;
+impl<'a, I: Item<Item<'a>: IntoFlat>> Iterator for Iter<'a, I> {
+    type Item = <I::Item<'a> as IntoFlat>::Flat;
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
         let table = unsafe { self.tables.get_unchecked(*table as usize) };
-        Some(self.query.get(state, table))
+        Some(self.query.get(state, table).into_flat())
     }
 }
 

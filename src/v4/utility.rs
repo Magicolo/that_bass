@@ -11,10 +11,14 @@ use std::alloc::{alloc, dealloc};
 pub struct At<'a, T: ?Sized>(pub(crate) u32, pub(crate) &'a T);
 pub struct AtMut<'a, T: ?Sized>(pub(crate) u32, pub(crate) &'a mut T);
 
-pub trait Tuple {
-    type Normal;
-    fn normalize(self) -> Self::Normal;
-    fn flatten(tuple: Self::Normal) -> Self;
+pub trait IntoNest {
+    type Nest;
+    fn into_nest(self) -> Self::Nest;
+}
+
+pub trait IntoFlat {
+    type Flat;
+    fn into_flat(self) -> Self::Flat;
 }
 
 pub trait Push<T> {
@@ -280,16 +284,22 @@ macro_rules! tuple {
     (@implement [$($flat: ident),*] [$normal: tt]) => {
         #[allow(non_snake_case)]
         #[automatically_derived]
-        impl<$($flat,)*> Tuple for ($($flat,)*) {
-            type Normal = $normal;
+        impl<$($flat,)*> IntoNest for ($($flat,)*) {
+            type Nest = $normal;
 
-            fn normalize(self) -> Self::Normal {
+            fn into_nest(self) -> Self::Nest {
                 let ($($flat,)*) = self;
                 $normal
             }
+        }
 
-            fn flatten(tuple: Self::Normal) -> Self {
-                let $normal = tuple;
+        #[allow(non_snake_case)]
+        #[automatically_derived]
+        impl<$($flat,)*> IntoFlat for $normal {
+            type Flat = ($($flat,)*);
+
+            fn into_flat(self) -> Self::Flat {
+                let $normal = self;
                 ($($flat,)*)
             }
         }

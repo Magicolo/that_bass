@@ -1,7 +1,7 @@
 use crate::v4::{
     Error, Meta, Store, Table, Vector,
     module::{self, Dependency},
-    utility::Push,
+    utility::{IntoNest, Push},
 };
 use core::{
     any::{Any, TypeId},
@@ -39,8 +39,8 @@ impl Insert<'_> {
 }
 
 impl<T: Template> Insert<'_, T> {
-    pub fn one(&mut self, item: T::Item) {
-        self.template.defer(&mut self.state.2, item);
+    pub fn one<N: IntoNest<Nest = T::Item>>(&mut self, item: N) {
+        self.template.defer(&mut self.state.2, item.into_nest());
         self.state.1 += 1;
     }
 }

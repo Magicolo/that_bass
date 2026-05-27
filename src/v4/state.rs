@@ -1,7 +1,7 @@
 use crate::v4::{
     Error, Store,
     module::{self, Access, Dependency, Resource},
-    utility::Push,
+    utility::{IntoFlat, IntoNest, Push},
 };
 use core::iter::{empty, once};
 use ref_cast::RefCast;
@@ -54,11 +54,14 @@ impl Store {
 }
 
 impl<'a, H: module::Module, T: module::Module> Guard<'a, (H, T)> {
-    pub fn get(&mut self) -> Result<H::Item<'_>, Error> {
+    pub fn get<'b>(&'b mut self) -> Result<<H::Item<'b> as IntoFlat>::Flat, Error>
+    where
+        H::Item<'b>: IntoFlat,
+    {
         if self.update()? {
             self.analyze()?;
         }
-        Ok(self.module.0.get(&mut self.state.0, self.store))
+        Ok(self.module.0.get(&mut self.state.0, self.store).into_flat())
     }
 
     pub fn next(self) -> Result<Guard<'a, T>, Error> {
@@ -77,8 +80,15 @@ impl<'a, H: module::Module, T: module::Module> Guard<'a, (H, T)> {
         })
     }
 
-    pub fn with<F: FnOnce(H::Item<'_>)>(mut self, with: F) -> Result<Guard<'a, T>, Error> {
-        with(self.get()?);
+    pub fn with<F: FnOnce(<H::Item<'_> as IntoFlat>::Flat)>(
+        mut self,
+        with: F,
+    ) -> Result<Guard<'a, T>, Error>
+    where
+        for<'b> H::Item<'b>: IntoFlat,
+    {
+        let item = self.get()?;
+        with(item);
         self.next()
     }
 
@@ -107,11 +117,11 @@ impl Module {
 }
 
 impl<M: module::Module> Module<M> {
-    pub fn push<N: module::Module>(self, module: N) -> Module<M::Out>
+    pub fn push<N: IntoNest>(self, modules: N) -> Module<<M as Push<N::Nest>>::Out>
     where
-        M: Push<N, Out: module::Module>,
+        M: Push<N::Nest, Out: module::Module>,
     {
-        Module(self.0.push(module))
+        Module(self.0.push(modules.into_nest()))
     }
 }
 

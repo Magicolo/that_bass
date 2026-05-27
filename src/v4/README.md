@@ -99,9 +99,11 @@ let module = Query::build().read::<Position>().write::<Velocity>();
 | Name | Role |
 |------|------|
 | `At<'a, T>` / `AtMut<'a, T>` | Index + reference pair for table/column lookups. |
-| `Push<T>` | Cons-style prepend trait used to build tuple chains. `().push(a).push(b)` produces `(a, (b, ()))`. |
+| `IntoNest` | Convert from flat tuples `(A, B, C)` to nested form `(A, (B, (C, ())))`. Macro-generated for up to 16 elements. |
+| `IntoFlat` | Convert from nested form `(A, (B, (C, ())))` back to flat tuples `(A, B, C)`. Macro-generated for up to 16 elements. |
+| `Push<T>` | Cons-style prepend trait used to build nested chains. `().push(a).push(b)` produces `(a, (b, ()))`. |
+| `PushTail<N>` | Append one nested chain to the tail of another. |
 | `Next` | Sequential access to tuple elements; each `next()` yields the head and the tail (`Rest`). |
-| `Tuple` | Convert between flat tuples `(A, B, C)` and nested normal form `(A, (B, (C, ())))`. Macro-generated for up to 32 elements. |
 | `allocate` / `deallocate` | Wrappers over `std::alloc::{alloc, dealloc}`. |
 | `ranges` | Groups sorted `(table, row)` pairs into contiguous `Range<u32>`. |
 | `resize` | Reallocates the packed multi-column buffer for a table. |
