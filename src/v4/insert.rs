@@ -1,6 +1,6 @@
 use crate::v4::{
     Error, Meta, Store, Table, Vector,
-    module::{self, Dependency},
+    module::{self, Dependency, Module},
     utility::{IntoNest, Push},
 };
 use core::{
@@ -21,97 +21,100 @@ pub trait Template {
     unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool;
 }
 
-pub struct Module<T = ()>(pub T);
-
-pub struct Insert<'a, T: Template = ()> {
-    template: &'a T,
-    state: &'a mut (u32, u32, T::State),
+pub struct Build<T = ()>(T);
+pub struct State<T: Template = ()> {
+    template: T,
+    count: u32,
+    table: u32,
+    state: T::State,
 }
+
+pub struct Insert<'a, T: Template = ()>(&'a mut State<T>);
 
 pub struct Key;
 pub struct Column<T: ?Sized>(PhantomData<T>);
 pub struct ColumnWith(Meta);
 
-impl Insert<'_> {
-    pub const fn build() -> Module {
-        Module(())
+impl Store {
+    pub fn insert<T: Template>(
+        &mut self,
+        insert: Build<T>,
+    ) -> Result<super::State<State<T>>, Error> {
+        let template = insert.0;
+        let table = self.find_or_insert_table(template.declare())?;
+        let state = template
+            .initialize(unsafe { self.tables.get_unchecked_mut(table as usize) })
+            .ok_or(Error::FailedToInitialize)?;
+        Ok(self.state(State {
+            template,
+            count: 0,
+            table,
+            state,
+        }))
     }
 }
 
 impl<T: Template> Insert<'_, T> {
     pub fn one<N: IntoNest<Nest = T::Item>>(&mut self, item: N) {
-        self.template.defer(&mut self.state.2, item.into_nest());
-        self.state.1 += 1;
+        self.0.template.defer(&mut self.0.state, item.into_nest());
+        self.0.count += 1;
     }
 }
 
-impl<T: Template> Module<T> {
-    pub fn key(self) -> Module<T::Out>
+impl<T: Template> Build<T> {
+    pub fn key(self) -> Build<T::Out>
     where
         T: Push<Key>,
     {
-        Module(self.0.push(Key))
+        Build(self.0.push(Key))
     }
 
-    pub fn column<C: 'static>(self) -> Module<T::Out>
+    pub fn column<C: 'static>(self) -> Build<T::Out>
     where
         T: Push<Column<C>>,
     {
-        Module(self.0.push(Column(PhantomData)))
+        Build(self.0.push(Column(PhantomData)))
     }
 
-    pub fn column_with(self, meta: Meta) -> Module<T::Out>
+    pub fn column_with(self, meta: Meta) -> Build<T::Out>
     where
         T: Push<ColumnWith>,
     {
-        Module(self.0.push(ColumnWith(meta)))
+        Build(self.0.push(ColumnWith(meta)))
     }
 }
 
-impl<T: Template> module::Module for Module<T> {
+impl<T: Template> Module for State<T> {
     type Item<'a>
         = Insert<'a, T>
     where
         Self: 'a;
-    type State = (u32, u32, T::State);
 
-    fn declare(&self, _: &Self::State, _: &Store) -> impl Iterator<Item = Dependency> {
+    fn declare(&self, _: &Store) -> impl Iterator<Item = Dependency> {
         empty()
     }
 
-    fn initialize(&self, store: &mut Store) -> Result<Self::State, Error> {
-        let table = store.find_or_insert_table(self.0.declare())?;
-        let state = self
-            .0
-            .initialize(unsafe { store.tables.get_unchecked_mut(table as usize) })
-            .ok_or(Error::FailedToInitialize)?;
-        Ok((table, 0, state))
-    }
-
-    fn update(&self, _: &mut Self::State, _: &mut Store) -> Result<bool, Error> {
+    fn update(&mut self, _: &mut Store) -> Result<bool, Error> {
         Ok(false)
     }
 
-    fn get<'a>(&'a self, state: &'a mut Self::State, _: &'a Store) -> Self::Item<'a>
-    where
-        Self: 'a,
-    {
-        Insert {
-            template: &self.0,
-            state,
-        }
-    }
-
-    fn resolve(&self, state: &mut Self::State, store: &mut Store) -> Result<(), Error> {
-        let count = take(&mut state.1);
+    fn resolve(&mut self, store: &mut Store) -> Result<(), Error> {
+        let count = take(&mut self.count);
         if count > 0 {
-            let table = unsafe { store.tables.get_unchecked_mut(state.0 as usize) };
+            let table = unsafe { store.tables.get_unchecked_mut(self.table as usize) };
             table.reserve(count)?;
             table.ensure()?;
-            unsafe { self.0.resolve(&mut state.2, &*table) };
+            unsafe { self.template.resolve(&mut self.state, &*table) };
             table.commit();
         }
         Ok(())
+    }
+
+    fn get<'a>(&'a mut self, _: &'a Store) -> Self::Item<'a>
+    where
+        Self: 'a,
+    {
+        Insert(self)
     }
 }
 
@@ -278,4 +281,8 @@ impl<T: 'static> Template for Column<T> {
         }
         false
     }
+}
+
+pub const fn insert() -> Build {
+    Build(())
 }

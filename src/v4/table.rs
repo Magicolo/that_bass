@@ -57,6 +57,14 @@ impl Column {
         unsafe { from_raw_parts_mut(self.data.cast::<T>().as_ptr(), count as usize) }
     }
 
+    pub(crate) unsafe fn try_as_mut<T: 'static>(&self, count: u32) -> Option<&mut [T]> {
+        if self.meta.identifier == TypeId::of::<T>() {
+            Some(unsafe { self.as_mut(count) })
+        } else {
+            None
+        }
+    }
+
     pub(crate) unsafe fn set<T: 'static>(&self, item: T, row: u32) {
         debug_assert_eq!(self.meta.identifier, TypeId::of::<T>());
         unsafe { self.data.cast::<T>().add(row as usize).write(item) };
