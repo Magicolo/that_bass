@@ -1,5 +1,5 @@
 use crate::v4::{
-    Error, Row, Store,
+    Error, Index, Store,
     module::{self, Dependency},
     utility::ranges,
 };
@@ -16,7 +16,7 @@ impl Remove<'_> {
         Module(())
     }
 
-    pub fn one(&mut self, row: Row) {
+    pub fn one(&mut self, row: Index) {
         self.state.push((row.table(), row.row()));
     }
 }

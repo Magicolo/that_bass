@@ -1,4 +1,4 @@
-use crate::v4::{At, error::Error, meta::Meta, utility, utility::resize};
+use crate::v4::{error::Error, meta::Meta, utility, utility::resize};
 use core::{
     any::{Any, TypeId},
     iter::FusedIterator,
@@ -17,7 +17,7 @@ pub struct Table {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Row<'a> {
+pub struct Index<'a> {
     row: u32,
     table: u32,
     _marker: PhantomData<&'a ()>,
@@ -92,7 +92,7 @@ impl Column {
     }
 }
 
-impl Row<'_> {
+impl Index<'_> {
     pub(crate) const fn new(row: u32, table: u32) -> Self {
         Self {
             row,
@@ -121,10 +121,10 @@ impl Rows<'_> {
 }
 
 impl<'a> Iterator for Rows<'a> {
-    type Item = Row<'a>;
+    type Item = Index<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(Row::new(self.rows.next()?, self.table))
+        Some(Index::new(self.rows.next()?, self.table))
     }
 }
 
@@ -136,7 +136,7 @@ impl ExactSizeIterator for Rows<'_> {
 
 impl DoubleEndedIterator for Rows<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        Some(Row::new(self.rows.next_back()?, self.table))
+        Some(Index::new(self.rows.next_back()?, self.table))
     }
 }
 
@@ -154,8 +154,10 @@ impl Table {
         })
     }
 
-    pub(super) fn column(&self, identifier: TypeId) -> Option<At<'_, Column>> {
-        utility::find(&self.columns, identifier, |column| column.meta.identifier)
+    pub(super) fn column(&self, identifier: TypeId) -> Option<u32> {
+        utility::find(&self.columns, identifier, |column| column.meta.identifier)?
+            .try_into()
+            .ok()
     }
 
     pub fn columns(&self) -> &[Column] {

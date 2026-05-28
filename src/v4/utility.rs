@@ -3,13 +3,10 @@ use core::{
     alloc::Layout,
     iter::from_fn,
     mem::{replace, take},
-    ops::{Deref, DerefMut, Range},
+    ops::Range,
     ptr::NonNull,
 };
 use std::alloc::{alloc, dealloc};
-
-pub struct At<'a, T: ?Sized>(pub(crate) u32, pub(crate) &'a T);
-pub struct AtMut<'a, T: ?Sized>(pub(crate) u32, pub(crate) &'a mut T);
 
 pub trait IntoNest {
     type Nest;
@@ -89,56 +86,6 @@ impl<H, T: Next> Next for (H, T) {
 
     fn next(&mut self) -> (Self::Item<'_>, Self::Rest<'_>) {
         (&mut self.0, &mut self.1)
-    }
-}
-
-impl<'a, T: ?Sized> At<'a, T> {
-    pub const fn index(&self) -> u32 {
-        self.0
-    }
-
-    pub const fn value(&self) -> &'a T {
-        self.1
-    }
-}
-
-impl<'a, T: ?Sized> Clone for At<'a, T> {
-    fn clone(&self) -> Self {
-        At(self.0, self.1)
-    }
-}
-
-impl<'a, T: ?Sized> Copy for At<'a, T> {}
-
-impl<T> Deref for At<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.1
-    }
-}
-
-impl<'a, T: ?Sized> AtMut<'a, T> {
-    pub const fn index(&self) -> u32 {
-        self.0
-    }
-
-    pub const fn value(&mut self) -> &mut T {
-        self.1
-    }
-}
-
-impl<T> Deref for AtMut<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.1
-    }
-}
-
-impl<T> DerefMut for AtMut<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.1
     }
 }
 
@@ -257,49 +204,44 @@ pub(crate) fn resize(
     Ok(new)
 }
 
-pub(crate) fn find<T, K: Ord, F: FnMut(&T) -> K>(
-    slice: &[T],
-    key: K,
-    mut map: F,
-) -> Option<At<'_, T>> {
-    let index = if slice.len() < 32 {
-        slice.iter().position(|item| map(item) == key)?
+pub(crate) fn find<T, K: Ord, F: FnMut(&T) -> K>(slice: &[T], key: K, mut map: F) -> Option<usize> {
+    if slice.len() < 32 {
+        slice.iter().position(|item| map(item) == key)
     } else {
-        slice.binary_search_by_key(&key, map).ok()?
-    };
-    Some(At(index.try_into().ok()?, slice.get(index)?))
+        slice.binary_search_by_key(&key, map).ok()
+    }
 }
 
 macro_rules! tuple {
     ($($name: ident),*) => {
         tuple!(@recurse $($name),* [] [()]);
     };
-    (@recurse [$($flat: ident),*] [$normal: tt]) => {
-        tuple!(@implement [$($flat),*] [$normal]);
+    (@recurse [$($flat: ident),*] [$nest: tt]) => {
+        tuple!(@implement [$($flat),*] [$nest]);
     };
-    (@recurse $name: ident $(, $names: ident)* [$($flat: ident),*] [$normal: tt]) => {
-        tuple!(@recurse $($names),* [$name $(, $flat)*] [($name, $normal)]);
-        tuple!(@implement [$($flat),*] [$normal]);
+    (@recurse $name: ident $(, $names: ident)* [$($flat: ident),*] [$nest: tt]) => {
+        tuple!(@recurse $($names),* [$name $(, $flat)*] [($name, $nest)]);
+        tuple!(@implement [$($flat),*] [$nest]);
     };
-    (@implement [$($flat: ident),*] [$normal: tt]) => {
+    (@implement [$($flat: ident),*] [$nest: tt]) => {
         #[allow(non_snake_case)]
         #[automatically_derived]
         impl<$($flat,)*> IntoNest for ($($flat,)*) {
-            type Nest = $normal;
+            type Nest = $nest;
 
             fn into_nest(self) -> Self::Nest {
                 let ($($flat,)*) = self;
-                $normal
+                $nest
             }
         }
 
         #[allow(non_snake_case)]
         #[automatically_derived]
-        impl<$($flat,)*> IntoFlat for $normal {
+        impl<$($flat,)*> IntoFlat for $nest {
             type Flat = ($($flat,)*);
 
             fn into_flat(self) -> Self::Flat {
-                let $normal = self;
+                let $nest = self;
                 ($($flat,)*)
             }
         }

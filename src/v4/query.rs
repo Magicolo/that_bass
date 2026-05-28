@@ -1,6 +1,6 @@
 use crate::v4::{
     Error, Meta, Rows, Store,
-    module::{self, Access, Dependency, Resource},
+    module::{Access, Dependency, Module, Resource},
     table,
     utility::{IntoFlat, Push},
 };
@@ -12,7 +12,7 @@ use core::{
     slice,
 };
 
-pub trait Item {
+pub trait Query {
     type State;
     type Item<'a>
     where
@@ -29,126 +29,183 @@ pub trait Item {
         Self: 'a;
 }
 
-pub struct Query<'a, I: Item> {
-    query: &'a I,
-    states: &'a mut [(u32, I::State)],
+pub trait Filter {
+    fn filter(&self, table: &table::Table) -> bool;
+}
+
+pub struct Item<'a, Q: Query> {
+    query: &'a Q,
+    states: &'a mut [(u32, Q::State)],
     tables: &'a [table::Table],
 }
 
-pub struct Iter<'a, I: Item> {
-    query: &'a I,
-    states: slice::IterMut<'a, (u32, I::State)>,
+pub struct Iter<'a, Q: Query> {
+    query: &'a Q,
+    states: slice::IterMut<'a, (u32, Q::State)>,
     tables: &'a [table::Table],
 }
 
-pub struct Module<A = ()>(pub(crate) A);
+pub struct Build<Q = (), F = ()>(Q, F);
+pub struct State<S> {
+    count: usize,
+    states: Vec<(u32, S)>,
+}
 
-pub struct Row;
-pub struct Table;
+pub struct Key(());
+pub struct Row(());
+pub struct Table(());
 pub struct Read<T: ?Sized>(PhantomData<T>);
 pub struct Write<T: ?Sized>(PhantomData<T>);
 pub struct ReadWith(Meta);
 pub struct WriteWith(Meta);
+pub struct Has<T: ?Sized>(PhantomData<T>);
+pub struct HasWith(Meta);
+pub struct Not<T: ?Sized>(PhantomData<T>);
+pub struct NotWith(Meta);
 pub struct ColumnRef<'a>(&'a Meta, &'a NonNull<u8>);
 pub struct ColumnMut<'a>(&'a Meta, &'a NonNull<u8>);
 
-impl Module {
-    pub const fn new() -> Self {
-        Self(())
+impl<Q, F> Build<Q, F> {
+    pub fn key(self) -> Build<Q::Out, F>
+    where
+        Q: Push<Key>,
+    {
+        self.push_query(Key(()))
+    }
+
+    pub fn row(self) -> Build<Q::Out, F>
+    where
+        Q: Push<Row>,
+    {
+        self.push_query(Row(()))
+    }
+
+    pub fn table(self) -> Build<Q::Out, F>
+    where
+        Q: Push<Table>,
+    {
+        self.push_query(Table(()))
+    }
+
+    pub fn read<T: 'static>(self) -> Build<Q::Out, F>
+    where
+        Q: Push<Read<T>>,
+    {
+        self.push_query(Read(PhantomData))
+    }
+
+    pub fn read_with(self, meta: Meta) -> Build<Q::Out, F>
+    where
+        Q: Push<ReadWith>,
+    {
+        self.push_query(ReadWith(meta))
+    }
+
+    pub fn write<T: 'static>(self) -> Build<Q::Out, F>
+    where
+        Q: Push<Write<T>>,
+    {
+        self.push_query(Write(PhantomData))
+    }
+
+    pub fn write_with(self, meta: Meta) -> Build<Q::Out, F>
+    where
+        Q: Push<WriteWith>,
+    {
+        self.push_query(WriteWith(meta))
+    }
+
+    pub fn has<T: 'static>(self) -> Build<Q, F::Out>
+    where
+        F: Push<Has<T>>,
+    {
+        self.push_filter(Has(PhantomData))
+    }
+
+    pub fn has_with(self, meta: Meta) -> Build<Q, F::Out>
+    where
+        F: Push<HasWith>,
+    {
+        self.push_filter(HasWith(meta))
+    }
+
+    pub fn not<T: 'static>(self) -> Build<Q, F::Out>
+    where
+        F: Push<Not<T>>,
+    {
+        self.push_filter(Not(PhantomData))
+    }
+
+    pub fn not_with(self, meta: Meta) -> Build<Q, F::Out>
+    where
+        F: Push<NotWith>,
+    {
+        self.push_filter(NotWith(meta))
+    }
+
+    fn push_query<R>(self, query: R) -> Build<Q::Out, F>
+    where
+        Q: Push<R>,
+    {
+        Build(self.0.push(query), self.1)
+    }
+
+    fn push_filter<G>(self, filter: G) -> Build<Q, F::Out>
+    where
+        F: Push<G>,
+    {
+        Build(self.0, self.1.push(filter))
     }
 }
 
-impl<I: Item> Module<I> {
-    pub fn row(self) -> Module<I::Out>
-    where
-        I: Push<Row>,
-    {
-        self.push(Row)
-    }
-
-    pub fn table(self) -> Module<I::Out>
-    where
-        I: Push<Table>,
-    {
-        self.push(Table)
-    }
-
-    pub fn read<T: 'static>(self) -> Module<I::Out>
-    where
-        I: Push<Read<T>>,
-    {
-        self.push(Read(PhantomData))
-    }
-
-    pub fn read_with(self, meta: Meta) -> Module<I::Out>
-    where
-        I: Push<ReadWith>,
-    {
-        self.push(ReadWith(meta))
-    }
-
-    pub fn write<T: 'static>(self) -> Module<I::Out>
-    where
-        I: Push<Write<T>>,
-    {
-        self.push(Write(PhantomData))
-    }
-
-    // pub fn write_with(self, meta: Meta) -> Build<(WriteWith, A)> {
-    //     Build((WriteWith(meta), self.0))
-    // }
-
-    fn push<R: Item>(self, query: R) -> Module<I::Out>
-    where
-        I: Push<R>,
-    {
-        Module(self.0.push(query))
-    }
-}
-
-impl<I: Item> module::Module for Module<I> {
+impl<Q: Query, F: Filter> Module for Build<Q, F> {
     type Item<'a>
-        = Query<'a, I>
+        = Item<'a, Q>
     where
         Self: 'a;
-    type State = (usize, Vec<(u32, I::State)>);
+    type State = State<Q::State>;
 
     fn declare(&self, state: &Self::State, store: &Store) -> impl Iterator<Item = Dependency> {
-        state.1.iter().flat_map(|(table, state)| {
+        state.states.iter().flat_map(|(table, state)| {
             let table = unsafe { store.tables.get_unchecked(*table as usize) };
             self.0.declare(state, table)
         })
     }
 
     fn initialize(&self, _: &mut Store) -> Result<Self::State, Error> {
-        Ok((0, Vec::new()))
+        Ok(State {
+            count: 0,
+            states: Vec::new(),
+        })
     }
 
     fn update(&self, state: &mut Self::State, store: &mut Store) -> Result<bool, Error> {
-        let count = state.1.len();
-        while let Some(table) = store.tables.get(state.0) {
-            state.0 += 1;
-            if let Some(query) = self.0.initialize(table) {
-                state.1.push((table.index(), query));
+        let count = state.count;
+        while let Some(table) = store.tables.get(state.count) {
+            state.count += 1;
+            if self.1.filter(table)
+                && let Some(query) = self.0.initialize(table)
+            {
+                state.states.push((table.index(), query));
             }
         }
-        Ok(count < state.1.len())
+        Ok(count < state.count)
     }
 
     fn get<'a>(&'a self, state: &'a mut Self::State, store: &'a Store) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        Query {
+        Item {
             query: &self.0,
-            states: &mut state.1,
+            states: &mut state.states,
             tables: &store.tables,
         }
     }
 }
 
-impl<'a, I: Item<Item<'a>: IntoFlat>> Iterator for Iter<'a, I> {
-    type Item = <I::Item<'a> as IntoFlat>::Flat;
+impl<'a, Q: Query<Item<'a>: IntoFlat>> Iterator for Iter<'a, Q> {
+    type Item = <Q::Item<'a> as IntoFlat>::Flat;
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
@@ -157,13 +214,7 @@ impl<'a, I: Item<Item<'a>: IntoFlat>> Iterator for Iter<'a, I> {
     }
 }
 
-impl Query<'_, ()> {
-    pub const fn build() -> Module {
-        Module::new()
-    }
-}
-
-impl<'a, I: Item> Query<'a, I> {
+impl<'a, Q: Query> Item<'a, Q> {
     // pub fn tables(&self) -> impl Iterator<Item = &Table> {
     //     self.states
     //         .iter()
@@ -174,7 +225,7 @@ impl<'a, I: Item> Query<'a, I> {
     //     self.tables().map(|table| table.count() as usize).sum()
     // }
 
-    pub fn iter(&mut self) -> Iter<'_, I> {
+    pub fn iter(&mut self) -> Iter<'_, Q> {
         Iter {
             query: self.query,
             states: self.states.iter_mut(),
@@ -183,61 +234,61 @@ impl<'a, I: Item> Query<'a, I> {
     }
 }
 
-impl<I: Item> Item for &I {
+impl<Q: Query> Query for &Q {
     type Item<'a>
-        = I::Item<'a>
+        = Q::Item<'a>
     where
         Self: 'a;
-    type State = I::State;
+    type State = Q::State;
 
     fn declare(
         &self,
         state: &Self::State,
         table: &table::Table,
     ) -> impl Iterator<Item = Dependency> {
-        I::declare(self, state, table)
+        Q::declare(self, state, table)
     }
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
-        I::initialize(self, table)
+        Q::initialize(self, table)
     }
 
     fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        I::get(self, state, table)
+        Q::get(self, state, table)
     }
 }
 
-impl<I: Item> Item for &mut I {
+impl<Q: Query> Query for &mut Q {
     type Item<'a>
-        = I::Item<'a>
+        = Q::Item<'a>
     where
         Self: 'a;
-    type State = I::State;
+    type State = Q::State;
 
     fn declare(
         &self,
         state: &Self::State,
         table: &table::Table,
     ) -> impl Iterator<Item = Dependency> {
-        I::declare(self, state, table)
+        Q::declare(self, state, table)
     }
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
-        I::initialize(self, table)
+        Q::initialize(self, table)
     }
 
     fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        I::get(self, state, table)
+        Q::get(self, state, table)
     }
 }
 
-impl Item for () {
+impl Query for () {
     type Item<'a>
         = ()
     where
@@ -259,7 +310,7 @@ impl Item for () {
     }
 }
 
-impl<A0: Item, A1: Item> Item for (A0, A1) {
+impl<A0: Query, A1: Query> Query for (A0, A1) {
     type Item<'a>
         = (A0::Item<'a>, A1::Item<'a>)
     where
@@ -291,7 +342,7 @@ impl<A0: Item, A1: Item> Item for (A0, A1) {
     }
 }
 
-impl<T: 'static> Item for Read<T> {
+impl<T: 'static> Query for Read<T> {
     type Item<'a>
         = &'a [T]
     where
@@ -313,7 +364,7 @@ impl<T: 'static> Item for Read<T> {
     }
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
-        Some(table.column(TypeId::of::<T>())?.index())
+        table.column(TypeId::of::<T>())
     }
 
     fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
@@ -325,7 +376,7 @@ impl<T: 'static> Item for Read<T> {
     }
 }
 
-impl<T: 'static> Item for Write<T> {
+impl<T: 'static> Query for Write<T> {
     type Item<'a>
         = &'a mut [T]
     where
@@ -347,7 +398,7 @@ impl<T: 'static> Item for Write<T> {
     }
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
-        Some(table.column(TypeId::of::<T>())?.index())
+        table.column(TypeId::of::<T>())
     }
 
     fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
@@ -359,7 +410,31 @@ impl<T: 'static> Item for Write<T> {
     }
 }
 
-impl Item for Row {
+// TODO: Implement
+impl Query for Key {
+    type Item<'a>
+        = ()
+    where
+        Self: 'a;
+    type State = ();
+
+    fn declare(&self, _: &Self::State, _: &table::Table) -> impl Iterator<Item = Dependency> {
+        empty()
+    }
+
+    fn initialize(&self, _: &table::Table) -> Option<Self::State> {
+        None
+    }
+
+    fn get<'a>(&'a self, _: &'a mut Self::State, _: &'a table::Table) -> Self::Item<'a>
+    where
+        Self: 'a,
+    {
+    }
+}
+
+// TODO: Implement
+impl Query for Row {
     type Item<'a>
         = Rows<'a>
     where
@@ -392,7 +467,7 @@ impl Item for Row {
     }
 }
 
-impl Item for Table {
+impl Query for Table {
     type Item<'a>
         = &'a table::Table
     where
@@ -420,7 +495,7 @@ impl Item for Table {
     }
 }
 
-impl Item for ReadWith {
+impl Query for ReadWith {
     type Item<'a>
         = ColumnRef<'a>
     where
@@ -442,7 +517,7 @@ impl Item for ReadWith {
     }
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
-        Some(table.column(self.0.identifier)?.index())
+        table.column(self.0.identifier)
     }
 
     fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
@@ -454,7 +529,7 @@ impl Item for ReadWith {
     }
 }
 
-impl Item for WriteWith {
+impl Query for WriteWith {
     type Item<'a>
         = ColumnMut<'a>
     where
@@ -476,7 +551,7 @@ impl Item for WriteWith {
     }
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
-        Some(table.column(self.0.identifier)?.index())
+        table.column(self.0.identifier)
     }
 
     fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
@@ -486,4 +561,56 @@ impl Item for WriteWith {
         let column = unsafe { table.columns.get_unchecked(*state as usize) };
         ColumnMut(&column.meta, &column.data)
     }
+}
+
+impl<F: Filter> Filter for &F {
+    fn filter(&self, table: &table::Table) -> bool {
+        F::filter(self, table)
+    }
+}
+
+impl<F: Filter> Filter for &mut F {
+    fn filter(&self, table: &table::Table) -> bool {
+        F::filter(self, table)
+    }
+}
+
+impl Filter for () {
+    fn filter(&self, _: &table::Table) -> bool {
+        true
+    }
+}
+
+impl<F0: Filter, F1: Filter> Filter for (F0, F1) {
+    fn filter(&self, table: &table::Table) -> bool {
+        self.0.filter(table) && self.1.filter(table)
+    }
+}
+
+impl<T: 'static> Filter for Has<T> {
+    fn filter(&self, table: &table::Table) -> bool {
+        table.column(TypeId::of::<T>()).is_some()
+    }
+}
+
+impl Filter for HasWith {
+    fn filter(&self, table: &table::Table) -> bool {
+        table.column(self.0.identifier).is_some()
+    }
+}
+
+impl<T: 'static> Filter for Not<T> {
+    fn filter(&self, table: &table::Table) -> bool {
+        table.column(TypeId::of::<T>()).is_none()
+    }
+}
+
+impl Filter for NotWith {
+    fn filter(&self, table: &table::Table) -> bool {
+        table.column(self.0.identifier).is_none()
+    }
+}
+
+pub const fn query() -> Build {
+    Build((), ())
 }

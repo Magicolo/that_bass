@@ -37,6 +37,10 @@ pub enum Error {
     WriteWriteConflict(Resource, Resource),
     #[error("errors: {0:?}")]
     All(Vec<Error>),
+    #[error("version overflow")]
+    VersionOverflow,
+    #[error("store mismatch")]
+    StoreMismatch,
 }
 
 impl Error {

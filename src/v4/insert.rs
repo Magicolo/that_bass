@@ -232,7 +232,7 @@ impl Template for ColumnWith {
     fn initialize(&self, table: &mut Table) -> Option<Self::State> {
         Some((
             Vector::new(self.0.clone()),
-            table.column(self.0.identifier)?.index(),
+            table.column(self.0.identifier)?,
         ))
     }
 
@@ -257,7 +257,7 @@ impl<T: 'static> Template for Column<T> {
     }
 
     fn initialize(&self, table: &mut Table) -> Option<Self::State> {
-        Some((Vec::new(), table.column(TypeId::of::<T>())?.index()))
+        Some((Vec::new(), table.column(TypeId::of::<T>())?))
     }
 
     fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
