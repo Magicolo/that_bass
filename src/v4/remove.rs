@@ -1,21 +1,15 @@
 use crate::v4::{
     Error, Index, Store,
-    module::{Dependency, Module},
+    module::{self, Dependency, IntoModule},
     utility::ranges,
 };
 use core::iter::empty;
 
 pub struct Build(());
-pub struct State(Vec<(u32, u32)>);
+pub struct Module(Vec<(u32, u32)>);
 
 pub struct Remove<'a> {
     state: &'a mut Vec<(u32, u32)>,
-}
-
-impl Store {
-    pub fn remove(&mut self, remove: Build) -> super::State<State> {
-        self.state(State(Vec::new()))
-    }
 }
 
 impl Remove<'_> {
@@ -24,7 +18,15 @@ impl Remove<'_> {
     }
 }
 
-impl Module for State {
+impl IntoModule for Build {
+    type Module = Module;
+
+    fn into_module(self, _: &mut Store) -> Result<Self::Module, Error> {
+        Ok(Module(Vec::new()))
+    }
+}
+
+impl module::Module for Module {
     type Item<'a>
         = Remove<'a>
     where

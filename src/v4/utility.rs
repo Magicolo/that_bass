@@ -18,6 +18,27 @@ pub trait IntoFlat {
     fn into_flat(self) -> Self::Flat;
 }
 
+pub struct NestIter<I>(I);
+pub struct FlatIter<I>(I);
+
+pub trait IteratorExtension: Iterator {
+    fn into_nest(self) -> NestIter<Self>
+    where
+        Self: Sized,
+        Self::Item: IntoNest,
+    {
+        NestIter(self)
+    }
+
+    fn into_flat(self) -> FlatIter<Self>
+    where
+        Self: Sized,
+        Self::Item: IntoFlat,
+    {
+        FlatIter(self)
+    }
+}
+
 pub trait Push<T> {
     type Out;
     fn push(self, item: T) -> Self::Out;
@@ -211,6 +232,24 @@ pub(crate) fn find<T, K: Ord, F: FnMut(&T) -> K>(slice: &[T], key: K, mut map: F
         slice.binary_search_by_key(&key, map).ok()
     }
 }
+
+impl<I: Iterator<Item: IntoNest>> Iterator for NestIter<I> {
+    type Item = <I::Item as IntoNest>::Nest;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.0.next()?.into_nest())
+    }
+}
+
+impl<I: Iterator<Item: IntoFlat>> Iterator for FlatIter<I> {
+    type Item = <I::Item as IntoFlat>::Flat;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.0.next()?.into_flat())
+    }
+}
+
+impl<I: Iterator> IteratorExtension for I {}
 
 macro_rules! tuple {
     ($($name: ident),*) => {

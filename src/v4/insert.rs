@@ -1,6 +1,6 @@
 use crate::v4::{
     Error, Meta, Store, Table, Vector,
-    module::{self, Dependency, Module},
+    module::{self, Dependency, IntoModule},
     utility::{IntoNest, Push},
 };
 use core::{
@@ -22,37 +22,18 @@ pub trait Template {
 }
 
 pub struct Build<T = ()>(T);
-pub struct State<T: Template = ()> {
+pub struct Module<T: Template = ()> {
     template: T,
     count: u32,
     table: u32,
     state: T::State,
 }
 
-pub struct Insert<'a, T: Template = ()>(&'a mut State<T>);
+pub struct Insert<'a, T: Template = ()>(&'a mut Module<T>);
 
 pub struct Key;
 pub struct Column<T: ?Sized>(PhantomData<T>);
 pub struct ColumnWith(Meta);
-
-impl Store {
-    pub fn insert<T: Template>(
-        &mut self,
-        insert: Build<T>,
-    ) -> Result<super::State<State<T>>, Error> {
-        let template = insert.0;
-        let table = self.find_or_insert_table(template.declare())?;
-        let state = template
-            .initialize(unsafe { self.tables.get_unchecked_mut(table as usize) })
-            .ok_or(Error::FailedToInitialize)?;
-        Ok(self.state(State {
-            template,
-            count: 0,
-            table,
-            state,
-        }))
-    }
-}
 
 impl<T: Template> Insert<'_, T> {
     pub fn one<N: IntoNest<Nest = T::Item>>(&mut self, item: N) {
@@ -84,7 +65,25 @@ impl<T: Template> Build<T> {
     }
 }
 
-impl<T: Template> Module for State<T> {
+impl<T: Template> IntoModule for Build<T> {
+    type Module = Module<T>;
+
+    fn into_module(self, store: &mut Store) -> Result<Self::Module, Error> {
+        let template = self.0;
+        let table = store.find_or_insert_table(template.declare())?;
+        let state = template
+            .initialize(unsafe { store.tables.get_unchecked_mut(table as usize) })
+            .ok_or(Error::FailedToInitialize)?;
+        Ok(Module {
+            template,
+            count: 0,
+            table,
+            state,
+        })
+    }
+}
+
+impl<T: Template> module::Module for Module<T> {
     type Item<'a>
         = Insert<'a, T>
     where

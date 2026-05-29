@@ -13,6 +13,7 @@ struct Functions {
     layout: fn(u32) -> Result<Layout, LayoutError>,
     drop: unsafe fn(NonNull<u8>, u32),
     get: unsafe fn(NonNull<u8>) -> &'static dyn Any,
+    get_mut: unsafe fn(NonNull<u8>) -> &'static mut dyn Any,
     set: unsafe fn(Box<dyn Any>, NonNull<u8>),
 }
 
@@ -37,6 +38,7 @@ impl Meta {
                         .drop_in_place();
                 },
                 get: |data| unsafe { data.cast::<T>().as_ref() },
+                get_mut: |data| unsafe { data.cast::<T>().as_mut() },
                 set: |item, data| {
                     let item = unsafe { item.downcast::<T>().unwrap_unchecked() };
                     unsafe { data.cast::<T>().write(*item) };
@@ -128,11 +130,23 @@ impl Meta {
     }
 
     pub(crate) unsafe fn get<'a>(&self, data: NonNull<u8>) -> &'a dyn Any {
-        unsafe { (self.functions.get)(data) }
+        let item = unsafe { (self.functions.get)(data) };
+        debug_assert_eq!(item.type_id(), self.identifier);
+        item
     }
 
     pub(crate) unsafe fn get_at<'a>(&self, data: NonNull<u8>, index: u32) -> &'a dyn Any {
-        unsafe { (self.functions.get)(self.offset(data, index)) }
+        unsafe { self.get(self.offset(data, index)) }
+    }
+
+    pub(crate) unsafe fn get_mut<'a>(&self, data: NonNull<u8>) -> &'a mut dyn Any {
+        let item = unsafe { (self.functions.get_mut)(data) };
+        debug_assert_eq!(item.type_id(), self.identifier);
+        item
+    }
+
+    pub(crate) unsafe fn get_mut_at<'a>(&self, data: NonNull<u8>, index: u32) -> &'a mut dyn Any {
+        unsafe { self.get_mut(self.offset(data, index)) }
     }
 
     pub(crate) unsafe fn set(&self, data: NonNull<u8>, value: Box<dyn Any>) -> bool {

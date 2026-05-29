@@ -22,6 +22,11 @@ pub enum Resource {
     Column { store: u32, table: u32, index: u32 },
 }
 
+pub trait IntoModule {
+    type Module: Module;
+    fn into_module(self, store: &mut Store) -> Result<Self::Module, Error>;
+}
+
 pub trait Module {
     type Item<'a>
     where
@@ -33,6 +38,14 @@ pub trait Module {
     fn get<'a>(&'a mut self, store: &'a Store) -> Self::Item<'a>
     where
         Self: 'a;
+}
+
+impl<M: Module> IntoModule for M {
+    type Module = Self;
+
+    fn into_module(self, _: &mut Store) -> Result<Self::Module, Error> {
+        Ok(self)
+    }
 }
 
 impl<M: Module> Module for &mut M {

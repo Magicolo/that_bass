@@ -1,6 +1,6 @@
 use crate::v4::{
     Error, Meta, Rows, Store,
-    module::{Access, Dependency, Module, Resource},
+    module::{self, Access, Dependency, IntoModule, Resource},
     slice::Slice,
     table,
     utility::{IntoFlat, Push},
@@ -9,8 +9,7 @@ use core::{
     any::TypeId,
     iter::{empty, once},
     marker::PhantomData,
-    ptr::NonNull,
-    slice::{self, from_raw_parts, from_raw_parts_mut},
+    slice,
 };
 
 pub trait Query {
@@ -47,7 +46,12 @@ pub struct Item<'a, Q: Query> {
     store: &'a Store,
 }
 
-pub struct Iter<'a, Q: Query> {
+pub struct Tables<'a, Q: Query> {
+    states: slice::Iter<'a, (u32, Q::State)>,
+    tables: &'a [table::Table],
+}
+
+pub struct Columns<'a, Q: Query> {
     query: &'a Q,
     states: slice::IterMut<'a, (u32, Q::State)>,
     tables: &'a [table::Table],
@@ -55,7 +59,7 @@ pub struct Iter<'a, Q: Query> {
 }
 
 pub struct Build<Q = (), F = ()>(Q, F);
-pub struct State<Q: Query, F: Filter> {
+pub struct Module<Q: Query, F: Filter> {
     query: Q,
     filter: F,
     count: usize,
@@ -65,25 +69,14 @@ pub struct State<Q: Query, F: Filter> {
 pub struct Key(());
 pub struct Row(());
 pub struct Table(());
-pub struct Try<Q>(Q);
+pub struct Try<Q: ?Sized>(Q);
 pub struct Read<T: ?Sized>(PhantomData<T>);
 pub struct Write<T: ?Sized>(PhantomData<T>);
 pub struct ReadWith(Meta);
 pub struct WriteWith(Meta);
 pub struct Has<T: ?Sized>(PhantomData<T>);
 pub struct HasWith(Meta);
-pub struct Not<F>(F);
-
-impl Store {
-    pub fn query<Q: Query, F: Filter>(&mut self, query: Build<Q, F>) -> super::State<State<Q, F>> {
-        self.state(State {
-            query: query.0,
-            filter: query.1,
-            count: 0,
-            states: Vec::new(),
-        })
-    }
-}
+pub struct Not<F: ?Sized>(F);
 
 impl<Q, F> Build<Q, F> {
     pub fn key(self) -> Build<Q::Out, F>
@@ -206,7 +199,20 @@ impl<Q, F> Build<Q, F> {
     }
 }
 
-impl<Q: Query, F: Filter> Module for State<Q, F> {
+impl<Q: Query, F: Filter> IntoModule for Build<Q, F> {
+    type Module = Module<Q, F>;
+
+    fn into_module(self, _: &mut Store) -> Result<Self::Module, Error> {
+        Ok(Module {
+            query: self.0,
+            filter: self.1,
+            count: 0,
+            states: Vec::new(),
+        })
+    }
+}
+
+impl<Q: Query, F: Filter> module::Module for Module<Q, F> {
     type Item<'a>
         = Item<'a, Q>
     where
@@ -249,29 +255,35 @@ impl<Q: Query, F: Filter> Module for State<Q, F> {
     }
 }
 
-impl<'a, Q: Query<Item<'a>: IntoFlat>> Iterator for Iter<'a, Q> {
-    type Item = <Q::Item<'a> as IntoFlat>::Flat;
+impl<'a, Q: Query> Iterator for Tables<'a, Q> {
+    type Item = &'a table::Table;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (table, _) = self.states.next()?;
+        Some(unsafe { self.tables.get_unchecked(*table as usize) })
+    }
+}
+
+impl<'a, Q: Query> Iterator for Columns<'a, Q> {
+    type Item = Q::Item<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
         let table = unsafe { self.tables.get_unchecked(*table as usize) };
-        Some(self.query.get(state, table, self.store).into_flat())
+        Some(self.query.get(state, table, self.store))
     }
 }
 
 impl<'a, Q: Query> Item<'a, Q> {
-    // pub fn tables(&self) -> impl Iterator<Item = &Table> {
-    //     self.states
-    //         .iter()
-    //         .map(|(table, _)| unsafe { self.tables.get_unchecked(*table as usize)
-    // }) }
+    pub fn tables(&self) -> Tables<'_, Q> {
+        Tables {
+            states: self.states.iter(),
+            tables: self.tables,
+        }
+    }
 
-    // pub fn count(&mut self) -> usize {
-    //     self.tables().map(|table| table.count() as usize).sum()
-    // }
-
-    pub fn iter(&mut self) -> Iter<'_, Q> {
-        Iter {
+    pub fn columns(&mut self) -> Columns<'_, Q> {
+        Columns {
             query: self.query,
             states: self.states.iter_mut(),
             tables: self.tables,
@@ -671,7 +683,7 @@ impl Query for ReadWith {
     fn initialize(&self, table: &table::Table, _: &Store) -> Option<Self::State> {
         Some((
             table.column(self.0.identifier)?,
-            Slice::empty(self.0.identifier),
+            Slice::empty(self.0.clone()),
         ))
     }
 
@@ -685,9 +697,7 @@ impl Query for ReadWith {
         Self: 'a,
     {
         let column = unsafe { table.columns.get_unchecked(state.0 as usize) };
-        state.1 = unsafe {
-            Slice::from_raw_parts(column.data.cast(), table.count() as _, self.0.identifier)
-        };
+        unsafe { state.1.set_parts(column.data.cast(), table.count() as _) };
         &state.1
     }
 }
@@ -718,7 +728,7 @@ impl Query for WriteWith {
     fn initialize(&self, table: &table::Table, _: &Store) -> Option<Self::State> {
         Some((
             table.column(self.0.identifier)?,
-            Slice::empty(self.0.identifier),
+            Slice::empty(self.0.clone()),
         ))
     }
 
@@ -732,9 +742,7 @@ impl Query for WriteWith {
         Self: 'a,
     {
         let column = unsafe { table.columns.get_unchecked(state.0 as usize) };
-        state.1 = unsafe {
-            Slice::from_raw_parts(column.data.cast(), table.count() as _, self.0.identifier)
-        };
+        unsafe { state.1.set_parts(column.data.cast(), table.count() as _) };
         &mut state.1
     }
 }

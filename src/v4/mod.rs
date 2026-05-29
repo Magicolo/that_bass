@@ -10,9 +10,13 @@ pub mod table;
 pub mod utility;
 pub mod vector;
 
-use crate::v4::module::{Access, Dependency, Module, Resource};
+use crate::v4::{
+    module::{Access, Dependency, IntoModule, Module, Resource},
+    utility::Push,
+};
 use core::{
     iter::once,
+    marker::PhantomData,
     num::NonZeroU32,
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -31,10 +35,13 @@ pub struct Store {
     tables: Vec<Table>,
 }
 
-pub struct State<M> {
+pub struct One;
+pub struct More;
+pub struct State<M, C = One> {
     identifier: u32,
     version: u32,
     module: M,
+    _marker: PhantomData<C>,
 }
 
 impl Store {
@@ -47,7 +54,19 @@ impl Store {
         }
     }
 
-    pub fn get<'a, M: Module>(&'a mut self, state: &'a mut State<M>) -> Result<M::Item<'a>, Error> {
+    pub fn state<M: IntoModule>(&mut self, module: M) -> Result<State<M::Module>, Error> {
+        Ok(State {
+            identifier: self.identifier,
+            version: self.version.get(),
+            module: module.into_module(self)?,
+            _marker: PhantomData,
+        })
+    }
+
+    pub fn get<'a, M: Module, C>(
+        &'a mut self,
+        state: &'a mut State<M, C>,
+    ) -> Result<M::Item<'a>, Error> {
         self.ensure(state.identifier)?;
         if self.update(state)? {
             analyze(&mut HashMap::new(), state.module.declare(self)).map_or(Ok(()), Err)?;
@@ -99,14 +118,6 @@ impl Store {
         Ok(())
     }
 
-    fn state<M: Module>(&mut self, module: M) -> State<M> {
-        State {
-            identifier: self.identifier,
-            version: self.version.get(),
-            module,
-        }
-    }
-
     fn ensure(&self, identifier: u32) -> Result<(), Error> {
         if self.identifier == identifier {
             Ok(())
@@ -115,7 +126,7 @@ impl Store {
         }
     }
 
-    fn update<M: Module>(&mut self, state: &mut State<M>) -> Result<bool, Error> {
+    fn update<M: Module, C>(&mut self, state: &mut State<M, C>) -> Result<bool, Error> {
         let mut did = false;
         while (state.version < self.version.get()) | state.module.update(self)? {
             state.version = self.version.get();
@@ -125,20 +136,38 @@ impl Store {
     }
 }
 
-impl<M> State<M> {
-    pub const fn as_mut(&mut self) -> State<&mut M> {
+impl<M, C> State<M, C> {
+    pub const fn as_mut(&mut self) -> State<&mut M, C> {
         State {
             identifier: self.identifier,
             version: self.version,
             module: &mut self.module,
+            _marker: PhantomData,
         }
     }
+}
 
-    pub fn and<N>(self, state: State<N>) -> State<(M, N)> {
+impl<M> State<M, One> {
+    pub fn and<N>(self, state: State<N>) -> State<(M, (N, ())), More> {
         State {
             identifier: self.identifier,
             version: 0,
-            module: (self.module, state.module),
+            module: (self.module, (state.module, ())),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<M> State<M, More> {
+    pub fn and<N>(self, state: State<N>) -> State<M::Out, More>
+    where
+        M: Push<N>,
+    {
+        State {
+            identifier: self.identifier,
+            version: 0,
+            module: self.module.push(state.module),
+            _marker: PhantomData,
         }
     }
 }
@@ -195,18 +224,25 @@ fn conflict(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::v4::utility::{IntoFlat, IteratorExtension};
+
     #[test]
     fn access() -> Result<(), Error> {
         let mut store = Store::new();
-        let mut query1 = store.query(query().read::<char>().try_write::<String>());
-        let mut query2 = store.query(query().read::<char>().not::<String>());
-        let mut query3 = query1.as_mut().and(query2.as_mut());
-        let insert = store.insert(insert().key().column::<char>())?;
-        let remove = store.remove(remove());
+        let mut query1 = store.state(query().read::<char>().try_write::<String>())?;
+        let mut query2 = store.state(query().read::<char>().not::<String>())?;
+        let mut insert = store.state(insert().key().column::<char>())?;
+        let mut remove = store.state(remove())?;
         {
-            let query = store.get(&mut query1)?;
-            let (query, insert) = store.get((&mut query2, &mut insert))?;
-            let (query, insert, remove) = store.get((&mut query3, &mut insert, &mut remove))?;
+            let item0 = store.get(&mut query1)?;
+            let item1 = store.get(&mut query2)?;
+            let mut query3 = query1.as_mut().and(query2.as_mut());
+            let (item0, item1) = store.get(&mut query3)?;
+        }
+        {
+            let mut state = query1.as_mut().and(insert.as_mut()).and(remove.as_mut());
+            let (mut item0, item1, item2) = store.get(&mut state)?.into_flat();
+            for (a, b) in item0.columns().into_flat() {}
         }
 
         // let mut state = store.state(

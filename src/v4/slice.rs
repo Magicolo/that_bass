@@ -1,30 +1,52 @@
-use core::{any::TypeId, ptr::NonNull, slice};
+use crate::v4::Meta;
+use core::{
+    any::{Any, TypeId},
+    ptr::NonNull,
+    slice,
+};
 
 pub struct Slice {
     data: NonNull<u8>,
     len: usize,
-    type_id: TypeId,
+    meta: Meta,
 }
 
 impl Slice {
-    pub const fn empty(type_id: TypeId) -> Self {
-        unsafe { Self::from_raw_parts(NonNull::dangling(), 0, type_id) }
-    }
-
-    pub const unsafe fn from_raw_parts(data: NonNull<()>, len: usize, type_id: TypeId) -> Self {
+    pub const fn empty(meta: Meta) -> Self {
         Self {
-            data: data.cast(),
-            len,
-            type_id,
+            data: NonNull::dangling(),
+            len: 0,
+            meta,
         }
     }
 
-    pub const fn type_id(&self) -> TypeId {
-        self.type_id
+    pub const fn meta(&self) -> &Meta {
+        &self.meta
     }
 
     pub const fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn get(&self, index: usize) -> Option<&dyn Any> {
+        if index < self.len {
+            Some(unsafe { self.meta.get_at(self.data, index.try_into().ok()?) })
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut dyn Any> {
+        if index < self.len {
+            Some(unsafe { self.meta.get_mut_at(self.data, index.try_into().ok()?) })
+        } else {
+            None
+        }
+    }
+
+    pub(crate) const unsafe fn set_parts(&mut self, data: NonNull<u8>, len: usize) {
+        self.data = data;
+        self.len = len;
     }
 
     pub fn downcast_ref<T: 'static>(&self) -> Option<&[T]> {
@@ -36,7 +58,7 @@ impl Slice {
     }
 
     fn cast<T: 'static>(&self) -> Option<NonNull<T>> {
-        if self.type_id == TypeId::of::<T>() {
+        if self.meta.identifier == TypeId::of::<T>() {
             Some(self.data.cast())
         } else {
             None
