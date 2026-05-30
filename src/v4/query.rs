@@ -1,22 +1,12 @@
 use crate::v4::{
-    Error, Meta, Rows, Store,
-    depend::{Access, Depend, Dependency, Resource},
+    Error, Meta, Store,
+    depend::{Depend, Dependency},
     filter::{Filter, Has, HasWith, Not},
     item::{self, Item, Read, ReadWith, Try, Write, WriteWith},
-    slice::Slice,
     table,
-    utility::Push,
+    utility::{IntoFlat, Push},
 };
-use core::{
-    any::TypeId,
-    iter::{empty, once},
-    marker::PhantomData,
-    slice,
-};
-
-pub struct Tables<'a, I: Item> {
-    states: slice::Iter<'a, (table::Table, I::State)>,
-}
+use core::{marker::PhantomData, slice};
 
 pub struct Columns<'a, I: Item> {
     query: &'a I,
@@ -74,21 +64,6 @@ impl Query<(), ()> {
 }
 
 impl<I: Item, F: Filter> Query<I, F> {
-    pub fn tables(&mut self) -> Tables<'_, I> {
-        self.update();
-        Tables {
-            states: self.states.iter(),
-        }
-    }
-
-    pub fn columns(&mut self) -> Columns<'_, I> {
-        self.update();
-        Columns {
-            query: &self.item,
-            states: self.states.iter_mut(),
-        }
-    }
-
     fn update(&mut self) {
         while let Some(table) = self.tables.get(self.count) {
             self.count += 1;
@@ -107,26 +82,31 @@ unsafe impl<I: Item, F: Filter> Depend for Query<I, F> {
     }
 }
 
-impl<'a, I: Item> Iterator for Tables<'a, I> {
-    type Item = &'a table::Table;
+impl<'a, I: Item<Guard<'a>: IntoFlat>, F: Filter> IntoIterator for &'a mut Query<I, F> {
+    type IntoIter = Columns<'a, I>;
+    type Item = <I::Guard<'a> as IntoFlat>::Flat;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        self.states.next().map(|(table, _)| table)
+    fn into_iter(self) -> Self::IntoIter {
+        self.update();
+        Columns {
+            query: &self.item,
+            states: self.states.iter_mut(),
+        }
     }
 }
 
-impl<'a, I: Item> Iterator for Columns<'a, I> {
-    type Item = I::Item<'a>;
+impl<'a, I: Item<Guard<'a>: IntoFlat>> Iterator for Columns<'a, I> {
+    type Item = <I::Guard<'a> as IntoFlat>::Flat;
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
-        Some(self.query.get(state, table))
+        Some(self.query.get(state, table).into_flat())
     }
 }
 
 impl<I: Item> Item for &I {
-    type Item<'a>
-        = I::Item<'a>
+    type Guard<'a>
+        = I::Guard<'a>
     where
         Self: 'a;
     type State = I::State;
@@ -135,7 +115,7 @@ impl<I: Item> Item for &I {
         I::initialize(self, table)
     }
 
-    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
@@ -144,8 +124,8 @@ impl<I: Item> Item for &I {
 }
 
 impl<I: Item> Item for &mut I {
-    type Item<'a>
-        = I::Item<'a>
+    type Guard<'a>
+        = I::Guard<'a>
     where
         Self: 'a;
     type State = I::State;
@@ -154,7 +134,7 @@ impl<I: Item> Item for &mut I {
         I::initialize(self, table)
     }
 
-    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
@@ -163,7 +143,7 @@ impl<I: Item> Item for &mut I {
 }
 
 impl Item for () {
-    type Item<'a>
+    type Guard<'a>
         = ()
     where
         Self: 'a;
@@ -173,7 +153,7 @@ impl Item for () {
         Some(())
     }
 
-    fn get<'a>(&self, _: &'a mut Self::State, _: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&self, _: &'a mut Self::State, _: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
@@ -181,8 +161,8 @@ impl Item for () {
 }
 
 impl<A0: Item, A1: Item> Item for (A0, A1) {
-    type Item<'a>
-        = (A0::Item<'a>, A1::Item<'a>)
+    type Guard<'a>
+        = (A0::Guard<'a>, A1::Guard<'a>)
     where
         Self: 'a;
     type State = (A0::State, A1::State);
@@ -191,7 +171,7 @@ impl<A0: Item, A1: Item> Item for (A0, A1) {
         Some((self.0.initialize(table)?, self.1.initialize(table)?))
     }
 
-    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {

@@ -1,5 +1,6 @@
 use crate::v4::{
     error::Error,
+    guard::{Read, Write},
     meta::Meta,
     utility::{self, IteratorExtension, allocate, deallocate},
 };
@@ -12,7 +13,9 @@ use core::{
     ptr::{NonNull, copy_nonoverlapping, slice_from_raw_parts_mut},
     slice::{from_raw_parts, from_raw_parts_mut},
 };
-use parking_lot::RwLock;
+use parking_lot::{
+    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 use triomphe::{Arc, ThinArc};
 
 #[derive(Debug, Clone)]
@@ -127,22 +130,40 @@ impl Column {
         self.meta
     }
 
-    pub(crate) unsafe fn as_ref<T: 'static>(&self, count: u32) -> &[T] {
+    pub(crate) unsafe fn read<T: 'static>(&self, count: u32) -> Read<'_, [T]> {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
-        unsafe { from_raw_parts(self.data().cast::<T>().as_ptr(), count as usize) }
+        RwLockReadGuard::map(self.data.read(), |data| unsafe {
+            from_raw_parts(data.cast::<T>().as_ptr(), count as usize)
+        })
+        .into()
     }
 
-    pub(crate) unsafe fn as_mut<T: 'static>(&self, count: u32) -> &mut [T] {
+    pub(crate) unsafe fn try_read<T: 'static>(&self, count: u32) -> Option<Read<'_, [T]>> {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
-        unsafe { from_raw_parts_mut(self.data().cast::<T>().as_ptr(), count as usize) }
+        Some(
+            RwLockReadGuard::map(self.data.try_read()?, |data| unsafe {
+                from_raw_parts(data.cast::<T>().as_ptr(), count as usize)
+            })
+            .into(),
+        )
     }
 
-    pub(crate) unsafe fn try_as_mut<T: 'static>(&self, count: u32) -> Option<&mut [T]> {
-        if self.meta.identifier() == TypeId::of::<T>() {
-            Some(unsafe { self.as_mut(count) })
-        } else {
-            None
-        }
+    pub(crate) unsafe fn write<T: 'static>(&self, count: u32) -> Write<'_, [T]> {
+        debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
+        RwLockWriteGuard::map(self.data.write(), |data| unsafe {
+            from_raw_parts_mut(data.cast::<T>().as_ptr(), count as usize)
+        })
+        .into()
+    }
+
+    pub(crate) unsafe fn try_write<T: 'static>(&self, count: u32) -> Option<Write<'_, [T]>> {
+        debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
+        Some(
+            RwLockWriteGuard::map(self.data.try_write()?, |data| unsafe {
+                from_raw_parts_mut(data.cast::<T>().as_ptr(), count as usize)
+            })
+            .into(),
+        )
     }
 
     pub(crate) unsafe fn set<T: 'static>(&self, item: T, row: u32) {

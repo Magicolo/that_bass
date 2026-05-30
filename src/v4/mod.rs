@@ -1,6 +1,7 @@
 pub mod depend;
 pub mod error;
 pub mod filter;
+pub mod guard;
 pub mod insert;
 pub mod item;
 pub mod meta;
@@ -82,9 +83,9 @@ mod tests {
             scope(|scope| {
                 let signal = &signal;
                 scope.spawn(move || {
-                    for (a, b) in query1.columns().into_flat() {
-                        let Some(b) = b else { continue };
-                        for (a, b) in izip!(a, b) {
+                    for (a, b) in &mut query1 {
+                        let Some(mut b) = b else { continue };
+                        for (a, b) in izip!(&a, &mut b) {
                             b.push(*a);
                         }
                     }
@@ -92,8 +93,8 @@ mod tests {
                     atomic_wait::wake_all(signal);
                 });
                 scope.spawn(move || {
-                    for (a, b) in query2.columns().into_flat() {
-                        for (a, b) in izip!(a, b) {
+                    for (a, mut b) in &mut query2 {
+                        for (a, b) in izip!(&a, &mut b) {
                             *b = *a as u32;
                         }
                     }

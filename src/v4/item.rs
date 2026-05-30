@@ -1,6 +1,7 @@
 use crate::v4::{
     Meta, Rows,
     depend::{Access, Depend, Dependency, Resource},
+    guard,
     slice::Slice,
     table,
 };
@@ -12,12 +13,12 @@ use core::{
 
 pub trait Item: Depend {
     type State;
-    type Item<'a>
+    type Guard<'a>
     where
         Self: 'a;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State>;
-    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a;
 }
@@ -38,8 +39,8 @@ unsafe impl<I: Item> Depend for Try<I> {
 }
 
 impl<I: Item> Item for Try<I> {
-    type Item<'a>
-        = Option<I::Item<'a>>
+    type Guard<'a>
+        = Option<I::Guard<'a>>
     where
         Self: 'a;
     type State = Option<I::State>;
@@ -48,7 +49,7 @@ impl<I: Item> Item for Try<I> {
         Some(self.0.initialize(table))
     }
 
-    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
@@ -64,7 +65,7 @@ unsafe impl Depend for Key {
 
 // TODO: Implement
 impl Item for Key {
-    type Item<'a>
+    type Guard<'a>
         = ()
     where
         Self: 'a;
@@ -74,7 +75,7 @@ impl Item for Key {
         None
     }
 
-    fn get<'a>(&'a self, _: &'a mut Self::State, _: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, _: &'a mut Self::State, _: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
@@ -91,8 +92,8 @@ unsafe impl<T: 'static> Depend for Read<T> {
 }
 
 impl<T: 'static> Item for Read<T> {
-    type Item<'a>
-        = &'a [T]
+    type Guard<'a>
+        = guard::Read<'a, [T]>
     where
         Self: 'a;
     type State = u32;
@@ -101,12 +102,16 @@ impl<T: 'static> Item for Read<T> {
         table.column(TypeId::of::<T>())
     }
 
-    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
-        let column = unsafe { table.columns().get_unchecked(*state as usize) };
-        unsafe { column.as_ref(table.count()) }
+        unsafe {
+            table
+                .columns()
+                .get_unchecked(*state as usize)
+                .read(table.count())
+        }
     }
 }
 
@@ -120,8 +125,8 @@ unsafe impl<T: 'static> Depend for Write<T> {
 }
 
 impl<T: 'static> Item for Write<T> {
-    type Item<'a>
-        = &'a mut [T]
+    type Guard<'a>
+        = guard::Write<'a, [T]>
     where
         Self: 'a;
     type State = u32;
@@ -130,12 +135,16 @@ impl<T: 'static> Item for Write<T> {
         table.column(TypeId::of::<T>())
     }
 
-    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
-        let column = unsafe { table.columns().get_unchecked(*state as usize) };
-        unsafe { column.as_mut(table.count()) }
+        unsafe {
+            table
+                .columns()
+                .get_unchecked(*state as usize)
+                .write(table.count())
+        }
     }
 }
 
@@ -150,7 +159,7 @@ unsafe impl Depend for Row {
 
 // TODO: Implement
 impl Item for Row {
-    type Item<'a>
+    type Guard<'a>
         = Rows<'a>
     where
         Self: 'a;
@@ -160,7 +169,7 @@ impl Item for Row {
         Some(())
     }
 
-    fn get<'a>(&'a self, _: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, _: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
@@ -178,7 +187,7 @@ unsafe impl Depend for Table {
 }
 
 impl Item for Table {
-    type Item<'a>
+    type Guard<'a>
         = &'a table::Table
     where
         Self: 'a;
@@ -188,7 +197,7 @@ impl Item for Table {
         Some(())
     }
 
-    fn get<'a>(&'a self, _: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, _: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
@@ -206,7 +215,7 @@ unsafe impl Depend for ReadWith {
 }
 
 impl Item for ReadWith {
-    type Item<'a>
+    type Guard<'a>
         = &'a Slice
     where
         Self: 'a;
@@ -216,7 +225,7 @@ impl Item for ReadWith {
         Some((table.column(self.0.identifier())?, Slice::empty(self.0)))
     }
 
-    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
@@ -236,7 +245,7 @@ unsafe impl Depend for WriteWith {
 }
 
 impl Item for WriteWith {
-    type Item<'a>
+    type Guard<'a>
         = &'a mut Slice
     where
         Self: 'a;
@@ -246,7 +255,7 @@ impl Item for WriteWith {
         Some((table.column(self.0.identifier())?, Slice::empty(self.0)))
     }
 
-    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Item<'a>
+    fn get<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a,
     {
