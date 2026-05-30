@@ -20,8 +20,8 @@ impl Slice {
         }
     }
 
-    pub const fn meta(&self) -> &Meta {
-        &self.meta
+    pub const fn meta(&self) -> Meta {
+        self.meta
     }
 
     pub const fn len(&self) -> usize {
@@ -58,7 +58,7 @@ impl Slice {
     }
 
     fn cast<T: 'static>(&self) -> Option<NonNull<T>> {
-        if self.meta.identifier == TypeId::of::<T>() {
+        if self.meta.identifier() == TypeId::of::<T>() {
             Some(self.data.cast())
         } else {
             None

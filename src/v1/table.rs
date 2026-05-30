@@ -58,7 +58,7 @@ impl Database {
 }
 
 impl Column {
-    pub(crate) fn new(meta: &'static Meta) -> Self {
+    pub(crate) const fn new(meta: &'static Meta) -> Self {
         Self {
             data: RwLock::new(NonNull::dangling()),
             meta,
@@ -88,11 +88,13 @@ impl Column {
         else {
             return false;
         };
-        copy(
-            (*source.0.data.data_ptr(), source.1),
-            (*target.0.data.data_ptr(), target.1),
-            count,
-        );
+        unsafe {
+            copy(
+                (*source.0.data.data_ptr(), source.1),
+                (*target.0.data.data_ptr(), target.1),
+                count,
+            )
+        };
         true
     }
 
@@ -109,10 +111,10 @@ impl Column {
         let &Meta { copy, drop, .. } = self.meta();
         let data = unsafe { *self.data.data_ptr() };
         if let Some(drop) = drop {
-            drop(data, target_index, count);
+            unsafe { drop(data, target_index, count) };
         }
         if let Some(copy) = copy {
-            copy((data, source_index), (data, target_index), count);
+            unsafe { copy((data, source_index), (data, target_index), count) };
         }
     }
 
@@ -133,7 +135,7 @@ impl Column {
             return false;
         };
         let data = *self.data.data_ptr();
-        copy((data, source_index), (data, target_index), count);
+        unsafe { copy((data, source_index), (data, target_index), count) };
         true
     }
 
@@ -146,7 +148,7 @@ impl Column {
             return false;
         };
         let data = unsafe { *self.data.data_ptr() };
-        drop(data, index, count);
+        unsafe { drop(data, index, count) };
         true
     }
 
@@ -154,23 +156,23 @@ impl Column {
     #[allow(clippy::mut_from_ref)]
     pub(crate) unsafe fn get<T: 'static>(&self, index: usize) -> &mut T {
         debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
-        let data = *self.data.data_ptr();
-        &mut *data.as_ptr().cast::<T>().add(index)
+        let data = unsafe { *self.data.data_ptr() };
+        unsafe { &mut *data.as_ptr().cast::<T>().add(index) }
     }
 
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub(crate) unsafe fn get_all<T: 'static>(&self, count: usize) -> &mut [T] {
         debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
-        let data = *self.data.data_ptr();
-        from_raw_parts_mut(data.as_ptr().cast::<T>(), count)
+        let data = unsafe { *self.data.data_ptr() };
+        unsafe { from_raw_parts_mut(data.as_ptr().cast::<T>(), count) }
     }
 
     #[inline]
     pub(crate) unsafe fn set<T: 'static>(&self, index: usize, value: T) {
         debug_assert_eq!(TypeId::of::<T>(), self.meta().identifier());
-        let data = *self.data.data_ptr();
-        data.as_ptr().cast::<T>().add(index).write(value);
+        let data = unsafe { *self.data.data_ptr() };
+        unsafe { data.as_ptr().cast::<T>().add(index).write(value) };
     }
 }
 
@@ -208,7 +210,7 @@ impl Tables<'_> {
     ///
     /// `index` must be in bounds for the current table view held by `self`.
     pub unsafe fn get_unchecked(&self, index: usize) -> &Table {
-        get_unchecked(self.0.get(), index)
+        unsafe { get_unchecked(self.0.get(), index) }
     }
 
     /// `metas` must be sorted by `meta.identifier()` and must be deduplicated.

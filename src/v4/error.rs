@@ -1,4 +1,4 @@
-use crate::v4::module::Resource;
+use crate::v4::depend::Resource;
 use core::{alloc::LayoutError, num::TryFromIntError};
 
 #[derive(Debug, thiserror::Error)]

@@ -19,6 +19,9 @@ hecs = "0.11.0"
 itertools = "0.14.0"
 thiserror = "2.0.0"
 ref-cast = "1.0.25"
+derive_more = { version = "2.1.1", features = ["full"] }
+arc-swap = "1.9.1"
+triomphe = { version = "0.1.15", features = ["arc-swap"] }
 
 [dev-dependencies]
 intx = "0.1.0"

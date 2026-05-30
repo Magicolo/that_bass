@@ -1,63 +1,41 @@
-use crate::v4::{
-    Error, Index, Store,
-    module::{self, Dependency, IntoModule},
-    utility::ranges,
-};
-use core::iter::empty;
+use crate::v4::{Error, Row, Store, module::Module, table::Tables, utility::ranges};
 
 pub struct Build(());
-pub struct Module(Vec<(u32, u32)>);
-
-pub struct Remove<'a> {
-    state: &'a mut Vec<(u32, u32)>,
+pub struct Remove {
+    rows: Vec<(u32, u32)>,
+    tables: Tables,
 }
 
-impl Remove<'_> {
-    pub fn one(&mut self, row: Index) {
-        self.state.push((row.table(), row.row()));
-    }
-}
-
-impl IntoModule for Build {
-    type Module = Module;
-
-    fn into_module(self, _: &mut Store) -> Result<Self::Module, Error> {
-        Ok(Module(Vec::new()))
-    }
-}
-
-impl module::Module for Module {
-    type Item<'a>
-        = Remove<'a>
-    where
-        Self: 'a;
-
-    fn declare(&self, _: &Store) -> impl Iterator<Item = Dependency> {
-        empty()
+impl Remove {
+    pub const fn builder() -> Build {
+        Build::new()
     }
 
-    fn update(&mut self, _: &mut Store) -> Result<bool, Error> {
-        Ok(false)
+    pub fn one(&mut self, row: Row<'_>) {
+        self.rows.push((row.table(), row.row()));
     }
 
-    fn resolve(&mut self, store: &mut Store) -> Result<(), Error> {
-        self.0.sort();
-        for (table, rows) in ranges(self.0.drain(..).rev()) {
-            if let Some(table) = store.tables.get_mut(table as usize) {
-                table.release(rows);
-            }
+    pub fn all(&mut self) {
+        todo!()
+    }
+
+    pub fn resolve(&mut self) {
+        self.rows.sort();
+        for (table, rows) in ranges(self.rows.drain(..).rev()) {
+            self.tables.map(table, |table| table.release(rows));
         }
-        Ok(())
-    }
-
-    fn get<'a>(&'a mut self, _: &'a Store) -> Self::Item<'a>
-    where
-        Self: 'a,
-    {
-        Remove { state: &mut self.0 }
     }
 }
 
-pub const fn remove() -> Build {
-    Build(())
+impl Build {
+    pub const fn new() -> Self {
+        Self(())
+    }
+
+    pub fn build(self, store: &Store) -> Remove {
+        Remove {
+            rows: Vec::new(),
+            tables: store.tables().clone(),
+        }
+    }
 }

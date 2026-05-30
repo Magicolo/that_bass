@@ -1,7 +1,5 @@
+use super::{error::Error, meta::Meta};
 use core::ptr::NonNull;
-
-use super::error::Error;
-use super::meta::Meta;
 
 pub struct Vector {
     meta: Meta,
@@ -11,7 +9,7 @@ pub struct Vector {
 }
 
 impl Vector {
-    pub(crate) fn new(meta: Meta) -> Self {
+    pub(crate) const fn new(meta: Meta) -> Self {
         Vector {
             meta,
             data: NonNull::dangling(),
@@ -21,7 +19,7 @@ impl Vector {
     }
 
     pub(crate) fn push(&mut self, item: Box<dyn core::any::Any>) -> Result<(), Error> {
-        if self.meta.identifier == item.type_id() {
+        if self.meta.identifier() == item.type_id() {
             let index = self.count;
             self.reserve(1)?;
             unsafe { self.meta.set_at(self.data, item, index) };

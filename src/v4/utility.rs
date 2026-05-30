@@ -1,7 +1,7 @@
-use crate::v4::{error::Error, table::Column};
+use crate::v4::{Meta, error::Error, table::Column};
 use core::{
     alloc::Layout,
-    iter::from_fn,
+    iter::{FusedIterator, from_fn},
     mem::{replace, take},
     ops::Range,
     ptr::NonNull,
@@ -20,6 +20,7 @@ pub trait IntoFlat {
 
 pub struct NestIter<I>(I);
 pub struct FlatIter<I>(I);
+pub struct AndIter<I: Iterator>(I, Option<I::Item>);
 
 pub trait IteratorExtension: Iterator {
     fn into_nest(self) -> NestIter<Self>
@@ -37,22 +38,18 @@ pub trait IteratorExtension: Iterator {
     {
         FlatIter(self)
     }
+
+    fn and(self, item: Self::Item) -> AndIter<Self>
+    where
+        Self: Sized,
+    {
+        AndIter(self, Some(item))
+    }
 }
 
 pub trait Push<T> {
     type Out;
     fn push(self, item: T) -> Self::Out;
-}
-
-pub trait Next {
-    type Item<'a>
-    where
-        Self: 'a;
-    type Rest<'a>: Next
-    where
-        Self: 'a;
-
-    fn next(&mut self) -> (Self::Item<'_>, Self::Rest<'_>);
 }
 
 impl<I> Push<I> for () {
@@ -69,61 +66,6 @@ impl<I, H, T: Push<I>> Push<I> for (H, T) {
     fn push(self, item: I) -> Self::Out {
         (self.0, self.1.push(item))
     }
-}
-
-impl Next for () {
-    type Item<'a> = ();
-    type Rest<'a> = ();
-
-    fn next(&mut self) -> (Self::Item<'_>, Self::Rest<'_>) {
-        ((), ())
-    }
-}
-
-impl<N: Next> Next for &mut N {
-    type Item<'a>
-        = N::Item<'a>
-    where
-        Self: 'a;
-    type Rest<'a>
-        = N::Rest<'a>
-    where
-        Self: 'a;
-
-    fn next(&mut self) -> (Self::Item<'_>, Self::Rest<'_>) {
-        N::next(self)
-    }
-}
-
-impl<H, T: Next> Next for (H, T) {
-    type Item<'a>
-        = &'a mut H
-    where
-        Self: 'a;
-    type Rest<'a>
-        = &'a mut T
-    where
-        Self: 'a;
-
-    fn next(&mut self) -> (Self::Item<'_>, Self::Rest<'_>) {
-        (&mut self.0, &mut self.1)
-    }
-}
-
-pub(crate) unsafe fn vec_as_slice<T>(vector: *const Vec<T>) -> *const [T] {
-    todo!()
-}
-
-pub(crate) unsafe fn vec_as_slice_mut<T>(vector: *mut Vec<T>) -> *mut [T] {
-    todo!()
-}
-
-pub(crate) unsafe fn box_as_slice<T>(slice: *const Box<[T]>) -> *const [T] {
-    todo!()
-}
-
-pub(crate) unsafe fn box_as_slice_mut<T>(slice: *mut Box<[T]>) -> *mut [T] {
-    todo!()
 }
 
 pub(crate) unsafe fn allocate(layout: Layout) -> Result<NonNull<u8>, Error> {
@@ -179,52 +121,6 @@ pub(crate) fn ranges(
     })
 }
 
-pub(crate) fn resize(
-    columns: &mut [Column],
-    data: NonNull<u8>,
-    count: u32,
-    capacities: (u32, u32),
-) -> Result<NonNull<u8>, Error> {
-    fn next(
-        columns: &mut [Column],
-        layouts: (Layout, Layout),
-        count: u32,
-        capacities: (u32, u32),
-    ) -> Result<(Layout, NonNull<u8>), Error> {
-        Ok(match columns.split_first_mut() {
-            Some((head, tail)) => {
-                let old = head
-                    .meta
-                    .extend(layouts.0, capacities.0)
-                    .map_err(Error::Layout)?;
-                let new = head
-                    .meta
-                    .extend(layouts.1, capacities.1)
-                    .map_err(Error::Layout)?;
-                let pair = next(tail, (old.0, new.0), count, capacities)?;
-                let source = head.data;
-                let target = unsafe { pair.1.add(new.1) };
-                head.meta.initialize(source, target, count, capacities.1);
-                head.data = target;
-                pair
-            }
-            None if layouts.1.size() == 0 => (layouts.0.pad_to_align(), NonNull::dangling()),
-            None => (layouts.0.pad_to_align(), unsafe {
-                allocate(layouts.1.pad_to_align())
-            }?),
-        })
-    }
-
-    let (old, new) = next(
-        columns,
-        (Layout::new::<()>(), Layout::new::<()>()),
-        count,
-        capacities,
-    )?;
-    unsafe { deallocate(data, old) };
-    Ok(new)
-}
-
 pub(crate) fn find<T, K: Ord, F: FnMut(&T) -> K>(slice: &[T], key: K, mut map: F) -> Option<usize> {
     if slice.len() < 32 {
         slice.iter().position(|item| map(item) == key)
@@ -248,6 +144,28 @@ impl<I: Iterator<Item: IntoFlat>> Iterator for FlatIter<I> {
         Some(self.0.next()?.into_flat())
     }
 }
+
+impl<I: Iterator> Iterator for AndIter<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().or_else(|| self.1.take())
+    }
+}
+
+impl<I: DoubleEndedIterator> DoubleEndedIterator for AndIter<I> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.1.take().or_else(|| self.0.next_back())
+    }
+}
+
+impl<I: ExactSizeIterator> ExactSizeIterator for AndIter<I> {
+    fn len(&self) -> usize {
+        self.0.len() + self.1.iter().len()
+    }
+}
+
+impl<I: FusedIterator> FusedIterator for AndIter<I> {}
 
 impl<I: Iterator> IteratorExtension for I {}
 
