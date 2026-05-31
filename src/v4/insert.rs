@@ -1,16 +1,10 @@
 use crate::v4::{
-    Error, Meta, Store, Table, Vector,
+    Error, Meta, Rows, Store, Table,
     depend::{Access, Depend, Dependency, Resource},
     template::{Column, ColumnWith, Key, Template},
     utility::{IntoNest, Push},
 };
-use core::{
-    any::{Any, TypeId},
-    iter::{empty, once},
-    marker::PhantomData,
-    mem::take,
-    ptr::NonNull,
-};
+use core::{marker::PhantomData, mem::take};
 
 pub struct Build<T>(T);
 pub struct Insert<T: Template> {
@@ -32,21 +26,17 @@ impl<T: Template> Insert<T> {
         self.count += 1;
     }
 
-    pub fn resolve(&mut self) -> Result<(), Error> {
-        let count = take(&mut self.count);
-        if count > 0 {
-            let rows = self.table.insert(count, |rows| unsafe {
-                self.template.resolve(&mut self.state, rows, &self.table)
-            })?;
-            debug_assert_eq!(count as usize, rows.len());
-            let rows = self.table.reserve(count)?;
-            unsafe {
-                self.template
-                    .resolve(&mut self.state, rows.clone(), &self.table)
-            };
-            self.table.commit(rows);
+    pub fn resolve(&mut self) -> Result<Rows<'_>, Error> {
+        match take(&mut self.count) {
+            0 => Ok(Rows::new(0..0, &self.table)),
+            count => {
+                let rows = self.table.insert(count, |rows| unsafe {
+                    self.template.resolve(&mut self.state, rows, &self.table)
+                })?;
+                debug_assert_eq!(count as usize, rows.len());
+                Ok(rows)
+            }
         }
-        Ok(())
     }
 }
 

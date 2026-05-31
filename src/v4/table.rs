@@ -216,6 +216,10 @@ impl<'a> Rows<'a> {
     pub(crate) const fn new(rows: Range<u32>, table: &'a Table) -> Self {
         Self { rows, table }
     }
+
+    pub fn table(&self) -> u32 {
+        self.table.index()
+    }
 }
 
 impl<'a> Bind for Rows<'a> {
