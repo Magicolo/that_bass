@@ -147,6 +147,11 @@ impl Column {
         unsafe { self.data().cast::<T>().add(row as usize).write(item) };
     }
 
+    pub(crate) unsafe fn set_at(&self, item: Box<dyn Any>, row: u32) {
+        debug_assert_eq!(self.meta.identifier(), item.type_id());
+        unsafe { self.meta.set_at(self.data(), item, row) };
+    }
+
     pub(crate) unsafe fn copy<T: 'static>(&self, source: NonNull<T>, row: u32, count: u32) -> bool {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
         if size_of::<T>() > 0 && count > 0 {
@@ -162,14 +167,6 @@ impl Column {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
         let data = unsafe { self.data().cast::<T>().add(row as usize) };
         unsafe { slice_from_raw_parts_mut(data.as_ptr(), count as usize).drop_in_place() };
-    }
-
-    pub(crate) unsafe fn get_with(&self, meta: Meta, row: u32) -> &dyn Any {
-        unsafe { meta.get(meta.offset(self.data(), row)) }
-    }
-
-    pub(crate) unsafe fn set_with(&self, item: Box<dyn Any>, row: u32, meta: Meta) -> bool {
-        unsafe { meta.set(meta.offset(self.data(), row), item) }
     }
 
     pub(crate) unsafe fn copy_at(&self, source: u32, target: u32, count: u32) -> bool {
@@ -290,27 +287,27 @@ impl Table {
         self.header().capacity.load(Ordering::Acquire)
     }
 
-    pub(crate) fn insert<F: FnOnce(Range<u32>)>(
+    pub(crate) fn insert<F: FnOnce(u32)>(
         &self,
         count: u32,
-        mut resolve: F,
+        mut apply: F,
     ) -> Result<Rows<'_>, Error> {
         enum Next<F> {
             Done(Range<u32>),
             Grow(u32, u32, F),
         }
 
-        fn next<F: FnOnce(Range<u32>)>(
+        fn next<F: FnOnce(u32)>(
             header: &Header,
             columns: &[Column],
             count: u32,
-            resolve: F,
+            apply: F,
         ) -> Result<Next<F>, Error> {
             match columns.split_first() {
-                Some((head, tail)) if head.meta.size() == 0 => next(header, tail, count, resolve),
+                Some((head, tail)) if head.meta.size() == 0 => next(header, tail, count, apply),
                 Some((head, tail)) => {
                     let data = head.data.read();
-                    let result = next(header, tail, count, resolve);
+                    let result = next(header, tail, count, apply);
                     drop(data);
                     result
                 }
@@ -320,29 +317,33 @@ impl Table {
                     let capacity = header.capacity.load(Ordering::Acquire);
                     if end <= capacity {
                         let rows = start..end;
-                        resolve(rows.clone());
+                        apply(start);
                         header.count.store(end, Ordering::Release);
                         Ok(Next::Done(rows))
                     } else {
                         let next = end
                             .checked_next_power_of_two()
                             .ok_or(Error::TableOverflow)?;
-                        Ok(Next::Grow(capacity, next, resolve))
+                        Ok(Next::Grow(capacity, next, apply))
                     }
                 }
             }
         }
 
-        let header = self.header();
-        let columns = self.columns();
-        let rows = loop {
-            resolve = match next(header, columns, count, resolve)? {
-                Next::Grow(old, new, resolve) => {
-                    self.resize((old, new))?;
-                    resolve
-                }
-                Next::Done(rows) => break rows,
-            };
+        let rows = if count == 0 {
+            0..0
+        } else {
+            let header = self.header();
+            let columns = self.columns();
+            loop {
+                apply = match next(header, columns, count, apply)? {
+                    Next::Grow(old, new, apply) => {
+                        self.resize((old, new))?;
+                        apply
+                    }
+                    Next::Done(rows) => break rows,
+                };
+            }
         };
         Ok(Rows::new(rows, self))
     }

@@ -4,14 +4,14 @@ use crate::v4::{
     template::{Column, ColumnWith, Key, Template},
     utility::{IntoNest, Push},
 };
-use core::{marker::PhantomData, mem::take};
+use core::marker::PhantomData;
 
 pub struct Build<T>(T);
 pub struct Insert<T: Template> {
     template: T,
-    count: u32,
-    table: Table,
+    items: Vec<T::Item>,
     state: T::State,
+    table: Table,
 }
 
 impl Insert<()> {
@@ -22,21 +22,22 @@ impl Insert<()> {
 
 impl<T: Template> Insert<T> {
     pub fn one<N: IntoNest<Nest = T::Item>>(&mut self, item: N) {
-        self.template.defer(&mut self.state, item.into_nest());
-        self.count += 1;
+        self.items.push(item.into_nest());
     }
 
     pub fn resolve(&mut self) -> Result<Rows<'_>, Error> {
-        match take(&mut self.count) {
-            0 => Ok(Rows::new(0..0, &self.table)),
-            count => {
-                let rows = self.table.insert(count, |rows| unsafe {
-                    self.template.resolve(&mut self.state, rows, &self.table)
-                })?;
-                debug_assert_eq!(count as usize, rows.len());
-                Ok(rows)
+        let count = self.items.len().try_into().map_err(Error::ItemsOverflow)?;
+        let rows = self.table.insert(count, |start| {
+            for (index, item) in self.items.drain(..).enumerate() {
+                let index = start + index as u32;
+                unsafe {
+                    self.template
+                        .apply(&mut self.state, item, index, &self.table);
+                }
             }
-        }
+        })?;
+        debug_assert_eq!(count as usize, rows.len());
+        Ok(rows)
     }
 }
 
@@ -72,7 +73,7 @@ impl<T: Template> Build<T> {
             .ok_or(Error::FailedToInitialize)?;
         Ok(Insert {
             template,
-            count: 0,
+            items: Vec::new(),
             table,
             state,
         })

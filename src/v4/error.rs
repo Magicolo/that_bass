@@ -45,6 +45,8 @@ pub enum Error {
     TableUnderflow,
     #[error("tables underflow: {0}")]
     RowsOverflow(TryFromIntError),
+    #[error("items overflow: {0}")]
+    ItemsOverflow(TryFromIntError),
 }
 
 impl Error {

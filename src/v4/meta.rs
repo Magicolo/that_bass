@@ -171,22 +171,14 @@ impl Meta {
         unsafe { self.get_mut(self.offset(data, index)) }
     }
 
-    pub(crate) unsafe fn set(self, data: NonNull<u8>, value: Box<dyn Any>) -> bool {
-        if self.identifier() == (*value).type_id() {
-            unsafe { (self.0.set)(value, data) };
-            true
-        } else {
-            false
-        }
+    pub(crate) unsafe fn set(self, data: NonNull<u8>, value: Box<dyn Any>) {
+        debug_assert_eq!(self.identifier(), value.type_id());
+        unsafe { (self.0.set)(value, data) };
     }
 
-    pub(crate) unsafe fn set_at(self, data: NonNull<u8>, value: Box<dyn Any>, index: u32) -> bool {
-        if self.identifier() == (*value).type_id() {
-            unsafe { (self.0.set)(value, self.offset(data, index)) };
-            true
-        } else {
-            false
-        }
+    pub(crate) unsafe fn set_at(self, data: NonNull<u8>, value: Box<dyn Any>, index: u32) {
+        debug_assert_eq!(self.identifier(), value.type_id());
+        unsafe { self.set(self.offset(data, index), value) };
     }
 }
 

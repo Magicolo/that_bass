@@ -15,15 +15,9 @@ pub mod template;
 pub mod utility;
 pub mod vector;
 
-use crate::v4::{
-    depend::{Access, Dependency, Resource},
-    module::Module,
-    table::Tables,
-};
-use core::iter::once;
+use crate::v4::table::Tables;
 pub use error::Error;
 pub use meta::Meta;
-use std::collections::{HashMap, hash_map::Entry};
 pub use table::{Row, Rows, Table};
 pub use vector::Vector;
 
@@ -46,7 +40,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v4::{insert::Insert, query::Query, remove::Remove, utility::IteratorExtension};
+    use crate::v4::{insert::Insert, query::Query, remove::Remove};
     use itertools::izip;
     use std::{
         sync::atomic::{AtomicU32, Ordering},

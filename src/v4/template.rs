@@ -1,10 +1,8 @@
-use crate::v4::{Meta, Table, Vector};
+use crate::v4::{Meta, Table};
 use core::{
     any::{Any, TypeId},
     iter::{empty, once},
     marker::PhantomData,
-    ops::Range,
-    ptr::NonNull,
 };
 
 pub trait Template {
@@ -13,8 +11,7 @@ pub trait Template {
 
     fn declare(&self) -> impl Iterator<Item = Meta>;
     fn initialize(&self, table: &Table) -> Option<Self::State>;
-    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool;
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table);
+    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table);
 }
 
 pub struct Key(pub(crate) ());
@@ -33,12 +30,8 @@ impl<T: Template> Template for &T {
         T::initialize(self, table)
     }
 
-    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
-        T::defer(self, state, item)
-    }
-
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {
-        unsafe { T::resolve(self, state, rows, table) }
+    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
+        unsafe { T::apply(self, state, item, index, table) }
     }
 }
 
@@ -54,12 +47,8 @@ impl<T: Template> Template for &mut T {
         T::initialize(self, table)
     }
 
-    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
-        T::defer(self, state, item)
-    }
-
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {
-        unsafe { T::resolve(self, state, rows, table) }
+    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
+        unsafe { T::apply(self, state, item, index, table) }
     }
 }
 
@@ -75,11 +64,7 @@ impl Template for () {
         Some(())
     }
 
-    fn defer(&self, _: &mut Self::State, _: Self::Item) -> bool {
-        true
-    }
-
-    unsafe fn resolve(&self, _: &mut Self::State, _: Range<u32>, _: &Table) {}
+    unsafe fn apply(&self, _: &Self::State, _: Self::Item, _: u32, _: &Table) {}
 }
 
 impl<T0: Template, T1: Template> Template for (T0, T1) {
@@ -94,14 +79,10 @@ impl<T0: Template, T1: Template> Template for (T0, T1) {
         Some((self.0.initialize(table)?, self.1.initialize(table)?))
     }
 
-    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
-        self.0.defer(&mut state.0, item.0) && self.1.defer(&mut state.1, item.1)
-    }
-
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {
+    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
         unsafe {
-            self.0.resolve(&mut state.0, rows.clone(), table);
-            self.1.resolve(&mut state.1, rows, table);
+            self.0.apply(&state.0, item.0, index, table);
+            self.1.apply(&state.1, item.1, index, table);
         }
     }
 }
@@ -119,65 +100,43 @@ impl Template for Key {
         None
     }
 
-    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
-        true
-    }
-
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {}
+    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {}
 }
 
 impl Template for ColumnWith {
     type Item = Box<dyn Any>;
-    type State = (Vector, u32);
+    type State = u32;
 
     fn declare(&self) -> impl Iterator<Item = Meta> {
         once(self.0.clone())
     }
 
     fn initialize(&self, table: &Table) -> Option<Self::State> {
-        Some((
-            Vector::new(self.0.clone()),
-            table.column(self.0.identifier())?,
-        ))
+        table.column(self.0.identifier())
     }
 
-    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
-        state.0.push(item).is_ok()
-    }
-
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {
-        let count = rows.end - rows.start;
-        debug_assert_eq!(count, state.0.len());
-        let column = unsafe { table.columns().get_unchecked(state.1 as usize) };
+    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
+        let column = unsafe { table.columns().get_unchecked(*state as usize) };
         debug_assert_eq!(self.0, column.meta());
-        unsafe { state.0.move_at(column.data(), count) }
+        unsafe { column.set(item, index) }
     }
 }
 
 impl<T: 'static> Template for Column<T> {
     type Item = T;
-    type State = (Vec<Self::Item>, u32);
+    type State = u32;
 
     fn declare(&self) -> impl Iterator<Item = Meta> {
         once(Meta::of::<T>())
     }
 
     fn initialize(&self, table: &Table) -> Option<Self::State> {
-        Some((Vec::new(), table.column(TypeId::of::<T>())?))
+        table.column(TypeId::of::<T>())
     }
 
-    fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool {
-        state.0.push(item);
-        true
-    }
-
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {
-        debug_assert_eq!(rows.len(), state.0.len());
-        let count = rows.end - rows.start;
-        let source = unsafe { NonNull::new_unchecked(state.0.as_mut_ptr()) };
-        let column = unsafe { table.columns().get_unchecked(state.1 as usize) };
+    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
+        let column = unsafe { table.columns().get_unchecked(*state as usize) };
         debug_assert_eq!(column.meta().identifier(), TypeId::of::<T>());
-        unsafe { column.copy(source, rows.start, count) };
-        unsafe { state.0.set_len(0) };
+        unsafe { column.set(item, index) };
     }
 }
