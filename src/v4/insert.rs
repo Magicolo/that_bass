@@ -35,9 +35,16 @@ impl<T: Template> Insert<T> {
     pub fn resolve(&mut self) -> Result<(), Error> {
         let count = take(&mut self.count);
         if count > 0 {
+            let rows = self.table.insert(count, |rows| unsafe {
+                self.template.resolve(&mut self.state, rows, &self.table)
+            })?;
+            debug_assert_eq!(count as usize, rows.len());
             let rows = self.table.reserve(count)?;
-            unsafe { self.template.resolve(&mut self.state, rows, &self.table) };
-            self.table.commit();
+            unsafe {
+                self.template
+                    .resolve(&mut self.state, rows.clone(), &self.table)
+            };
+            self.table.commit(rows);
         }
         Ok(())
     }

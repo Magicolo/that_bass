@@ -69,6 +69,10 @@ impl Meta {
         self.0.name
     }
 
+    pub const fn drops(self) -> bool {
+        self.0.drop.is_some()
+    }
+
     pub(crate) fn layout(self, count: u32) -> Result<Layout, LayoutError> {
         (self.0.layout)(count)
     }
@@ -77,14 +81,14 @@ impl Meta {
         layout.extend(self.layout(count)?)
     }
 
-    pub(crate) fn initialize(
+    pub(crate) unsafe fn initialize(
         self,
         source: NonNull<u8>,
         target: NonNull<u8>,
         count: u32,
         capacity: u32,
     ) {
-        unsafe { self.copy(source, target, core::cmp::min(count, capacity)) };
+        unsafe { self.copy(source, target, count.min(capacity)) };
         unsafe { self.drop_at(source, count, count.saturating_sub(capacity)) };
     }
 
@@ -100,7 +104,7 @@ impl Meta {
         );
         let source = data;
         let target = unsafe { allocate(layouts.1)? };
-        self.initialize(source, target, count, capacities.1);
+        unsafe { self.initialize(source, target, count, capacities.1) };
         unsafe { deallocate(source, layouts.0) };
         Ok(target)
     }

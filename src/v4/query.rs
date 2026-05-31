@@ -2,6 +2,7 @@ use crate::v4::{
     Error, Meta, Store,
     depend::{Depend, Dependency},
     filter::{Filter, Has, HasWith, Not},
+    guard::Bind,
     item::{self, Item, Read, ReadWith, Try, Write, WriteWith},
     table,
     utility::{IntoFlat, Push},
@@ -82,9 +83,11 @@ unsafe impl<I: Item, F: Filter> Depend for Query<I, F> {
     }
 }
 
-impl<'a, I: Item<Guard<'a>: IntoFlat>, F: Filter> IntoIterator for &'a mut Query<I, F> {
+impl<'a, I: Item<Guard<'a>: Bind<Guard: IntoFlat>>, F: Filter> IntoIterator
+    for &'a mut Query<I, F>
+{
     type IntoIter = Columns<'a, I>;
-    type Item = <I::Guard<'a> as IntoFlat>::Flat;
+    type Item = <<I::Guard<'a> as Bind>::Guard as IntoFlat>::Flat;
 
     fn into_iter(self) -> Self::IntoIter {
         self.update();
@@ -95,12 +98,16 @@ impl<'a, I: Item<Guard<'a>: IntoFlat>, F: Filter> IntoIterator for &'a mut Query
     }
 }
 
-impl<'a, I: Item<Guard<'a>: IntoFlat>> Iterator for Columns<'a, I> {
-    type Item = <I::Guard<'a> as IntoFlat>::Flat;
+impl<'a, I: Item<Guard<'a>: Bind<Guard: IntoFlat>>> Iterator for Columns<'a, I> {
+    type Item = <<I::Guard<'a> as Bind>::Guard as IntoFlat>::Flat;
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
-        Some(self.query.get(state, table.count(), table).into_flat())
+        // TODO: This is wrong because it can cause deadlocks. Locks must always be
+        // taken in the same order -- even between queries.
+        let guard = self.query.guard(state, table);
+        let guard = guard.bind(table.count());
+        Some(guard.into_flat())
     }
 }
 

@@ -41,6 +41,10 @@ pub enum Error {
     VersionOverflow,
     #[error("store mismatch")]
     StoreMismatch,
+    #[error("table underflow")]
+    TableUnderflow,
+    #[error("tables underflow: {0}")]
+    RowsOverflow(TryFromIntError),
 }
 
 impl Error {

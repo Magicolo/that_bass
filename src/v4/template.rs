@@ -14,7 +14,7 @@ pub trait Template {
     fn declare(&self) -> impl Iterator<Item = Meta>;
     fn initialize(&self, table: &Table) -> Option<Self::State>;
     fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool;
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool;
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table);
 }
 
 pub struct Key(pub(crate) ());
@@ -37,7 +37,7 @@ impl<T: Template> Template for &T {
         T::defer(self, state, item)
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {
         unsafe { T::resolve(self, state, rows, table) }
     }
 }
@@ -58,7 +58,7 @@ impl<T: Template> Template for &mut T {
         T::defer(self, state, item)
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {
         unsafe { T::resolve(self, state, rows, table) }
     }
 }
@@ -79,9 +79,7 @@ impl Template for () {
         true
     }
 
-    unsafe fn resolve(&self, _: &mut Self::State, _: Range<u32>, _: &Table) -> bool {
-        false
-    }
+    unsafe fn resolve(&self, _: &mut Self::State, _: Range<u32>, _: &Table) {}
 }
 
 impl<T0: Template, T1: Template> Template for (T0, T1) {
@@ -100,10 +98,10 @@ impl<T0: Template, T1: Template> Template for (T0, T1) {
         self.0.defer(&mut state.0, item.0) && self.1.defer(&mut state.1, item.1)
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {
         unsafe {
-            self.0.resolve(&mut state.0, rows.clone(), table)
-                && self.1.resolve(&mut state.1, rows, table)
+            self.0.resolve(&mut state.0, rows.clone(), table);
+            self.1.resolve(&mut state.1, rows, table);
         }
     }
 }
@@ -125,9 +123,7 @@ impl Template for Key {
         true
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
-        true
-    }
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {}
 }
 
 impl Template for ColumnWith {
@@ -149,7 +145,7 @@ impl Template for ColumnWith {
         state.0.push(item).is_ok()
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {
         let count = rows.end - rows.start;
         debug_assert_eq!(count, state.0.len());
         let column = unsafe { table.columns().get_unchecked(state.1 as usize) };
@@ -175,17 +171,13 @@ impl<T: 'static> Template for Column<T> {
         true
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) {
         debug_assert_eq!(rows.len(), state.0.len());
         let count = rows.end - rows.start;
-        if let Some(source) = NonNull::new(state.0.as_mut_ptr()) {
-            let column = unsafe { table.columns().get_unchecked(state.1 as usize) };
-            debug_assert_eq!(column.meta().identifier(), TypeId::of::<T>());
-            if unsafe { column.copy(source, rows.start, count) } {
-                unsafe { state.0.set_len(0) };
-                return true;
-            }
-        }
-        false
+        let source = unsafe { NonNull::new_unchecked(state.0.as_mut_ptr()) };
+        let column = unsafe { table.columns().get_unchecked(state.1 as usize) };
+        debug_assert_eq!(column.meta().identifier(), TypeId::of::<T>());
+        unsafe { column.copy(source, rows.start, count) };
+        unsafe { state.0.set_len(0) };
     }
 }
