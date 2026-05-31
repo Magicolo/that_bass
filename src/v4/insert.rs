@@ -35,9 +35,8 @@ impl<T: Template> Insert<T> {
     pub fn resolve(&mut self) -> Result<(), Error> {
         let count = take(&mut self.count);
         if count > 0 {
-            self.table.reserve(count)?;
-            self.table.ensure()?;
-            unsafe { self.template.resolve(&mut self.state, &self.table) };
+            let rows = self.table.reserve(count)?;
+            unsafe { self.template.resolve(&mut self.state, rows, &self.table) };
             self.table.commit();
         }
         Ok(())

@@ -4,23 +4,31 @@ use core::ptr::NonNull;
 pub struct Vector {
     meta: Meta,
     data: NonNull<u8>,
-    count: u32,
-    capacity: u32,
+    len: u32,
+    cap: u32,
 }
 
 impl Vector {
-    pub(crate) const fn new(meta: Meta) -> Self {
+    pub const fn new(meta: Meta) -> Self {
         Vector {
             meta,
             data: NonNull::dangling(),
-            count: 0,
-            capacity: 0,
+            len: 0,
+            cap: 0,
         }
     }
 
-    pub(crate) fn push(&mut self, item: Box<dyn core::any::Any>) -> Result<(), Error> {
+    pub const fn len(&self) -> u32 {
+        self.len
+    }
+
+    pub const fn capacity(&self) -> u32 {
+        self.cap
+    }
+
+    pub fn push(&mut self, item: Box<dyn core::any::Any>) -> Result<(), Error> {
         if self.meta.identifier() == item.type_id() {
-            let index = self.count;
+            let index = self.len;
             self.reserve(1)?;
             unsafe { self.meta.set_at(self.data, item, index) };
             Ok(())
@@ -32,26 +40,24 @@ impl Vector {
     pub(crate) unsafe fn move_at(&mut self, data: NonNull<u8>, index: u32) -> bool {
         let source = self.data;
         let target = unsafe { self.meta.offset(data, index) };
-        let success = unsafe { self.meta.copy(source, target, self.count) };
-        self.count = 0;
+        let success = unsafe { self.meta.copy(source, target, self.len) };
+        self.len = 0;
         success
     }
 
     fn reserve(&mut self, count: u32) -> Result<(), Error> {
-        let old = self.count;
-        let new = self.count.checked_add(count).ok_or(Error::VectorOverflow)?;
-        self.count = new;
+        let old = self.len;
+        let new = self.len.checked_add(count).ok_or(Error::VectorOverflow)?;
+        self.len = new;
 
-        if self.count > self.capacity {
+        if self.len > self.cap {
             let capacity = self
-                .count
+                .len
                 .checked_next_power_of_two()
                 .ok_or(Error::VectorOverflow)?;
-            self.data = self
-                .meta
-                .resize(self.data, old, (self.capacity, capacity))?;
-            self.capacity = capacity;
-            debug_assert!(self.count <= self.capacity);
+            self.data = self.meta.resize(self.data, old, (self.cap, capacity))?;
+            self.cap = capacity;
+            debug_assert!(self.len <= self.cap);
         }
         Ok(())
     }
@@ -59,6 +65,6 @@ impl Vector {
 
 impl Drop for Vector {
     fn drop(&mut self) {
-        let _ = self.meta.resize(self.data, self.count, (self.capacity, 0));
+        let _ = self.meta.resize(self.data, self.len, (self.cap, 0));
     }
 }

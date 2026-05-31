@@ -12,10 +12,9 @@ use core::{
     ops::Range,
     ptr::{NonNull, copy_nonoverlapping, slice_from_raw_parts_mut},
     slice::{from_raw_parts, from_raw_parts_mut},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
-use parking_lot::{
-    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
-};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use triomphe::{Arc, ThinArc};
 
 #[derive(Debug, Clone)]
@@ -26,11 +25,10 @@ pub struct Tables(Arc<ArcSwapAny<ThinArc<(), Table>>>);
 
 #[derive(Debug)]
 struct Header {
-    pub(crate) index: u32,
-    pub(crate) count: u32,
-    pending: u32,
-    capacity: u32,
-    data: NonNull<u8>,
+    index: u32,
+    count: AtomicU32,
+    pending: AtomicU32,
+    capacity: AtomicU32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,13 +45,9 @@ pub struct Rows<'a> {
 
 #[derive(Debug)]
 pub struct Column {
-    pub(crate) meta: Meta,
-    pub(crate) data: RwLock<NonNull<u8>>,
+    meta: Meta,
+    data: RwLock<NonNull<u8>>,
 }
-
-// TODO: Is this correct?
-unsafe impl Send for Table {}
-unsafe impl Sync for Table {}
 
 // TODO: Is this correct?
 unsafe impl Send for Column {}
@@ -200,7 +194,7 @@ impl Column {
         unsafe { meta.drop(meta.offset(self.data(), row), count) }
     }
 
-    pub(crate) fn data(&self) -> NonNull<u8> {
+    pub(crate) unsafe fn data(&self) -> NonNull<u8> {
         unsafe { *self.data.data_ptr() }
     }
 }
@@ -264,10 +258,9 @@ impl Table {
         Self(ThinArc::from_header_and_iter(
             Header {
                 index,
-                count: 0,
-                pending: 0,
-                capacity: 0,
-                data: NonNull::dangling(),
+                count: AtomicU32::new(0),
+                pending: AtomicU32::new(0),
+                capacity: AtomicU32::new(0),
             },
             metas.iter().copied().map(Column::new),
         ))
@@ -292,49 +285,141 @@ impl Table {
     }
 
     pub fn count(&self) -> u32 {
-        self.header().count
+        self.header().count.load(Ordering::Acquire)
     }
 
     pub fn capacity(&self) -> u32 {
-        self.header().capacity
+        self.header().capacity.load(Ordering::Acquire)
+    }
+
+    fn pending(&self) -> u32 {
+        self.header().pending.load(Ordering::Acquire)
     }
 
     pub(crate) fn reserve(&self, count: u32) -> Result<Range<u32>, Error> {
-        let old = self.header().pending;
-        let new = self
-            .header()
+        let header = self.header();
+        let mut new = 0;
+        let old = header
             .pending
-            .checked_add(count)
-            .ok_or(Error::TableOverflow)?;
-        self.header().pending = new;
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+                new = pending.checked_add(count)?;
+                Some(new)
+            })
+            .map_err(|_| Error::TableOverflow)?;
+
+        let mut capacity = header.capacity.load(Ordering::Acquire);
+        // This loop is important because `self.resize` may lose the resizing race and
+        // another thread could've resized to a smaller capacity than `new`; in that
+        // case, we must resize again.
+        while new > capacity {
+            capacity = self.resize((capacity, new.checked_next_power_of_two().unwrap_or(new)))?;
+        }
         Ok(old..new)
     }
 
-    pub(crate) fn ensure(&self) -> Result<bool, Error> {
-        if self.header().pending > self.header().capacity {
-            let capacity = self
-                .header()
-                .pending
-                .checked_next_power_of_two()
-                .ok_or(Error::TableOverflow)?;
-            self.header().data = resize(
-                &self.0.slice,
-                self.header().data,
-                self.header().count,
-                (self.header().capacity, capacity),
-            )?;
-            self.header().capacity = capacity;
-            Ok(true)
-        } else {
-            Ok(false)
+    pub(crate) fn resize(&self, capacities: (u32, u32)) -> Result<u32, Error> {
+        struct Hit {
+            old: (NonNull<u8>, Layout),
+            new: NonNull<u8>,
+            count: u32,
+            capacity: u32,
+        }
+
+        struct Miss {
+            capacity: u32,
+        }
+
+        enum Next {
+            Hit(Hit),
+            Miss(Miss),
+        }
+
+        fn next(
+            header: &Header,
+            columns: &[Column],
+            layouts: (Layout, Layout),
+            capacities: (u32, u32),
+        ) -> Result<Next, Error> {
+            match columns.split_first() {
+                Some((head, tail)) if head.meta.size() == 0 => {
+                    next(header, tail, layouts, capacities)
+                }
+                Some((head, tail)) => {
+                    let old = head
+                        .meta
+                        .extend(layouts.0, capacities.0)
+                        .map_err(Error::Layout)?;
+                    let new = head
+                        .meta
+                        .extend(layouts.1, capacities.1)
+                        .map_err(Error::Layout)?;
+                    let mut data = head.data.write();
+                    match next(header, tail, (old.0, new.0), capacities)? {
+                        Next::Hit(hit) => {
+                            let source = *data;
+                            let target = unsafe { hit.new.add(new.1) };
+                            head.meta
+                                .initialize(source, target, hit.count, capacities.1);
+                            *data = target;
+                            Ok(Next::Hit(Hit {
+                                old: (unsafe { source.sub(old.1) }, hit.old.1),
+                                ..hit
+                            }))
+                        }
+                        Next::Miss(miss) => Ok(Next::Miss(miss)),
+                    }
+                }
+                None if layouts.1.size() == 0 => Ok(Next::Hit(Hit {
+                    old: (NonNull::dangling(), layouts.0.pad_to_align()),
+                    new: NonNull::dangling(),
+                    count: header.count.load(Ordering::Acquire),
+                    capacity: header.capacity.load(Ordering::Acquire),
+                })),
+                None => {
+                    match header.capacity.compare_exchange(
+                        capacities.0,
+                        capacities.1,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(capacity) if layouts.1.size() == 0 => Ok(Next::Hit(Hit {
+                            old: (NonNull::dangling(), layouts.0.pad_to_align()),
+                            new: NonNull::dangling(),
+                            count: header.count.load(Ordering::Acquire),
+                            capacity,
+                        })),
+                        Ok(capacity) => Ok(Next::Hit(Hit {
+                            old: (NonNull::dangling(), layouts.0.pad_to_align()),
+                            new: unsafe { allocate(layouts.1.pad_to_align())? },
+                            count: header.count.load(Ordering::Acquire),
+                            capacity,
+                        })),
+                        Err(capacity) => Ok(Next::Miss(Miss { capacity })),
+                    }
+                }
+            }
+        }
+
+        match next(
+            self.header(),
+            self.columns(),
+            (Layout::new::<()>(), Layout::new::<()>()),
+            capacities,
+        )? {
+            Next::Hit(hit) => {
+                unsafe { deallocate(hit.old.0, hit.old.1) };
+                Ok(hit.capacity)
+            }
+            Next::Miss(miss) => Ok(miss.capacity),
         }
     }
 
     pub(crate) fn commit(&self) -> Range<u32> {
-        debug_assert!(self.header().count <= self.header().pending);
-        let rows = self.header().count..self.header().pending;
-        self.header().count = self.header().pending;
-        rows
+        debug_assert!(self.count() <= self.pending());
+        let header = self.header();
+        let pending = header.pending.load(Ordering::Acquire);
+        let count = header.count.swap(pending, Ordering::AcqRel);
+        count..pending
     }
 
     pub(super) fn release(&self, rows: Range<u32>) {
@@ -343,10 +428,11 @@ impl Table {
         }
 
         let count = rows.end.saturating_sub(rows.start);
-        debug_assert!(rows.end <= self.header().pending);
+        debug_assert!(rows.end <= self.pending());
 
-        let copy = self.header().pending.saturating_sub(rows.end).min(count);
-        let copy = (self.header().pending - copy, copy);
+        let header = self.header();
+        let copy = header.pending.saturating_sub(rows.end).min(count);
+        let copy = (header.pending - copy, copy);
         for column in &self.0.slice {
             let data = column.data();
             unsafe { column.meta.drop_at(data, rows.start, count) };
@@ -356,12 +442,12 @@ impl Table {
                     .copy_at((data, copy.0), (data, rows.start), copy.1)
             };
         }
-        self.header().pending = self.header().pending.saturating_sub(count);
-        self.header().count = self
+        header.pending = header.pending.saturating_sub(count);
+        header.count = self
             .header()
             .count
             .saturating_sub(count)
-            .min(self.header().pending);
+            .min(header.pending);
     }
 
     fn header(&self) -> &Header {
@@ -379,62 +465,13 @@ impl Eq for Table {}
 
 impl Drop for Table {
     fn drop(&mut self) {
-        let header = self.header();
-        let _ = resize(
-            &self.columns(),
-            header.data,
-            header.count,
-            (header.capacity, 0),
-        );
+        if self.0.with_arc(Arc::is_unique) {
+            let _ = self.resize((self.capacity(), 0));
+        }
     }
 }
-pub(crate) fn resize(
-    columns: &[Column],
-    data: NonNull<u8>,
-    count: u32,
-    capacities: (u32, u32),
-) -> Result<NonNull<u8>, Error> {
-    fn next(
-        columns: &[Column],
-        layouts: (Layout, Layout),
-        count: u32,
-        capacities: (u32, u32),
-    ) -> Result<(Layout, NonNull<u8>), Error> {
-        Ok(match columns.split_first_mut() {
-            Some((head, tail)) => {
-                let old = head
-                    .meta
-                    .extend(layouts.0, capacities.0)
-                    .map_err(Error::Layout)?;
-                let new = head
-                    .meta
-                    .extend(layouts.1, capacities.1)
-                    .map_err(Error::Layout)?;
-                let pair = next(tail, (old.0, new.0), count, capacities)?;
-                let source = head.data();
-                let target = unsafe { pair.1.add(new.1) };
-                head.meta.initialize(source, target, count, capacities.1);
-                head.data = target;
-                pair
-            }
-            None if layouts.1.size() == 0 => (layouts.0.pad_to_align(), NonNull::dangling()),
-            None => (layouts.0.pad_to_align(), unsafe {
-                allocate(layouts.1.pad_to_align())
-            }?),
-        })
-    }
 
-    let (old, new) = next(
-        columns,
-        (Layout::new::<()>(), Layout::new::<()>()),
-        count,
-        capacities,
-    )?;
-    unsafe { deallocate(data, old) };
-    Ok(new)
-}
-
-pub(crate) fn sort<T: Ord>(items: impl IntoIterator<Item = T>) -> Option<Vec<T>> {
+fn sort<T: Ord>(items: impl IntoIterator<Item = T>) -> Option<Vec<T>> {
     let mut items = items.into_iter().collect::<Vec<_>>();
     items.sort_unstable();
     for [left, right] in items.array_windows::<2>() {

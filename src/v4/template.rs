@@ -3,6 +3,7 @@ use core::{
     any::{Any, TypeId},
     iter::{empty, once},
     marker::PhantomData,
+    ops::Range,
     ptr::NonNull,
 };
 
@@ -13,7 +14,7 @@ pub trait Template {
     fn declare(&self) -> impl Iterator<Item = Meta>;
     fn initialize(&self, table: &Table) -> Option<Self::State>;
     fn defer(&self, state: &mut Self::State, item: Self::Item) -> bool;
-    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool;
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool;
 }
 
 pub struct Key(pub(crate) ());
@@ -36,8 +37,8 @@ impl<T: Template> Template for &T {
         T::defer(self, state, item)
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
-        unsafe { T::resolve(self, state, table) }
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
+        unsafe { T::resolve(self, state, rows, table) }
     }
 }
 
@@ -57,8 +58,8 @@ impl<T: Template> Template for &mut T {
         T::defer(self, state, item)
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
-        unsafe { T::resolve(self, state, table) }
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
+        unsafe { T::resolve(self, state, rows, table) }
     }
 }
 
@@ -78,7 +79,7 @@ impl Template for () {
         true
     }
 
-    unsafe fn resolve(&self, _: &mut Self::State, _: &Table) -> bool {
+    unsafe fn resolve(&self, _: &mut Self::State, _: Range<u32>, _: &Table) -> bool {
         false
     }
 }
@@ -99,8 +100,11 @@ impl<T0: Template, T1: Template> Template for (T0, T1) {
         self.0.defer(&mut state.0, item.0) && self.1.defer(&mut state.1, item.1)
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
-        unsafe { self.0.resolve(&mut state.0, table) && self.1.resolve(&mut state.1, table) }
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
+        unsafe {
+            self.0.resolve(&mut state.0, rows.clone(), table)
+                && self.1.resolve(&mut state.1, rows, table)
+        }
     }
 }
 
@@ -121,7 +125,7 @@ impl Template for Key {
         true
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
         true
     }
 }
@@ -145,10 +149,11 @@ impl Template for ColumnWith {
         state.0.push(item).is_ok()
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
-        let count = table.count();
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
+        let count = rows.end - rows.start;
+        debug_assert_eq!(count, state.0.len());
         let column = unsafe { table.columns().get_unchecked(state.1 as usize) };
-        debug_assert_eq!(self.0.identifier(), column.meta.identifier());
+        debug_assert_eq!(self.0, column.meta());
         unsafe { state.0.move_at(column.data(), count) }
     }
 }
@@ -170,15 +175,15 @@ impl<T: 'static> Template for Column<T> {
         true
     }
 
-    unsafe fn resolve(&self, state: &mut Self::State, table: &Table) -> bool {
+    unsafe fn resolve(&self, state: &mut Self::State, rows: Range<u32>, table: &Table) -> bool {
+        debug_assert_eq!(rows.len(), state.0.len());
+        let count = rows.end - rows.start;
         if let Some(source) = NonNull::new(state.0.as_mut_ptr()) {
-            if let Ok(count) = state.0.len().try_into() {
-                let index = table.count();
-                let column = unsafe { table.columns().get_unchecked(state.1 as usize) };
-                if unsafe { column.copy(source, index, count) } {
-                    unsafe { state.0.set_len(0) };
-                    return true;
-                }
+            let column = unsafe { table.columns().get_unchecked(state.1 as usize) };
+            debug_assert_eq!(column.meta().identifier(), TypeId::of::<T>());
+            if unsafe { column.copy(source, rows.start, count) } {
+                unsafe { state.0.set_len(0) };
+                return true;
             }
         }
         false
