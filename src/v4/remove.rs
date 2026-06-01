@@ -1,6 +1,9 @@
-use crate::v4::{Error, Row, Store, module::Module, table::Tables, utility::ranges};
-use core::cmp::Reverse;
-use itertools::Itertools;
+use crate::v4::{
+    Error, Row, Store,
+    depend::{Access, Depend, Dependency, Resource},
+    table::Tables,
+};
+use core::{cmp::Reverse, iter::once};
 
 pub struct Build(());
 pub struct Remove {
@@ -35,15 +38,26 @@ impl Remove {
     }
 }
 
+unsafe impl Depend for Remove {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        once(Dependency {
+            access: Access::Read,
+            resource: Resource::Tables,
+        })
+    }
+}
+
 impl Build {
     pub const fn new() -> Self {
         Self(())
     }
 
-    pub fn build(self, store: &Store) -> Remove {
-        Remove {
+    pub fn build(self, store: &Store) -> Result<Remove, Error> {
+        let remove = Remove {
             rows: Vec::new(),
             tables: store.tables().clone(),
-        }
+        };
+        remove.analyze()?;
+        Ok(remove)
     }
 }

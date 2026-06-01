@@ -19,12 +19,10 @@ pub enum Access {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum Resource {
+    Store,
     Tables,
-    Table { identifier: u32 },
-    Columns { table: u32 },
-    Column { table: u32, index: u32 },
-    Table2,
-    Column2(TypeId),
+    Table,
+    Column(TypeId),
 }
 
 pub unsafe trait Depend {
@@ -61,12 +59,10 @@ unsafe impl<D0: Depend, D1: Depend> Depend for (D0, D1) {
 impl Resource {
     pub const fn parent(self) -> Option<Self> {
         match self {
-            Self::Tables { .. } => None,
-            Self::Table { .. } => Some(Self::Tables),
-            Self::Columns { table } => Some(Self::Table { identifier: table }),
-            Self::Column { table, .. } => Some(Self::Columns { table }),
-            Self::Table2 => None,
-            Self::Column2(_) => Some(Self::Table2),
+            Self::Store => None,
+            Self::Tables => Some(Self::Store),
+            Self::Table => Some(Self::Tables),
+            Self::Column(_) => Some(Self::Table),
         }
     }
 

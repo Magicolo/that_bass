@@ -71,12 +71,14 @@ impl<T: Template> Build<T> {
         let state = template
             .initialize(&table)
             .ok_or(Error::FailedToInitialize)?;
-        Ok(Insert {
+        let insert = Insert {
             template,
             items: Vec::new(),
             table,
             state,
-        })
+        };
+        insert.analyze()?;
+        Ok(insert)
     }
 }
 
@@ -84,7 +86,7 @@ unsafe impl<T: Template> Depend for Insert<T> {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         self.template.declare().map(|meta| Dependency {
             access: Access::Write,
-            resource: Resource::Column2(meta.identifier()),
+            resource: Resource::Column(meta.identifier()),
         })
     }
 }

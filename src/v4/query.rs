@@ -47,14 +47,15 @@ impl<I, F> Build<I, F> {
 
 impl<I: Item, F: Filter> Build<I, F> {
     pub fn build(self, store: &Store) -> Result<Query<I, F>, Error> {
-        self.0.analyze()?;
-        Ok(Query {
+        let query = Query {
             item: self.0,
             filter: self.1,
             count: 0,
             states: Vec::new(),
             tables: store.tables.clone(),
-        })
+        };
+        query.analyze()?;
+        Ok(query)
     }
 }
 

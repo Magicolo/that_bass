@@ -18,8 +18,6 @@ pub trait Item: Depend {
         Self: 'a;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State>;
-    // TODO: This is wrong. Columns must always be locked in the same order and this
-    // could cause deadlocks if (I0, I1) is locked concurrently to (I1, I0).
     fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
     where
         Self: 'a;
@@ -90,12 +88,12 @@ impl Item for () {
     }
 }
 
-impl<A0: Item, A1: Item> Item for (A0, A1) {
+impl<I0: Item, I1: Item> Item for (I0, I1) {
     type Guard<'a>
-        = (A0::Guard<'a>, A1::Guard<'a>)
+        = (I0::Guard<'a>, I1::Guard<'a>)
     where
         Self: 'a;
-    type State = (A0::State, A1::State);
+    type State = (I0::State, I1::State);
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
         Some((self.0.initialize(table)?, self.1.initialize(table)?))
@@ -166,7 +164,7 @@ unsafe impl Depend for Row {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         once(Dependency {
             access: Access::Read,
-            resource: Resource::Table2,
+            resource: Resource::Table,
         })
     }
 }
@@ -195,7 +193,7 @@ unsafe impl Depend for Table {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         once(Dependency {
             access: Access::Read,
-            resource: Resource::Table2,
+            resource: Resource::Table,
         })
     }
 }
@@ -223,7 +221,7 @@ unsafe impl<T: 'static> Depend for Read<T> {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         once(Dependency {
             access: Access::Read,
-            resource: Resource::Column2(TypeId::of::<T>()),
+            resource: Resource::Column(TypeId::of::<T>()),
         })
     }
 }
@@ -251,7 +249,7 @@ unsafe impl<T: 'static> Depend for Write<T> {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         once(Dependency {
             access: Access::Write,
-            resource: Resource::Column2(TypeId::of::<T>()),
+            resource: Resource::Column(TypeId::of::<T>()),
         })
     }
 }
@@ -279,7 +277,7 @@ unsafe impl Depend for ReadWith {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         once(Dependency {
             access: Access::Read,
-            resource: Resource::Column2(self.0.identifier()),
+            resource: Resource::Column(self.0.identifier()),
         })
     }
 }
@@ -309,7 +307,7 @@ unsafe impl Depend for WriteWith {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         once(Dependency {
             access: Access::Write,
-            resource: Resource::Column2(self.0.identifier()),
+            resource: Resource::Column(self.0.identifier()),
         })
     }
 }

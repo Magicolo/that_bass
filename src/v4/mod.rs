@@ -71,7 +71,7 @@ mod tests {
             .not::<String>()
             .build(&store)?;
         let mut insert = Insert::builder().key().column::<char>().build(&store)?;
-        let mut remove = Remove::builder().build(&store);
+        let mut remove = Remove::builder().build(&store)?;
         {
             let signal = AtomicU32::new(0);
             scope(|scope| {
