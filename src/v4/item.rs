@@ -162,62 +162,6 @@ impl Item for Key {
     }
 }
 
-unsafe impl<T: 'static> Depend for Read<T> {
-    fn depend(&self) -> impl Iterator<Item = Dependency> {
-        once(Dependency {
-            access: Access::Read,
-            resource: Resource::Column2(TypeId::of::<T>()),
-        })
-    }
-}
-
-impl<T: 'static> Item for Read<T> {
-    type Guard<'a>
-        = guard::Read<'a, T, Raw>
-    where
-        Self: 'a;
-    type State = u32;
-
-    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
-        table.column(TypeId::of::<T>())
-    }
-
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
-    where
-        Self: 'a,
-    {
-        unsafe { table.columns().get_unchecked(*state as usize).read() }
-    }
-}
-
-unsafe impl<T: 'static> Depend for Write<T> {
-    fn depend(&self) -> impl Iterator<Item = Dependency> {
-        once(Dependency {
-            access: Access::Write,
-            resource: Resource::Column2(TypeId::of::<T>()),
-        })
-    }
-}
-
-impl<T: 'static> Item for Write<T> {
-    type Guard<'a>
-        = guard::Write<'a, T, Raw>
-    where
-        Self: 'a;
-    type State = u32;
-
-    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
-        table.column(TypeId::of::<T>())
-    }
-
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
-    where
-        Self: 'a,
-    {
-        unsafe { table.columns().get_unchecked(*state as usize).write() }
-    }
-}
-
 unsafe impl Depend for Row {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         once(Dependency {
@@ -272,6 +216,62 @@ impl Item for Table {
         Self: 'a,
     {
         table
+    }
+}
+
+unsafe impl<T: 'static> Depend for Read<T> {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        once(Dependency {
+            access: Access::Read,
+            resource: Resource::Column2(TypeId::of::<T>()),
+        })
+    }
+}
+
+impl<T: 'static> Item for Read<T> {
+    type Guard<'a>
+        = guard::Read<'a, T, Raw>
+    where
+        Self: 'a;
+    type State = u32;
+
+    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
+        table.column(TypeId::of::<T>())
+    }
+
+    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    where
+        Self: 'a,
+    {
+        unsafe { table.columns().get_unchecked(*state as usize).read() }
+    }
+}
+
+unsafe impl<T: 'static> Depend for Write<T> {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        once(Dependency {
+            access: Access::Write,
+            resource: Resource::Column2(TypeId::of::<T>()),
+        })
+    }
+}
+
+impl<T: 'static> Item for Write<T> {
+    type Guard<'a>
+        = guard::Write<'a, T, Raw>
+    where
+        Self: 'a;
+    type State = u32;
+
+    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
+        table.column(TypeId::of::<T>())
+    }
+
+    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    where
+        Self: 'a,
+    {
+        unsafe { table.columns().get_unchecked(*state as usize).write() }
     }
 }
 
