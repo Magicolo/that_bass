@@ -25,9 +25,9 @@ impl<T: Template> Insert<T> {
         self.items.push(item.into_nest());
     }
 
-    pub fn resolve(&mut self) -> Result<Rows<'_>, Error> {
+    pub fn resolve(&mut self) -> Result<(), Error> {
         let count = self.items.len().try_into().map_err(Error::ItemsOverflow)?;
-        let rows = self.table.insert(count, |start| {
+        self.table.insert(count, |start| {
             for (index, item) in self.items.drain(..).enumerate() {
                 let index = start + index as u32;
                 unsafe {
@@ -36,8 +36,7 @@ impl<T: Template> Insert<T> {
                 }
             }
         })?;
-        debug_assert_eq!(count as usize, rows.len());
-        Ok(rows)
+        Ok(())
     }
 }
 

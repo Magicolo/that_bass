@@ -1,8 +1,8 @@
 use crate::v4::{
+    depend::Access,
     error::Error,
-    guard::{Bind, Raw, Read, Write},
     meta::Meta,
-    utility::{self, IteratorExtension, allocate, deallocate},
+    utility::{self, IteratorExtension, allocate, deallocate, defer},
 };
 use arc_swap::{ArcSwapAny, AsRaw};
 use core::{
@@ -11,9 +11,10 @@ use core::{
     iter::{FusedIterator, empty},
     ops::Range,
     ptr::{NonNull, copy_nonoverlapping, slice_from_raw_parts_mut},
+    slice::{from_raw_parts, from_raw_parts_mut},
     sync::atomic::{AtomicU32, Ordering},
 };
-use parking_lot::RwLock;
+use parking_lot::{RwLock, lock_api::RawRwLock};
 use triomphe::{Arc, ThinArc};
 
 #[derive(Debug, Clone)]
@@ -122,24 +123,38 @@ impl Column {
         self.meta
     }
 
-    pub(crate) unsafe fn read<T: 'static>(&self) -> Read<'_, T, Raw> {
-        debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
-        Read::new(self.data.read())
+    pub(crate) unsafe fn lock(&self, access: Access) -> bool {
+        if self.meta.size() == 0 {
+            false
+        } else {
+            match access {
+                Access::Read => unsafe { self.data.raw().lock_shared() },
+                Access::Write => unsafe { self.data.raw().lock_exclusive() },
+            }
+            true
+        }
     }
 
-    pub(crate) unsafe fn try_read<T: 'static>(&self) -> Option<Read<'_, T, Raw>> {
-        debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
-        Some(Read::new(self.data.try_read()?))
+    pub(crate) unsafe fn unlock(&self, access: Access) -> bool {
+        if self.meta.size() == 0 {
+            false
+        } else {
+            match access {
+                Access::Read => unsafe { self.data.raw().unlock_shared() },
+                Access::Write => unsafe { self.data.raw().unlock_exclusive() },
+            }
+            true
+        }
     }
 
-    pub(crate) unsafe fn write<T: 'static>(&self) -> Write<'_, T, Raw> {
+    pub(crate) unsafe fn get<T: 'static>(&self, count: u32) -> &[T] {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
-        Write::new(self.data.write())
+        unsafe { from_raw_parts(self.data().cast::<T>().as_ptr(), count as usize) }
     }
 
-    pub(crate) unsafe fn try_write<T: 'static>(&self) -> Option<Write<'_, T, Raw>> {
+    pub(crate) unsafe fn get_mut<T: 'static>(&self, count: u32) -> &mut [T] {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
-        Some(Write::new(self.data.try_write()?))
+        unsafe { from_raw_parts_mut(self.data().cast::<T>().as_ptr(), count as usize) }
     }
 
     pub(crate) unsafe fn set<T: 'static>(&self, item: T, row: u32) {
@@ -178,7 +193,7 @@ impl Column {
         unsafe { self.meta.drop_at(self.data(), row, count) }
     }
 
-    unsafe fn data(&self) -> NonNull<u8> {
+    pub(crate) unsafe fn data(&self) -> NonNull<u8> {
         unsafe { *self.data.data_ptr() }
     }
 }
@@ -216,14 +231,6 @@ impl<'a> Rows<'a> {
 
     pub fn table(&self) -> u32 {
         self.table.index()
-    }
-}
-
-impl<'a> Bind for Rows<'a> {
-    type Guard = Self;
-
-    fn bind(self, count: u32) -> Self::Guard {
-        Self::new(0..count, self.table)
     }
 }
 
@@ -287,200 +294,83 @@ impl Table {
         self.header().capacity.load(Ordering::Acquire)
     }
 
-    pub(crate) fn insert<F: FnOnce(u32)>(
-        &self,
-        count: u32,
-        mut apply: F,
-    ) -> Result<Rows<'_>, Error> {
-        enum Next<F> {
-            Done(Range<u32>),
-            Grow(u32, u32, F),
-        }
-
-        fn next<F: FnOnce(u32)>(
-            header: &Header,
-            columns: &[Column],
-            count: u32,
-            apply: F,
-        ) -> Result<Next<F>, Error> {
-            match columns.split_first() {
-                Some((head, tail)) if head.meta.size() == 0 => next(header, tail, count, apply),
-                Some((head, tail)) => {
-                    let data = head.data.read();
-                    let result = next(header, tail, count, apply);
-                    drop(data);
-                    result
-                }
-                None => {
-                    let start = header.count.load(Ordering::Acquire);
-                    let end = start.checked_add(count).ok_or(Error::TableOverflow)?;
-                    let capacity = header.capacity.load(Ordering::Acquire);
-                    if end <= capacity {
-                        let rows = start..end;
-                        apply(start);
-                        header.count.store(end, Ordering::Release);
-                        Ok(Next::Done(rows))
-                    } else {
-                        let next = end
-                            .checked_next_power_of_two()
-                            .ok_or(Error::TableOverflow)?;
-                        Ok(Next::Grow(capacity, next, apply))
-                    }
-                }
+    pub(crate) unsafe fn lock(&self, locks: impl Iterator<Item = (u32, Access)>) {
+        let columns = self.columns();
+        for (index, access) in locks {
+            if let Some(column) = columns.get(index as usize) {
+                unsafe { column.lock(access) };
             }
         }
-
-        let rows = if count == 0 {
-            0..0
-        } else {
-            let header = self.header();
-            let columns = self.columns();
-            loop {
-                apply = match next(header, columns, count, apply)? {
-                    Next::Grow(old, new, apply) => {
-                        self.resize((old, new))?;
-                        apply
-                    }
-                    Next::Done(rows) => break rows,
-                };
-            }
-        };
-        Ok(Rows::new(rows, self))
     }
 
-    // pub(crate) fn resize(&self, capacities: (u32, u32)) -> Result<u32, Error> {
-    //     struct Hit {
-    //         old: (NonNull<u8>, Layout),
-    //         new: NonNull<u8>,
-    //         count: u32,
-    //         capacity: u32,
-    //     }
+    pub(crate) unsafe fn lock_all(&self, access: Access) {
+        for column in self.columns() {
+            unsafe { column.lock(access) };
+        }
+    }
 
-    //     struct Miss {
-    //         capacity: u32,
-    //     }
+    pub(crate) unsafe fn unlock(&self, locks: impl Iterator<Item = (u32, Access)>) {
+        let columns = self.columns();
+        for (index, access) in locks {
+            if let Some(column) = columns.get(index as usize) {
+                unsafe { column.unlock(access) };
+            }
+        }
+    }
 
-    //     enum Next {
-    //         Hit(Hit),
-    //         Miss(Miss),
-    //     }
+    pub(crate) unsafe fn unlock_all(&self, access: Access) {
+        for column in self.columns() {
+            unsafe { column.unlock(access) };
+        }
+    }
 
-    //     fn next(
-    //         header: &Header,
-    //         columns: &[Column],
-    //         layouts: (Layout, Layout),
-    //         capacities: (u32, u32),
-    //     ) -> Result<Next, Error> {
-    //         match columns.split_first() {
-    //             Some((head, tail)) => {
-    //                 let old = head
-    //                     .meta
-    //                     .extend(layouts.0, capacities.0)
-    //                     .map_err(Error::Layout)?;
-    //                 let new = head
-    //                     .meta
-    //                     .extend(layouts.1, capacities.1)
-    //                     .map_err(Error::Layout)?;
-    //                 let mut data = head.data.write();
-    //                 match next(header, tail, (old.0, new.0), capacities)? {
-    //                     Next::Hit(hit) => {
-    //                         let source = *data;
-    //                         let target = unsafe { hit.new.add(new.1) };
-    //                         unsafe {
-    //                             head.meta
-    //                                 .initialize(source, target, hit.count,
-    // capacities.1)                         };
-    //                         *data = target;
-    //                         Ok(Next::Hit(Hit {
-    //                             old: (unsafe { source.sub(old.1) }, hit.old.1),
-    //                             ..hit
-    //                         }))
-    //                     }
-    //                     Next::Miss(miss) => Ok(Next::Miss(miss)),
-    //                 }
-    //             }
-    //             None if layouts.1.size() == 0 => Ok(Next::Hit(Hit {
-    //                 old: (NonNull::dangling(), layouts.0.pad_to_align()),
-    //                 new: NonNull::dangling(),
-    //                 count: header.count.load(Ordering::Acquire),
-    //                 capacity: header.capacity.load(Ordering::Acquire),
-    //             })),
-    //             None => {
-    //                 match header.capacity.compare_exchange(
-    //                     capacities.0,
-    //                     capacities.1,
-    //                     Ordering::AcqRel,
-    //                     Ordering::Acquire,
-    //                 ) {
-    //                     Ok(capacity) if layouts.1.size() == 0 => Ok(Next::Hit(Hit
-    // {                         old: (NonNull::dangling(),
-    // layouts.0.pad_to_align()),                         new:
-    // NonNull::dangling(),                         count:
-    // header.count.load(Ordering::Acquire),                         capacity,
-    //                     })),
-    //                     Ok(capacity) => Ok(Next::Hit(Hit {
-    //                         old: (NonNull::dangling(), layouts.0.pad_to_align()),
-    //                         new: unsafe { allocate(layouts.1.pad_to_align())? },
-    //                         count: header.count.load(Ordering::Acquire),
-    //                         capacity,
-    //                     })),
-    //                     Err(capacity) => Ok(Next::Miss(Miss { capacity })),
-    //                 }
-    //             }
-    //         }
-    //     }
+    pub(crate) fn insert<F: FnOnce(u32)>(&self, count: u32, apply: F) -> Result<Range<u32>, Error> {
+        if count == 0 {
+            return Ok(0..0);
+        }
 
-    //     match next(
-    //         self.header(),
-    //         self.columns(),
-    //         (Layout::new::<()>(), Layout::new::<()>()),
-    //         capacities,
-    //     )? {
-    //         Next::Hit(hit) => {
-    //             unsafe { deallocate(hit.old.0, hit.old.1) };
-    //             Ok(hit.capacity)
-    //         }
-    //         Next::Miss(miss) => Ok(miss.capacity),
-    //     }
-    // }
+        loop {
+            unsafe { self.lock_all(Access::Read) };
+            let guard = defer(|| unsafe { self.unlock_all(Access::Read) });
+            let header = self.header();
+            let start = header.count.load(Ordering::Acquire);
+            let end = start.checked_add(count).ok_or(Error::TableOverflow)?;
+            let capacity = header.capacity.load(Ordering::Acquire);
+            if end <= capacity {
+                let rows = start..end;
+                apply(start);
+                header.count.store(end, Ordering::Release);
+                drop(guard);
+                break Ok(rows);
+            } else {
+                drop(guard);
+                let next = end
+                    .checked_next_power_of_two()
+                    .ok_or(Error::TableOverflow)?;
+                self.resize((capacity, next))?;
+            }
+        }
+    }
 
     pub(crate) fn remove(&self, rows: impl Iterator<Item = u32>) -> Result<(), Error> {
-        fn next(
-            header: &Header,
-            columns: (&[Column], &[Column]),
-            rows: impl Iterator<Item = u32>,
-        ) -> Result<(), Error> {
-            match columns.0.split_first() {
-                Some((head, tail)) if head.meta.size() == 0 => {
-                    next(header, (tail, columns.1), rows)
-                }
-                Some((head, tail)) => {
-                    let data = head.data.write();
-                    let result = next(header, (tail, columns.1), rows);
-                    drop(data);
-                    result
-                }
-                None => {
-                    let mut count = header.count.load(Ordering::Acquire);
-                    for row in rows {
-                        debug_assert!(row < count);
-                        count = count.checked_sub(1).ok_or(Error::TableUnderflow)?;
-                        for column in columns.1 {
-                            unsafe { column.drop_at(row, 1) };
-                            if row < count {
-                                unsafe { column.copy_at(count, row, 1) };
-                            }
-                        }
-                    }
-                    header.count.store(count, Ordering::Release);
-                    Ok(())
+        unsafe { self.lock_all(Access::Write) };
+        let guard = defer(|| unsafe { self.unlock_all(Access::Write) });
+        let header = self.header();
+        let columns = self.columns();
+        let mut count = header.count.load(Ordering::Acquire);
+        for row in rows {
+            debug_assert!(row < count);
+            count = count.checked_sub(1).ok_or(Error::TableUnderflow)?;
+            for column in columns {
+                unsafe { column.drop_at(row, 1) };
+                if row < count {
+                    unsafe { column.copy_at(count, row, 1) };
                 }
             }
         }
-
-        let header = self.header();
-        let columns = self.columns();
-        next(header, (columns, columns), rows)
+        header.count.store(count, Ordering::Release);
+        drop(guard);
+        Ok(())
     }
 
     fn resize(&self, mut capacities: (u32, u32)) -> Result<u32, Error> {
@@ -588,14 +478,6 @@ impl Drop for Table {
         if self.0.with_arc(Arc::is_unique) {
             let _ = self.resize((self.capacity(), 0));
         }
-    }
-}
-
-impl Bind for &Table {
-    type Guard = Self;
-
-    fn bind(self, _: u32) -> Self::Guard {
-        self
     }
 }
 

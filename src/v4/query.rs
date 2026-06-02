@@ -2,15 +2,21 @@ use crate::v4::{
     Error, Meta, Store,
     depend::{Depend, Dependency},
     filter::{Filter, Has, HasWith, Not},
-    guard::Bind,
     item::{self, Item, Read, ReadWith, Try, Write, WriteWith},
     table,
     utility::{IntoFlat, Push},
 };
 use core::{marker::PhantomData, slice};
 
-pub struct Columns<'a, I: Item> {
-    query: &'a I,
+pub struct Table<'a, I: Item> {
+    item: &'a I,
+    state: &'a mut I::State,
+    table: &'a table::Table,
+    count: u32,
+}
+
+pub struct Tables<'a, I: Item> {
+    item: &'a I,
     states: slice::IterMut<'a, (table::Table, I::State)>,
 }
 
@@ -66,6 +72,14 @@ impl Query<(), ()> {
 }
 
 impl<I: Item, F: Filter> Query<I, F> {
+    pub fn tables(&mut self) -> Tables<'_, I> {
+        self.update();
+        Tables {
+            item: &self.item,
+            states: self.states.iter_mut(),
+        }
+    }
+
     fn update(&mut self) {
         while let Some(table) = self.tables.get(self.count) {
             self.count += 1;
@@ -84,31 +98,58 @@ unsafe impl<I: Item, F: Filter> Depend for Query<I, F> {
     }
 }
 
-impl<'a, I: Item<Guard<'a>: Bind<Guard: IntoFlat>>, F: Filter> IntoIterator
-    for &'a mut Query<I, F>
-{
-    type IntoIter = Columns<'a, I>;
-    type Item = <<I::Guard<'a> as Bind>::Guard as IntoFlat>::Flat;
+impl<'a, I: Item, F: Filter> IntoIterator for &'a mut Query<I, F> {
+    type IntoIter = Tables<'a, I>;
+    type Item = <Self::IntoIter as Iterator>::Item;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.update();
-        Columns {
-            query: &self.item,
-            states: self.states.iter_mut(),
-        }
+        self.tables()
     }
 }
 
-impl<'a, I: Item<Guard<'a>: Bind<Guard: IntoFlat>>> Iterator for Columns<'a, I> {
-    type Item = <<I::Guard<'a> as Bind>::Guard as IntoFlat>::Flat;
+impl<'a, I: Item> Iterator for Tables<'a, I> {
+    type Item = Table<'a, I>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
-        // TODO: This is wrong because it can cause deadlocks. Locks must always be
-        // taken in the same order -- even between queries.
-        let guard = self.query.guard(state, table);
-        let guard = guard.bind(table.count());
-        Some(guard.into_flat())
+        unsafe { table.lock(self.item.declare(state).map(|column| (column.0, column.1))) };
+        // Read the count under the lock.
+        let count = table.count();
+        Some(Table {
+            count,
+            item: self.item,
+            state,
+            table,
+        })
+    }
+}
+
+impl<I: Item> Table<'_, I> {
+    pub fn table(&self) -> &table::Table {
+        &self.table
+    }
+
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    pub fn columns<'a>(&'a mut self) -> <I::Item<'a> as IntoFlat>::Flat
+    where
+        I::Item<'a>: IntoFlat,
+    {
+        unsafe { self.item.get(&mut self.state, self.count, self.table) }.into_flat()
+    }
+}
+
+impl<'a, I: Item> Drop for Table<'a, I> {
+    fn drop(&mut self) {
+        unsafe {
+            self.table.unlock(
+                self.item
+                    .declare(self.state)
+                    .map(|column| (column.0, column.1)),
+            )
+        };
     }
 }
 

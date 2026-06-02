@@ -1,7 +1,6 @@
 use crate::v4::{
     Meta, Rows,
     depend::{Access, Depend, Dependency, Resource},
-    guard::{self, Bind, Raw},
     slice::Slice,
     table,
 };
@@ -10,15 +9,22 @@ use core::{
     iter::{empty, once},
     marker::PhantomData,
 };
+use itertools::Itertools;
 
 pub trait Item: Depend {
     type State;
-    type Guard<'a>: Bind
+    type Item<'a>
     where
         Self: 'a;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State>;
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)>;
+    unsafe fn get<'a>(
+        &'a self,
+        state: &'a mut Self::State,
+        count: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a;
 }
@@ -33,8 +39,8 @@ pub struct ReadWith(pub(crate) Meta);
 pub struct WriteWith(pub(crate) Meta);
 
 impl<I: Item> Item for &I {
-    type Guard<'a>
-        = I::Guard<'a>
+    type Item<'a>
+        = I::Item<'a>
     where
         Self: 'a;
     type State = I::State;
@@ -43,17 +49,26 @@ impl<I: Item> Item for &I {
         I::initialize(self, table)
     }
 
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        I::declare(self, state)
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        state: &'a mut Self::State,
+        count: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        I::guard(self, state, table)
+        I::get(self, state, count, table)
     }
 }
 
 impl<I: Item> Item for &mut I {
-    type Guard<'a>
-        = I::Guard<'a>
+    type Item<'a>
+        = I::Item<'a>
     where
         Self: 'a;
     type State = I::State;
@@ -62,16 +77,25 @@ impl<I: Item> Item for &mut I {
         I::initialize(self, table)
     }
 
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        I::declare(self, state)
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        state: &'a mut Self::State,
+        count: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        I::guard(self, state, table)
+        I::get(self, state, count, table)
     }
 }
 
 impl Item for () {
-    type Guard<'a>
+    type Item<'a>
         = ()
     where
         Self: 'a;
@@ -81,7 +105,11 @@ impl Item for () {
         Some(())
     }
 
-    fn guard<'a>(&self, _: &'a mut Self::State, _: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, _: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        empty()
+    }
+
+    unsafe fn get<'a>(&self, _: &'a mut Self::State, _: u32, _: &'a table::Table) -> Self::Item<'a>
     where
         Self: 'a,
     {
@@ -89,8 +117,8 @@ impl Item for () {
 }
 
 impl<I0: Item, I1: Item> Item for (I0, I1) {
-    type Guard<'a>
-        = (I0::Guard<'a>, I1::Guard<'a>)
+    type Item<'a>
+        = (I0::Item<'a>, I1::Item<'a>)
     where
         Self: 'a;
     type State = (I0::State, I1::State);
@@ -99,13 +127,22 @@ impl<I0: Item, I1: Item> Item for (I0, I1) {
         Some((self.0.initialize(table)?, self.1.initialize(table)?))
     }
 
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        self.0.declare(&state.0).merge(self.1.declare(&state.1))
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        state: &'a mut Self::State,
+        count: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
         (
-            self.0.guard(&mut state.0, table),
-            self.1.guard(&mut state.1, table),
+            self.0.get(&mut state.0, count, table),
+            self.1.get(&mut state.1, count, table),
         )
     }
 }
@@ -117,8 +154,8 @@ unsafe impl<I: Item> Depend for Try<I> {
 }
 
 impl<I: Item> Item for Try<I> {
-    type Guard<'a>
-        = Option<I::Guard<'a>>
+    type Item<'a>
+        = Option<I::Item<'a>>
     where
         Self: 'a;
     type State = Option<I::State>;
@@ -127,11 +164,23 @@ impl<I: Item> Item for Try<I> {
         Some(self.0.initialize(table))
     }
 
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        state
+            .as_ref()
+            .into_iter()
+            .flat_map(|state| self.0.declare(state))
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        state: &'a mut Self::State,
+        count: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        Some(self.0.guard(state.as_mut()?, table))
+        Some(self.0.get(state.as_mut()?, count, table))
     }
 }
 
@@ -143,7 +192,7 @@ unsafe impl Depend for Key {
 
 // TODO: Implement
 impl Item for Key {
-    type Guard<'a>
+    type Item<'a>
         = ()
     where
         Self: 'a;
@@ -153,7 +202,16 @@ impl Item for Key {
         None
     }
 
-    fn guard<'a>(&'a self, _: &'a mut Self::State, _: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, _: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        empty()
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        _: &'a mut Self::State,
+        _: u32,
+        _: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
@@ -171,7 +229,7 @@ unsafe impl Depend for Row {
 
 // TODO: Implement
 impl Item for Row {
-    type Guard<'a>
+    type Item<'a>
         = Rows<'a>
     where
         Self: 'a;
@@ -181,7 +239,16 @@ impl Item for Row {
         Some(())
     }
 
-    fn guard<'a>(&'a self, _: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, _: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        empty()
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        _: &'a mut Self::State,
+        _: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
@@ -199,7 +266,7 @@ unsafe impl Depend for Table {
 }
 
 impl Item for Table {
-    type Guard<'a>
+    type Item<'a>
         = &'a table::Table
     where
         Self: 'a;
@@ -209,7 +276,16 @@ impl Item for Table {
         Some(())
     }
 
-    fn guard<'a>(&'a self, _: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, _: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        empty()
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        _: &'a mut Self::State,
+        _: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
@@ -227,8 +303,8 @@ unsafe impl<T: 'static> Depend for Read<T> {
 }
 
 impl<T: 'static> Item for Read<T> {
-    type Guard<'a>
-        = guard::Read<'a, T, Raw>
+    type Item<'a>
+        = &'a [T]
     where
         Self: 'a;
     type State = u32;
@@ -237,11 +313,20 @@ impl<T: 'static> Item for Read<T> {
         table.column(TypeId::of::<T>())
     }
 
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        once((*state, Access::Read))
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        state: &'a mut Self::State,
+        count: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        unsafe { table.columns().get_unchecked(*state as usize).read() }
+        unsafe { table.columns().get_unchecked(*state as usize).get(count) }
     }
 }
 
@@ -255,8 +340,8 @@ unsafe impl<T: 'static> Depend for Write<T> {
 }
 
 impl<T: 'static> Item for Write<T> {
-    type Guard<'a>
-        = guard::Write<'a, T, Raw>
+    type Item<'a>
+        = &'a mut [T]
     where
         Self: 'a;
     type State = u32;
@@ -265,11 +350,25 @@ impl<T: 'static> Item for Write<T> {
         table.column(TypeId::of::<T>())
     }
 
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        once((*state, Access::Write))
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        state: &'a mut Self::State,
+        count: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        unsafe { table.columns().get_unchecked(*state as usize).write() }
+        unsafe {
+            table
+                .columns()
+                .get_unchecked(*state as usize)
+                .get_mut(count)
+        }
     }
 }
 
@@ -283,7 +382,7 @@ unsafe impl Depend for ReadWith {
 }
 
 impl Item for ReadWith {
-    type Guard<'a>
+    type Item<'a>
         = &'a Slice
     where
         Self: 'a;
@@ -293,7 +392,16 @@ impl Item for ReadWith {
         Some((table.column(self.0.identifier())?, Slice::empty(self.0)))
     }
 
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        once((state.0, Access::Read))
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        state: &'a mut Self::State,
+        count: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
@@ -313,7 +421,7 @@ unsafe impl Depend for WriteWith {
 }
 
 impl Item for WriteWith {
-    type Guard<'a>
+    type Item<'a>
         = &'a mut Slice
     where
         Self: 'a;
@@ -323,7 +431,16 @@ impl Item for WriteWith {
         Some((table.column(self.0.identifier())?, Slice::empty(self.0)))
     }
 
-    fn guard<'a>(&'a self, state: &'a mut Self::State, table: &'a table::Table) -> Self::Guard<'a>
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+        once((state.0, Access::Write))
+    }
+
+    unsafe fn get<'a>(
+        &'a self,
+        state: &'a mut Self::State,
+        count: u32,
+        table: &'a table::Table,
+    ) -> Self::Item<'a>
     where
         Self: 'a,
     {
