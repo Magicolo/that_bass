@@ -375,7 +375,7 @@ impl Table {
         Ok(())
     }
 
-    fn grow(&self, mut capacities: (u32, u32)) -> Result<u32, Error> {
+    fn grow(&self, mut capacities: (u32, u32)) -> Result<(), Error> {
         let header = self.header();
         let columns = self.columns();
         let mut new_layout = Layout::new::<()>();
@@ -392,7 +392,10 @@ impl Table {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => unsafe { allocate(new_layout.pad_to_align())? },
+                Ok(capacity) => {
+                    capacities.0 = capacity;
+                    unsafe { allocate(new_layout.pad_to_align())? }
+                }
                 Err(capacity) => {
                     capacities.0 = capacity;
                     continue;
@@ -415,8 +418,9 @@ impl Table {
             }
             drop(guard);
             unsafe { deallocate(old_data, old_layout.pad_to_align()) };
+            break;
         }
-        Ok(capacities.0)
+        Ok(())
     }
 
     fn header(&self) -> &Header {
@@ -439,16 +443,16 @@ impl Drop for Table {
                 let header = table.header_mut();
                 let count = *header.count.get_mut();
                 let capacity = *header.capacity.get_mut();
-                let mut root = NonNull::dangling();
-                let mut layout = Layout::new::<()>();
+                let mut old_data = NonNull::dangling();
+                let mut old_layout = Layout::new::<()>();
                 for column in table.slice_mut() {
-                    let pair = column.meta.extend(layout, capacity)?;
+                    let pair = column.meta.extend(old_layout, capacity)?;
                     let data = *column.data.get_mut();
                     unsafe { column.meta.drop(data, count) };
-                    root = unsafe { data.sub(pair.1) };
-                    layout = pair.0;
+                    old_data = unsafe { data.sub(pair.1) };
+                    old_layout = pair.0;
                 }
-                unsafe { deallocate(root, layout) };
+                unsafe { deallocate(old_data, old_layout.pad_to_align()) };
                 Ok::<_, Error>(true)
             } else {
                 Ok::<_, Error>(false)
