@@ -456,67 +456,6 @@ impl Table {
         Ok(capacities.0)
     }
 
-    fn resize_mut(
-        columns: &mut [Column],
-        count: u32,
-        capacities: (u32, u32),
-    ) -> Result<bool, Error> {
-        struct Next {
-            old: (NonNull<u8>, Layout),
-            new: NonNull<u8>,
-        }
-
-        fn next(
-            columns: &mut [Column],
-            layouts: (Layout, Layout),
-            count: u32,
-            capacities: (u32, u32),
-        ) -> Result<Next, Error> {
-            match columns.split_first_mut() {
-                Some((head, tail)) => {
-                    let old = head
-                        .meta
-                        .extend(layouts.0, capacities.0)
-                        .map_err(Error::Layout)?;
-                    let new = head
-                        .meta
-                        .extend(layouts.1, capacities.1)
-                        .map_err(Error::Layout)?;
-                    let Next {
-                        old: done_old,
-                        new: done_new,
-                    } = next(tail, (old.0, new.0), count, capacities)?;
-                    let data = head.data.get_mut();
-                    let source = *data;
-                    let target = unsafe { done_new.add(new.1) };
-                    unsafe { head.meta.initialize(source, target, count, capacities.1) };
-                    *data = target;
-                    Ok(Next {
-                        old: (unsafe { source.sub(old.1) }, done_old.1),
-                        new: done_new,
-                    })
-                }
-                None => Ok(Next {
-                    old: (NonNull::dangling(), layouts.0.pad_to_align()),
-                    new: unsafe { allocate(layouts.1.pad_to_align())? },
-                }),
-            }
-        }
-
-        if capacities.0 == capacities.1 {
-            Ok(false)
-        } else {
-            let Next { old, .. } = next(
-                columns,
-                (Layout::new::<()>(), Layout::new::<()>()),
-                count,
-                capacities,
-            )?;
-            unsafe { deallocate(old.0, old.1) };
-            Ok(true)
-        }
-    }
-
     fn header(&self) -> &Header {
         &self.0.header.header
     }
@@ -532,14 +471,31 @@ impl Eq for Table {}
 
 impl Drop for Table {
     fn drop(&mut self) {
+        fn next(columns: &mut [Column], count: u32, capacity: u32) -> Result<(), Error> {
+            let mut root = NonNull::dangling();
+            let mut layout = Layout::new::<()>();
+            for column in columns {
+                let pair = column
+                    .meta
+                    .extend(layout, capacity)
+                    .map_err(Error::Layout)?;
+                let data = *column.data.get_mut();
+                unsafe { column.meta.drop(data, count) };
+                root = unsafe { data.sub(pair.1) };
+                layout = pair.0;
+            }
+            unsafe { deallocate(root, layout) };
+            Ok(())
+        }
+
         self.0.with_arc_mut(|table| {
             if let Some(table) = Arc::get_mut(table) {
                 let header = table.header_mut();
                 let count = *header.count.get_mut();
                 let capacity = *header.capacity.get_mut();
-                if let Ok(true) = Self::resize_mut(table.slice_mut(), count, (capacity, 0)) {
-                    *table.header_mut().capacity.get_mut() = 0;
-                }
+                next(table.slice_mut(), count, capacity).is_ok()
+            } else {
+                false
             }
         });
     }

@@ -139,7 +139,9 @@ impl Meta {
     }
 
     pub(crate) unsafe fn drop(self, data: NonNull<u8>, count: u32) -> bool {
-        if let Some(drop) = self.0.drop {
+        if count > 0
+            && let Some(drop) = self.0.drop
+        {
             unsafe { drop(data, count) };
             true
         } else {
