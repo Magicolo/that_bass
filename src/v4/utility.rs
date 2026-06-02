@@ -1,11 +1,5 @@
-use crate::v4::{Meta, error::Error, table::Column};
-use core::{
-    alloc::Layout,
-    iter::{FusedIterator, from_fn},
-    mem::{replace, take},
-    ops::Range,
-    ptr::NonNull,
-};
+use crate::v4::error::Error;
+use core::{alloc::Layout, iter::FusedIterator, ptr::NonNull};
 use std::alloc::{alloc, dealloc};
 
 pub trait IntoNest {
@@ -109,42 +103,6 @@ pub(crate) unsafe fn deallocate(data: NonNull<u8>, layout: Layout) -> bool {
     }
 }
 
-/// The `pairs` iterator must be sorted by `pair.0` (ascending or
-/// descending), then by `pair.1` descending.
-pub(crate) fn ranges(
-    pairs: impl IntoIterator<Item = (u32, u32)>,
-) -> impl Iterator<Item = (u32, Range<u32>)> {
-    let mut table = u32::MAX;
-    let mut start = u32::MAX;
-    let mut count = 0u32;
-    let mut iterator = pairs.into_iter();
-    from_fn(move || {
-        loop {
-            match iterator.next() {
-                Some(pair) if pair.0 == table => match start - pair.1 {
-                    0 => continue,
-                    1 => (start, count) = (pair.1, count + 1),
-                    _ if count > 0 => {
-                        let range = start..start + replace(&mut count, 1);
-                        start = pair.1;
-                        break Some((table, range));
-                    }
-                    _ => (start, count) = (pair.1, 1),
-                },
-                Some(pair) if count > 0 => {
-                    let rows = start..start + replace(&mut count, 1);
-                    let table = replace(&mut table, pair.0);
-                    start = pair.1;
-                    break Some((table, rows));
-                }
-                Some(pair) => (table, start, count) = (pair.0, pair.1, 1),
-                None if count > 0 => break Some((table, start..start + take(&mut count))),
-                None => break None,
-            }
-        }
-    })
-}
-
 pub(crate) fn find<T, K: Ord, F: FnMut(&T) -> K>(slice: &[T], key: K, mut map: F) -> Option<usize> {
     if slice.len() < 32 {
         slice.iter().position(|item| map(item) == key)
@@ -199,6 +157,28 @@ macro_rules! tuple {
     };
     (@recurse [$($flat: ident),*] [$nest: tt]) => {
         tuple!(@implement [$($flat),*] [$nest]);
+
+        #[allow(non_snake_case)]
+        #[automatically_derived]
+        impl<T: IntoNest, $($flat,)*> IntoNest for (T, $($flat,)*) {
+            type Nest = (T::Nest, $nest);
+
+            fn into_nest(self) -> Self::Nest {
+                let (T, $($flat,)*) = self;
+                (T.into_nest(), $nest)
+            }
+        }
+
+        #[allow(non_snake_case)]
+        #[automatically_derived]
+        impl<T: IntoFlat, $($flat,)*> IntoFlat for (T, $nest) {
+            type Flat = (T::Flat, $($flat,)*);
+
+            fn into_flat(self) -> Self::Flat {
+                let (T, $nest) = self;
+                (T.into_flat(), $($flat,)*)
+            }
+        }
     };
     (@recurse $name: ident $(, $names: ident)* [$($flat: ident),*] [$nest: tt]) => {
         tuple!(@recurse $($names),* [$name $(, $flat)*] [($name, $nest)]);
