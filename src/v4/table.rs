@@ -2,6 +2,7 @@ use crate::v4::{
     depend::Access,
     error::Error,
     meta::Meta,
+    slice::Slice,
     utility::{self, IteratorExtension, allocate, deallocate, defer},
 };
 use arc_swap::{ArcSwapAny, AsRaw};
@@ -167,6 +168,11 @@ impl Column {
         unsafe { from_raw_parts_mut(self.data().cast::<T>().as_ptr(), count as usize) }
     }
 
+    pub(crate) unsafe fn get_in(&self, slice: &mut Slice, count: u32) {
+        debug_assert_eq!(self.meta, slice.meta());
+        unsafe { slice.set_parts(self.data(), count as _) };
+    }
+
     pub(crate) unsafe fn set<T: 'static>(&self, item: T, row: u32) {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
         unsafe { self.data().cast::<T>().add(row as usize).write(item) };
@@ -175,23 +181,6 @@ impl Column {
     pub(crate) unsafe fn set_at(&self, item: Box<dyn Any>, row: u32) {
         debug_assert_eq!(self.meta.identifier(), item.type_id());
         unsafe { self.meta.set_at(self.data(), item, row) };
-    }
-
-    pub(crate) unsafe fn copy<T: 'static>(&self, source: NonNull<T>, row: u32, count: u32) -> bool {
-        debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
-        if size_of::<T>() > 0 && count > 0 {
-            let target = unsafe { self.data().cast::<T>().add(row as usize) };
-            unsafe { copy_nonoverlapping(source.as_ptr(), target.as_ptr(), count as usize) };
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) unsafe fn drop<T: 'static>(&self, row: u32, count: u32) {
-        debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
-        let data = unsafe { self.data().cast::<T>().add(row as usize) };
-        unsafe { slice_from_raw_parts_mut(data.as_ptr(), count as usize).drop_in_place() };
     }
 
     pub(crate) unsafe fn copy_at(&self, source: u32, target: u32, count: u32) -> bool {
@@ -203,7 +192,7 @@ impl Column {
         unsafe { self.meta.drop_at(self.data(), row, count) }
     }
 
-    pub(crate) unsafe fn data(&self) -> NonNull<u8> {
+    unsafe fn data(&self) -> NonNull<u8> {
         unsafe { *self.data.data_ptr() }
     }
 }

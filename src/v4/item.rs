@@ -431,8 +431,12 @@ impl Item for ReadWith {
     where
         Self: 'a,
     {
-        let column = unsafe { table.columns().get_unchecked(state.0 as usize) };
-        unsafe { state.1.set_parts(column.data().cast(), count as _) };
+        unsafe {
+            table
+                .columns()
+                .get_unchecked(state.0 as usize)
+                .get_in(&mut state.1, count)
+        };
         &state.1
     }
 }
@@ -470,8 +474,12 @@ impl Item for WriteWith {
     where
         Self: 'a,
     {
-        let column = unsafe { table.columns().get_unchecked(state.0 as usize) };
-        unsafe { state.1.set_parts(column.data().cast(), count as _) };
+        unsafe {
+            table
+                .columns()
+                .get_unchecked(state.0 as usize)
+                .get_in(&mut state.1, count)
+        };
         &mut state.1
     }
 }

@@ -116,9 +116,12 @@ impl Template for ColumnWith {
     }
 
     unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
-        let column = unsafe { table.columns().get_unchecked(*state as usize) };
-        debug_assert_eq!(self.0, column.meta());
-        unsafe { column.set(item, index) }
+        unsafe {
+            table
+                .columns()
+                .get_unchecked(*state as usize)
+                .set_at(item, index)
+        };
     }
 }
 
@@ -135,8 +138,11 @@ impl<T: 'static> Template for Column<T> {
     }
 
     unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
-        let column = unsafe { table.columns().get_unchecked(*state as usize) };
-        debug_assert_eq!(column.meta().identifier(), TypeId::of::<T>());
-        unsafe { column.set(item, index) };
+        unsafe {
+            table
+                .columns()
+                .get_unchecked(*state as usize)
+                .set(item, index)
+        };
     }
 }

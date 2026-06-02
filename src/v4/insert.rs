@@ -7,6 +7,7 @@ use crate::v4::{
 use core::marker::PhantomData;
 
 pub struct Build<T>(T);
+
 pub struct Insert<T: Template> {
     template: T,
     items: Vec<T::Item>,
