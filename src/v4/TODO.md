@@ -6,44 +6,6 @@ picked up without prior context of the codebase.
 
 ---
 
-### 4. `Column` `Send` / `Sync` impls are unsound
-
-- **File:** `src/v4/table.rs:51-53`
-- **Current state:**
-  ```rust
-  // TODO: Is this correct?
-  unsafe impl Send for Column {}
-  unsafe impl Sync for Column {}
-  ```
-  `Column` holds `RwLock<NonNull<u8>>`. The `RwLock` protects the *pointer slot*
-  (the `NonNull<u8>` value itself), but `Column::data()` reads the pointer
-  through `*self.data.data_ptr()` which bypasses the lock. Multiple threads can
-  read the same pointer concurrently and then access the pointed-to memory
-  without any synchronization. The lock only serializes writes to the pointer
-  slot (e.g. during `resize`), not reads/writes to the column data.
-
-- **Root cause:** The `RwLock` is being used as an atomic pointer, but column
-  data access goes through raw pointers obtained via `column.data()` which
-  completely ignores the lock.
-
-- **Fix options:**
-  1. Replace `RwLock<NonNull<u8>>` with `AtomicPtr<u8>` and use `AtomicPtr`
-     load/store with appropriate orderings for the data pointer. Keep the
-     `RwLock` as a separate field for the logical column lock (used by
-     `lock()`/`unlock()` to serialize read/write access between queries).
-  2. Remove `Send`/`Sync` from `Column` and wrap it in `Arc<Column>` with the
-     lock protecting the entire column, not just the pointer. This is more
-     conservative but may hurt performance.
-
-- **Invariants to document:**
-  - When `Column::data()` is called, the caller must hold at least a shared
-    lock on `self.data` if reading, or an exclusive lock if writing.
-  - After `resize`, the old data pointer is never accessed again.
-
-- **Verify:** `cargo +nightly miri test` (after adding tests). Specifically
-  test concurrent read and concurrent read+write on the same column from
-  multiple threads.
-
 ### 5. `Tables::find_or_add` can create duplicate-schema tables under contention
 
 - **File:** `src/v4/table.rs:71-96`

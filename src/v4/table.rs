@@ -77,11 +77,15 @@ impl Tables {
         metas: impl IntoIterator<Item = Meta>,
     ) -> Result<Table, Error> {
         let metas = sort(metas).ok_or(Error::DuplicateMeta)?;
-        Ok(match self.find(&metas) {
-            Some(table) => table,
-            None => {
-                let mut old = self.0.load();
-                loop {
+        let mut old = self.0.load();
+        loop {
+            match old
+                .slice
+                .iter()
+                .find(|table| table.is(metas.iter().copied()))
+            {
+                Some(table) => break Ok(table.clone()),
+                None => {
                     let index = old.slice.len().try_into().map_err(Error::TablesOverflow)?;
                     let table = Table::new(index, &metas);
                     let tables = ThinArc::from_header_and_iter(
@@ -90,28 +94,13 @@ impl Tables {
                     );
                     let new = self.0.compare_and_swap(&*old, tables);
                     if old.as_raw() == new.as_raw() {
-                        break table;
+                        break Ok(table);
                     } else {
                         old = new;
                     }
                 }
             }
-        })
-    }
-
-    fn find(&self, metas: &[Meta]) -> Option<Table> {
-        self.0
-            .load()
-            .slice
-            .iter()
-            .find(|table| {
-                table
-                    .columns()
-                    .iter()
-                    .map(|column| column.meta().identifier())
-                    .eq(metas.iter().map(|meta| meta.identifier()))
-            })
-            .cloned()
+        }
     }
 }
 
@@ -301,6 +290,10 @@ impl Table {
 
     pub fn capacity(&self) -> u32 {
         self.header().capacity.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is(&self, metas: impl IntoIterator<Item = Meta>) -> bool {
+        self.columns().iter().map(|column| column.meta()).eq(metas)
     }
 
     pub(crate) unsafe fn lock(&self, locks: impl Iterator<Item = (u32, Access)>) {
