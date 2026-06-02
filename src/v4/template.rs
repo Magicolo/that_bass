@@ -116,6 +116,7 @@ impl Template for ColumnWith {
     }
 
     unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
+        assert_eq!(self.0.identifier(), item.type_id());
         unsafe {
             table
                 .columns()

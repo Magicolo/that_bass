@@ -191,6 +191,6 @@ unsafe impl<T: Template, F: FnOnce(Key) -> T + 'static> Template for With<T, F> 
 
     #[inline]
     unsafe fn apply(self, state: &Self::State, context: ApplyContext) {
-        self.0(context.key()).apply(state, context)
+        unsafe { self.0(context.key()).apply(state, context) }
     }
 }
