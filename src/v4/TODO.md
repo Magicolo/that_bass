@@ -1,0 +1,902 @@
+# v4 TODO — Ordered Implementation Plan
+
+This document lists every known gap, bug, and missing feature in `src/v4/`,
+ordered by dependency and risk. Each item contains enough detail to be
+picked up without prior context of the codebase.
+
+---
+
+## Phase 1 — Immediate Low-Risk Fixes
+
+These are cheap, have zero or minimal blast radius, and unblock everything else.
+Do them first.
+
+### 1. Remove unused import in `insert.rs`
+
+- **File:** `src/v4/insert.rs:2`
+- **What:** `Rows` is imported but never used.
+- **Fix:** Delete `Rows` from the `use crate::v4::{...}` import list.
+- **Verify:** `cargo check` produces no `unused import` warnings for v4.
+
+### 2. Add standard derives to `Store`
+
+- **File:** `src/v4/mod.rs:21`
+- **What:** `Store` has no `Debug`, `Clone`, or `Default` impl.
+  - `Tables` already derives `Clone` and `Debug` (`table.rs:23-24`), so `Store` can derive them too.
+  - `Default` is trivial because `Store::new()` exists.
+- **Fix:**
+  ```rust
+  #[derive(Debug, Clone, Default)]
+  pub struct Store {
+      tables: Tables,
+  }
+  ```
+- **Verify:** `cargo build` succeeds. A test constructing `Store::default()` works.
+
+### 3. Add `#![deny(unsafe_op_in_unsafe_fn)]` to v4 (or the whole crate)
+
+- **File:** `src/v4/mod.rs` (or `src/lib.rs`)
+- **What:** The v4 code has 57 `unsafe fn` signatures. Many unsafe operations inside them lack explicit `unsafe {}` blocks. The v1 code already has this problem (visible in `cargo check` warnings). Adding the lint prevents new unsafe code from skipping the block requirement.
+- **Fix:** Add `#![deny(unsafe_op_in_unsafe_fn)]` at the top of `src/v4/mod.rs`. Then wrap every unsafe operation in `unsafe {}` blocks throughout v4. This is mechanical but touches many files.
+- **Verify:** `cargo check` produces zero `unsafe_op_in_unsafe_fn` warnings for v4.
+
+---
+
+## Phase 2 — Critical Correctness Bugs
+
+These are potential UB or data corruption. They must be fixed before any
+serious use of the library.
+
+### 4. `Column` `Send` / `Sync` impls are unsound
+
+- **File:** `src/v4/table.rs:51-53`
+- **Current state:**
+  ```rust
+  // TODO: Is this correct?
+  unsafe impl Send for Column {}
+  unsafe impl Sync for Column {}
+  ```
+  `Column` holds `RwLock<NonNull<u8>>`. The `RwLock` protects the *pointer slot*
+  (the `NonNull<u8>` value itself), but `Column::data()` reads the pointer
+  through `*self.data.data_ptr()` which bypasses the lock. Multiple threads can
+  read the same pointer concurrently and then access the pointed-to memory
+  without any synchronization. The lock only serializes writes to the pointer
+  slot (e.g. during `resize`), not reads/writes to the column data.
+
+- **Root cause:** The `RwLock` is being used as an atomic pointer, but column
+  data access goes through raw pointers obtained via `column.data()` which
+  completely ignores the lock.
+
+- **Fix options:**
+  1. Replace `RwLock<NonNull<u8>>` with `AtomicPtr<u8>` and use `AtomicPtr`
+     load/store with appropriate orderings for the data pointer. Keep the
+     `RwLock` as a separate field for the logical column lock (used by
+     `lock()`/`unlock()` to serialize read/write access between queries).
+  2. Remove `Send`/`Sync` from `Column` and wrap it in `Arc<Column>` with the
+     lock protecting the entire column, not just the pointer. This is more
+     conservative but may hurt performance.
+
+- **Invariants to document:**
+  - When `Column::data()` is called, the caller must hold at least a shared
+    lock on `self.data` if reading, or an exclusive lock if writing.
+  - After `resize`, the old data pointer is never accessed again.
+
+- **Verify:** `cargo +nightly miri test` (after adding tests). Specifically
+  test concurrent read and concurrent read+write on the same column from
+  multiple threads.
+
+### 5. `Tables::find_or_add` can create duplicate-schema tables under contention
+
+- **File:** `src/v4/table.rs:71-96`
+- **Current state:**
+  ```rust
+  Ok(match self.find(&metas) {  // called ONCE before loop
+      Some(table) => table,
+      None => {
+          let mut old = self.0.load();
+          loop {
+              // constructs table, does CAS
+              // on failure: old = new; // continues loop
+              // NEVER re-checks self.find(&metas)
+          }
+      }
+  })
+  ```
+- **Race scenario:**
+  1. Thread A calls `self.find(&metas)` on snapshot S0 → `None`
+  2. Thread B adds the same table → snapshot S1 now contains it
+  3. Thread A loads `old = self.0.load()` → gets S1
+  4. Thread A computes `index = old.slice.len()` (correct for S1)
+  5. Thread A constructs a duplicate table at that index
+  6. Thread A CAS succeeds because no one modified S1 since the load
+  7. Result: two tables with identical schemas exist
+
+- **Fix:** Re-run the find check inside the loop, after each load:
+  ```rust
+  None => {
+      let mut old = self.0.load();
+      loop {
+          // Check if table appeared since we started.
+          if let Some(table) = old.slice.iter().find(|t| {
+              t.columns().iter().map(|c| c.meta().identifier())
+               .eq(metas.iter().map(|m| m.identifier()))
+          }) {
+              break table.clone();
+          }
+          let index = old.slice.len().try_into()...;
+          // ... rest of CAS loop
+      }
+  }
+  ```
+
+- **Verify:** Write a concurrent test that spawns N threads all calling
+  `find_or_add` with the same metas simultaneously, then assert exactly
+  one table was created and all handles point to the same table.
+
+### 6. `Template::apply` is a public unsafe trait method with no documented safety preconditions
+
+- **File:** `src/v4/template.rs:14`
+- **What:** `unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table)` — callers must hold the appropriate column write locks, but this is not documented.
+- **Fix:** Add a `# Safety` doc comment:
+  ```rust
+  /// # Safety
+  ///
+  /// The caller must ensure that:
+  /// - `index` is a valid row index within `table` (0 <= index < table.count()).
+  /// - The columns declared by this template have their write locks held
+  ///   (or the row at `index` is not yet observable by any query).
+  /// - The row at `index` has been allocated (via `Table::insert`) and
+  ///   its memory is valid for writes of the declared column types.
+  unsafe fn apply(...);
+  ```
+
+### 7. `Item::get` is a public unsafe trait method with no documented safety preconditions
+
+- **File:** `src/v4/item.rs:22-29`
+- **What:** `unsafe fn get<'a>(&'a self, state: &'a mut Self::State, count: u32, table: &'a table::Table) -> Self::Item<'a>` — the returned references borrow from `self` but their actual data lifetimes depend on holding column locks. If the caller drops the `Guard` (which unlocks columns), the returned slices dangle.
+- **Fix:** Add `# Safety` documentation:
+  ```rust
+  /// # Safety
+  ///
+  /// The caller must ensure that:
+  /// - All columns declared via `Item::declare` have their locks held
+  ///   (as declared: read columns have shared locks, write columns have
+  ///    exclusive locks).
+  /// - `count` reflects the number of initialized rows in `table`.
+  ///   Passing a stale count may cause out-of-bounds access.
+  /// - The returned references must not outlive the column locks.
+  ///   In practice, this means `get` should only be called inside a
+  ///   `Guard`'s lifetime.
+  unsafe fn get(...);
+  ```
+
+### 8. `unsafe trait Depend` has no documented safety contract
+
+- **File:** `src/v4/depend.rs:53`
+- **What:** `pub unsafe trait Depend` — implementors must guarantee that the
+  `depend()` iterator accurately reflects all resources accessed. Incorrect
+  implementations cause the conflict analysis (`analyze()`) to miss real
+  conflicts, leading to data races.
+- **Fix:** Add `# Safety` documentation:
+  ```rust
+  /// # Safety
+  ///
+  /// Implementors must ensure that `depend()` returns every `Dependency`
+  /// that the type will access at runtime. Omitting a dependency may
+  /// cause `Analysis::analyze` to miss a real read/write or write/write
+  /// conflict, resulting in data races. Dependencies must be returned
+  /// with the strongest access level that will be used (i.e., if the
+  /// type sometimes reads and sometimes writes a resource, declare
+  /// `Access::Write`).
+  pub unsafe trait Depend { ... }
+  ```
+
+### 9. `Meta::set` uses `unwrap_unchecked` — document the invariant
+
+- **File:** `src/v4/meta.rs:52-54`
+- **What:**
+  ```rust
+  set: |item, data| {
+      let item = unsafe { item.downcast::<T>().unwrap_unchecked() };
+      unsafe { data.cast::<T>().write(*item) };
+  },
+  ```
+  `unwrap_unchecked` assumes the `Box<dyn Any>` is exactly `T`. This is correct
+  only if every call site ensures `item.type_id() == TypeId::of::<T>()`. The
+  debug assertion in `Meta::set` (line 175) catches this in debug mode, but
+  release mode has UB if violated.
+
+- **Fix:** The debug assertion at `meta.rs:175` (`debug_assert_eq!(self.identifier(), value.type_id())`) is adequate for catching bugs in testing. Document this invariant on `Meta::set` and `Meta::set_at`. Consider changing `debug_assert!` to a regular `assert!` (since `Box::downcast` isn't free, but neither is UB) or use `downcast::<T>().expect("type mismatch")` in the vtable.
+
+---
+
+## Phase 3 — Infrastructure & Isolation
+
+### 10. Add a `v4` feature flag
+
+- **File:** `Cargo.toml` and `src/lib.rs:1390-1391`
+- **What:** v4 is unconditionally compiled. It should be behind a feature gate so
+  users who don't need the experimental engine don't pay compile time for it.
+- **Fix:**
+  1. In `Cargo.toml`, add `v4 = []` under `[features]`.
+  2. In `src/lib.rs`, gate the module:
+     ```rust
+     #[cfg(feature = "v4")]
+     pub mod v4;
+     #[cfg(feature = "v4")]
+     pub use v4 as store;
+     ```
+  3. Ensure existing CI passes with `--features v4`.
+- **Verify:** `cargo check` (without `--features v4`) does not compile v4.
+  `cargo check --features v4` compiles it normally.
+
+### 11. Resolve `pub use v4 as store;` naming collision
+
+- **File:** `src/lib.rs:1391`
+- **What:** `pub use v4 as store;` re-exports v4 under the name `store`. But
+  `src/v2/` has its own `store` module (`src/v2/store.rs`). If both v2 and v4
+  are active, `crate::store` is ambiguous — Rust resolves it to the `pub use`
+  alias, shadowing v2's module. This silently breaks any code relying on
+  `crate::store` pointing to v2.
+- **Fix options:**
+  1. Remove the `pub use v4 as store;` alias entirely (preferred for now since
+     nothing imports it).
+  2. Rename the alias to something unambiguous like `pub use v4 as store_v4;`.
+- **Verify:** `cargo check --all-features` succeeds. `grep -r "crate::store" src/`
+  shows only v2-import usage, no v4 confusion.
+
+### 12. Split `Row`/`Rows` into `row.rs` (or update README)
+
+- **File:** `src/v4/table.rs:33-49,201-257` and `src/v4/mod.rs`
+- **What:** README references a `row.rs` file that doesn't exist. `Row` and
+  `Rows` are defined in `table.rs`. Either:
+  1. Extract them to `src/v4/row.rs` (cleaner separation).
+  2. Update README to remove references to `row.rs`.
+- **Preference:** Extract to `row.rs` — `Row` and `Rows` are public types used
+  by `remove.rs`, `item.rs`, `insert.rs`, etc., and conceptually distinct from
+  `Table` storage.
+
+---
+
+## Phase 4 — Make the Existing Code Work
+
+### 13. Fix the only test: `v4::tests::access`
+
+- **File:** `src/v4/mod.rs:48-133`
+- **What:** The test calls `Insert::builder().key().column::<char>().build(&store)?`
+  which fails with `Error::FailedToInitialize` because `Key::initialize()`
+  returns `None` (placeholder).
+- **Fix options:**
+  1. **Quick fix:** Remove `.key()` from the insert builder in the test, so it
+     uses only `.column::<char>()`. This lets the test exercise the rest of the
+     code paths.
+  2. **Proper fix:** Implement `Key::initialize` (depends on Phase 6, item #21).
+- **Recommendation:** Do both — make the quick fix now to get the test green,
+  then add key coverage later.
+- **Verify:** `cargo test v4::tests::access` passes.
+
+---
+
+## Phase 5 — Safety Auditing & Documentation
+
+### 14. Add `# Safety` docs to all `unsafe fn` in `Column`
+
+- **File:** `src/v4/table.rs:126-199`
+- **What:** Every `unsafe fn` in `Column` needs a `# Safety` section:
+  - `lock` / `unlock` — caller must pair lock/unlock, no reentrancy (parking_lot
+    RwLock does not support recursive locking).
+  - `get` / `get_mut` — caller must hold appropriate lock, `count` must not
+    exceed table capacity.
+  - `set` / `set_at` — caller must hold write lock, `row` must be valid.
+  - `copy` / `copy_at` — source and target regions must not overlap,
+    both must be within allocated capacity.
+  - `drop` / `drop_at` — caller must hold write lock, data must be valid for
+    the type.
+  - `data` — caller must hold at least a shared lock to ensure the pointer
+    isn't being concurrently modified by `resize`.
+
+### 15. Document invariants for `Table::resize`
+
+- **File:** `src/v4/table.rs:376-461`
+- **What:** The resize function contains deeply nested unsafe logic. Document:
+  - The `Next` enum's states and what each means.
+  - Why the recursive lambda approach is safe (each column's old data is
+    relocated before the next column is processed).
+  - Why `header.capacity.compare_exchange` is the serialization point.
+  - What happens when another thread wins the capacity CAS (the `Skip` path).
+    Specifically, the columns' `data` pointers are updated to the new
+    allocation, but the overall combined allocation is NOT deallocated (only the
+    old allocation is freed at the `Done` branch). Wait—actually on `Skip`,
+    each column's `*data` was already overwritten with the relocated pointer.
+    This means on `Skip`, the allocation is leaked but the pointers are now
+    pointing into someone else's (the racing winner's) allocation. Is that
+    correct? Audit and document.
+  - The alignment invariants: `pad_to_align()` on the final layout ensures
+    the buffer can be split at column boundaries.
+
+### 16. Audit `Table::insert` for race conditions between resize and count commit
+
+- **File:** `src/v4/table.rs:327-353`
+- **What:** The insert loop:
+  1. Acquires all column read locks
+  2. Reads count and capacity
+  3. If capacity is sufficient, applies data, stores new count, drops guard
+  4. If not, drops guard, calls resize, retries
+
+  During step 3, between `apply(start)` and `header.count.store(end, Release)`,
+  another thread could call `insert` and see the old count and sufficient
+  capacity (since the first thread hasn't committed the count yet). Both would
+  write to overlapping rows. Is this possible? Audit carefully.
+
+  Actually, `lock_all(Access::Read)` only takes read locks, so multiple inserts
+  can proceed concurrently. The count is loaded AFTER the lock, and the new
+  count is stored before unlock. But since the locks are read-locks, another
+  insert can also acquire read-locks simultaneously, read the same `start`
+  value, and both apply data to the same range. **This is a race condition.**
+
+  **Fix:** `insert` must take write locks on columns (not read locks), or use a
+  separate mutex/critical section for the count-allocate-commit sequence.
+
+- **Verify:** Concurrent insert test where N threads each insert M rows, then
+  verify all rows are present and consistent.
+
+### 17. Audit lock ordering to prevent deadlocks
+
+- **File:** `src/v4/table.rs:297-325`, `src/v4/query.rs:112-127`
+- **What:** `Table::lock` accepts an unsorted iterator of `(u32, Access)` locks.
+  Two queries accessing the same columns in different orders can deadlock
+  (e.g., Query A locks column 0 then 1, Query B locks column 1 then 0).
+- **Fix:** Sort locks by column index within `Table::lock` before acquiring.
+  Between tables, establish a protocol (e.g., always lock tables in ascending
+  index order).
+- **Verify:** Deadlock stress test with multiple concurrent queries accessing
+  overlapping column sets.
+
+---
+
+## Phase 6 — Implement Missing Core Operations
+
+### 18. Implement `Remove::all()`
+
+- **File:** `src/v4/remove.rs:23-25`
+- **What:** Currently `todo!()`. Should clear all rows from all tables (or
+  optionally from specific tables filtered by schema).
+- **API:** `pub fn all(&mut self)` — queues all rows in all currently-known
+  tables for removal. When `resolve()` is called, each row is removed via
+  `Table::remove`.
+- **Implementation notes:** Use `self.tables.0.load().slice` to iterate all
+  tables, enumerate their row ranges (0..count), and push `(table_index, row)`
+  pairs. Must handle tables added after `all()` was called (they shouldn't be
+  affected).
+- **Verify:** Test that `remove.all(); remove.resolve();` leaves all tables
+  with `count() == 0`.
+
+### 19. Implement filtered destroy / `DestroyAll`
+
+- **File:** New code in `src/v4/remove.rs` (or a new `src/v4/destroy.rs`)
+- **What:** v1 has `Destroy::resolve` that removes rows by key and
+  `DestroyAll::resolve` that wipes entire tables. v4 has neither.
+- **Minimum:** Add a method to remove all rows from tables matching a filter:
+  ```rust
+  pub fn matching<F: Filter>(&mut self, filter: &F)
+  ```
+  This iterates tables matching the filter and queues all their rows.
+- **Verify:** Filter integration test — insert rows into tables with different
+  schemas, destroy only tables matching `Has<T>`, verify correct tables emptied.
+
+### 20. Implement `Modify` (cross-table moves)
+
+- **File:** New `src/v4/modify.rs`
+- **What:** v1's `Modify<Add, Remove>` moves rows between tables by applying
+  column additions/removals. v4 needs equivalent capability.
+- **Design:** A `Modify` operation that:
+  1. Takes a source row and a target template (schema to transform into).
+  2. Reserves space in the target table.
+  3. Copies shared columns from source to target.
+  4. Applies new data to target-only columns.
+  5. Removes the source row from the old table.
+  All within appropriate column locks on both tables.
+- **Verify:** Add columns test — insert `(u32,)`, modify to `(u32, f64)`, verify
+  both old and new table counts.
+
+---
+
+## Phase 7 — Key System (Generational Keys)
+
+### 21. Implement the `Keys` system
+
+- **Files:** `src/v4/template.rs:90-104`, `src/v4/item.rs:203-229`, new `src/v4/key.rs`
+- **Current state:** `Key` exists as a stub. `Key::initialize` returns `None`.
+  `Key` in `item.rs` returns `None` from `initialize`. There is no key
+  indirection — rows are identified by raw `(table_index, row_index)`.
+
+- **What's needed:**
+  1. A `Keys` storage structure (similar to v1's `src/v1/key.rs`):
+     - An array of `Slot`s mapping key index → `(table_index, row_index, generation)`.
+     - Generational indices to detect use-after-free.
+     - A free list for recycling destroyed key slots.
+  2. `Key` type: `(index: u32, generation: u32)`.
+  3. `Key::initialize` — bind to a table and set up key storage.
+  4. `Key::apply` — during insert resolve, allocate a key slot and set its
+     (table, row) mapping.
+  5. `Item for Key` — return key handles during queries.
+  6. Key recycling in `remove` — when a row is removed, invalidate its key and
+     return the slot to the free list.
+
+- **Design decision:** Where does `Keys` live? Options:
+  - Per-`Store` keys: one key space for all tables (like v1).
+  - Per-table keys: each table has its own key space.
+  - The v1 model (per-Store) is more flexible for cross-table moves.
+
+- **Verify:**
+  - Insert rows, get keys, query by key, verify correct data.
+  - Remove a keyed row, verify the key becomes invalid.
+  - Reuse a recycled key slot, verify generation prevents stale access.
+
+---
+
+## Phase 8 — Event System
+
+### 22. Implement event emission and listeners
+
+- **Files:** New `src/v4/event.rs`
+- **What:** v1 has a full event system (`src/v1/event.rs`) with `Create`,
+  `Destroy`, `Modify` event families, buffering, listener lifecycle, and
+  retention policies. v4 has none.
+
+- **Minimum viable design:**
+  1. An `Events` registry on `Store` (or a separate `Events` handle).
+  2. `Event` enum: `Created(Table, Range<u32>)`, `Destroyed(Table, Vec<(u32, u32)>)`.
+  3. `Listener` trait with `on_create`/`on_destroy` callbacks.
+  4. Buffered emission: events are queued during `resolve()` and dispatched
+     after locks are released.
+  5. Retention policy: `Keep::All` (keep until all listeners observe),
+     `Keep::None` (drop after dispatch).
+
+- **Integration points:**
+  - `Insert::resolve()` emits `Created` events.
+  - `Remove::resolve()` emits `Destroyed` events.
+  - Future `Modify::resolve()` emits modify events.
+
+- **Verify:** Register a listener, insert rows, verify listener received create
+  events with correct table and row range.
+
+---
+
+## Phase 9 — Testing
+
+### 23. Unit tests for `Table`
+
+- **File:** New `#[cfg(test)] mod tests` in `src/v4/table.rs`
+- **Coverage required:**
+  - `Table::new` — creates table with correct column count and all columns dangling.
+  - `Table::insert` — single insert, multi insert, zero-count insert.
+  - `Table::insert` — overflow behavior (insert beyond capacity triggers resize).
+  - `Table::remove` — remove first row, last row, middle row, all rows.
+  - `Table::remove` — out-of-bounds removal panics (debug).
+  - `Table::column` — find by TypeId, fail for unknown TypeId.
+  - `Table::count` / `Table::capacity` — reflect actual state.
+  - `Table::resize` — growth doubles capacity, data preserved.
+  - `Table::drop` — all column data deallocated.
+  - Column `get`/`get_mut` — returns correct slices.
+  - Column `set`/`set_at` — writes correct values.
+  - Column `copy_at` / `drop_at` — correct element movement.
+  - Column `lock`/`unlock` — ZST columns skip locking.
+
+### 24. Unit tests for `Meta`
+
+- **File:** New `#[cfg(test)] mod tests` in `src/v4/meta.rs`
+- **Coverage:**
+  - `Meta::of::<T>()` is idempotent (same instance returned).
+  - Different types get different metas.
+  - `size()` returns `size_of::<T>()`.
+  - `drops()` returns true for Drop types, false for Copy types.
+  - `layout(count)` returns correct layout.
+  - `extend` combines layouts correctly.
+  - `initialize` copies data between allocations.
+  - `resize` grows allocation, preserves data, shrinks correctly.
+  - `copy` / `copy_at` / `drop` / `drop_at` correctness.
+  - `get` / `get_mut` return correct type-erased references.
+  - `set` / `set_at` correctly place values.
+
+### 25. Unit tests for `Query`
+
+- **File:** New `#[cfg(test)] mod tests` in `src/v4/query.rs`
+- **Coverage:**
+  - Build query with `.read::<T>()` — discovers matching tables.
+  - Build query with `.write::<T>()` — discovers matching tables.
+  - Build query with `.try_read::<T>()` — optional column access.
+  - Build query with `.has::<T>()` / `.not::<T>()` filters — correct table matching.
+  - `Query::update` — discovers tables lazily.
+  - `Query::tables()` iteration — `Guard` yields correct count, correct slices.
+  - `Guard::columns()` — destructured access to typed slices.
+  - Guard drop — unlocks columns.
+  - Clone a Query — cloned query starts with no states.
+  - Conflict detection: read+write on same column in same query is rejected.
+
+### 26. Unit tests for `Insert` and `Remove`
+
+- **File:** New `#[cfg(test)] mod tests` in `src/v4/insert.rs` and `src/v4/remove.rs`
+- **Coverage:**
+  - Insert single item, verify table count increases.
+  - Insert multiple items, verify all present.
+  - Insert into table that doesn't exist yet (auto-creates).
+  - Remove specific rows, verify table count decreases, remaining rows shift.
+  - Remove from empty table (no-op).
+  - Insert after remove reuses freed capacity.
+  - `Insert::builder().column::<T1>().column::<T2>()` — multi-column insert.
+  - Remove rows in descending order (required by swap_remove compaction).
+
+### 27. Unit tests for `Filter`
+
+- **File:** New `#[cfg(test)] mod tests` in `src/v4/filter.rs`
+- **Coverage:**
+  - `Has<T>` matches table containing T.
+  - `Has<T>` rejects table without T.
+  - `Not<Has<T>>` inverts.
+  - Filter composition: `(Has<A>, Has<B>)` matches only if both present.
+  - `()` filter matches everything.
+  - `HasWith(meta)` matches by runtime Meta.
+
+### 28. Unit tests for `Depend` / `Analysis`
+
+- **File:** New `#[cfg(test)] mod tests` in `src/v4/depend.rs`
+- **Coverage:**
+  - Single read dependency passes analysis.
+  - Read+Write on same resource is rejected.
+  - Write+Write on different resources passes.
+  - Ancestor resources (e.g., Column → Table → Tables → Store) propagate
+    read access correctly.
+  - Multiple composed dependencies are checked holistically.
+  - `Error::all` combines multiple errors correctly.
+
+### 29. Unit tests for `Slice`, `Vector`, and utility types
+
+- **Files:** New test modules in `src/v4/slice.rs`, `src/v4/vector.rs`, `src/v4/utility.rs`
+- **Coverage:**
+  - `Slice::empty` / `Slice::get` / `Slice::get_mut` / `Slice::downcast_ref`.
+  - `Vector::push` / `Vector::len` / `Vector::capacity` / `Vector::move_at`.
+  - `IntoNest` / `IntoFlat` round-trip for tuples of various sizes.
+  - `Push` trait builds correct nested chains.
+  - `Defer` runs closure on drop, even on panic.
+  - `allocate` handles zero-size layout correctly.
+  - `ranges` (if implemented) groups sorted pairs.
+  - `find` linear vs binary search threshold.
+
+### 30. Integration tests
+
+- **File:** New `tests/v4/` directory
+- **Coverage:**
+  - Full workflow: create store → insert → query → modify → remove → verify.
+  - Multi-table scenarios: insert into tables with different schemas, query
+    across them, filter by schema.
+  - Cross-table modify: move rows between schemas.
+  - Concurrent insert + query (readers see consistent snapshots).
+  - Concurrent insert + remove (no double-free, correct counts).
+  - Stress test: N threads each doing M operations, verify final state.
+
+### 31. Miri validation
+
+- **What:** Run `cargo +nightly miri test` on v4 tests. Since v4 uses pervasive
+  raw pointer manipulation, Miri is essential for catching UB.
+- **Setup:** Add a `miri` configuration in CI. Run on all tests in `src/v4/`
+  and `tests/v4/`.
+- **Verify:** Zero Miri errors.
+
+### 32. Benchmarks
+
+- **File:** New `benches/v4/` directory
+- **Minimum benchmarks:**
+  - Insert throughput (rows/sec) for various column counts.
+  - Query iteration throughput.
+  - Remove throughput (rows/sec).
+  - Single-row random access via get/set.
+  - Multi-column resize cost.
+
+### 33. Fuzzing / property-based testing
+
+- **What:** Use `proptest` or `arbitrary` to generate random sequences of
+  (insert, query, remove) operations and verify invariants:
+  - Table count never exceeds capacity.
+  - Row count equals insertions minus removals.
+  - All rows in query results are valid.
+  - No stale data visible after remove.
+- **Verify:** At least 10,000 random sequences pass without error.
+
+---
+
+## Phase 10 — API Completeness & Ergonomics
+
+### 34. Implement `Store::with` (simple closure-based API)
+
+- **File:** `src/v4/mod.rs` (on `impl Store`)
+- **What:**
+  ```rust
+  pub fn with<I: Item, F: Filter>(
+      &self,
+      query: &mut Query<I, F>,
+      f: impl FnMut(Guard<'_, I>),
+  ) {
+      for guard in query.tables() {
+          f(guard);
+      }
+  }
+  ```
+- **Note:** This is simple iteration sugar. The README describes a more
+  sophisticated version that composes multiple modules, which depends on the
+  `Module` trait (see item #37).
+
+### 35. Add `len()` / `is_empty()` helpers to `Store`
+
+- **File:** `src/v4/mod.rs`
+- **What:**
+  ```rust
+  pub fn len(&self) -> usize {
+      self.tables.0.load().slice.len()
+  }
+  pub fn is_empty(&self) -> bool {
+      self.len() == 0
+  }
+  ```
+
+### 36. Add typed `.get::<T>()` / `.get_mut::<T>()` to `Guard`
+
+- **File:** `src/v4/query.rs:129-144`
+- **What:** Currently `Guard` only provides `.columns()` which returns tuples
+  via `IntoFlat`. For single-column queries, add:
+  ```rust
+  pub fn get<T: 'static>(&self) -> &[T] { ... }
+  pub fn get_mut<T: 'static>(&mut self) -> &mut [T] { ... }
+  ```
+  These would be convenience methods that bypass the `IntoFlat` tuple dance.
+
+### 37. Implement or remove the `Module` / `State` / `Rest` composition system
+
+- **Files:** Described in README but doesn't exist in source.
+- **What:** The README describes:
+  - A `Module` trait with `Item<'_>`, `State`, `initialize`, `update`, `get`.
+  - A `State::build().push(module_a).push(module_b)` builder.
+  - A `Rest` type for chained iteration via `next()`.
+  - `ref_cast` for safe tuple borrowing of composed modules.
+
+  **Decision needed:** Is this composition model the intended direction?
+  - If **yes**: Implement it. This is a significant design and implementation
+    effort. Start with a `module.rs` and `state.rs` that implement the described
+    semantics.
+  - If **no**: Remove references to it from README and AGENTS.md.
+
+  The current tuple-based composition in `Query::Build` and `Insert::Build`
+  using `Push` is a simpler alternative that already works. The `Module` trait
+  would unify queries, inserts, and removes under one abstraction, enabling
+  cross-operation dependency analysis.
+
+### 38. Implement proc-macro derives for v4
+
+- **File:** `that_base_derive/src/lib.rs` (add v4 support)
+- **What:** v1 has `#[derive(Template)]` and `#[derive(Filter)]`. v4 needs
+  equivalents for its `Template`, `Filter`, and `Item` traits.
+- **Design:** The derive macros should emit `that_bass::v4::...` paths (similar
+  to how v1 derives emit `that_bass::v1::...` paths). Behind the `v4` feature flag.
+- **Minimum:**
+  - `#[derive(Template)]` for structs — each field becomes a `Column<T>` in the
+    template.
+  - `#[derive(Filter)]` for structs and enums — similar to v1's filter derive.
+- **Verify:** Compile tests for derives, verify generated code matches
+  hand-written impls.
+
+### 39. Add `Datum`-equivalent marker trait
+
+- **File:** `src/v4/meta.rs` or new `src/v4/datum.rs`
+- **What:** v1 has `pub unsafe trait Datum: Sized + 'static {}`. v4 has no
+  equivalent. A marker trait would:
+  - Provide a clear bound for what types can be columns.
+  - Allow blanket impls or auto-derives.
+  - Serve as documentation of the type contract.
+
+---
+
+## Phase 11 — Documentation
+
+### 40. Add module-level doc comments to every file
+
+- **Files:** All 14 `.rs` files in `src/v4/`
+- **What:** Each module should have a `//!` doc comment explaining:
+  - What the module provides.
+  - Key types and their roles.
+  - Important invariants or safety considerations.
+- **Example:** `src/v4/meta.rs` should explain the `Meta` vtable pattern, the
+  global `METAS` cache, and the intentional memory leak.
+
+### 41. Add doc comments to all public API items
+
+- **What:** Every `pub` item in v4 should have a `///` doc comment with:
+  - What it does.
+  - Usage example (where non-trivial).
+  - Panics (if any).
+  - Errors (if fallible).
+  - Safety (if unsafe).
+- **Priority types:** `Store`, `Table`, `Row`, `Rows`, `Column`, `Query`,
+  `Guard`, `Build`, `Insert`, `Remove`, `Filter`, `Has`, `Not`, `Read<T>`,
+  `Write<T>`, `Try`, `Template`, `Meta`, `Slice`, `Vector`, `Error`, `Depend`,
+  `Dependency`, `Access`, `Resource`.
+
+### 42. Write `examples/v4/main.rs`
+
+- **File:** New `examples/v4/main.rs`
+- **What:** A walkthrough example showing the complete v4 workflow:
+  1. Create a store.
+  2. Build insert templates.
+  3. Insert rows.
+  4. Build queries.
+  5. Iterate and modify data.
+  6. Remove rows.
+  7. Clean up.
+  Follow the style of `examples/v2/main.rs`.
+
+### 43. Update `src/v4/README.md` to match reality
+
+- **File:** `src/v4/README.md`
+- **What:** The README describes several things that don't exist:
+  - `module.rs`, `state.rs`, `row.rs`, `column.rs` files.
+  - `Module`, `State`, `Rest` types.
+  - `Store::with`, `Store::state` methods.
+  - `vec_as_slice`/`box_as_slice` stubs (not in source).
+  - `write_with` commented out (it's active).
+  - `Defer` path in `Insert::one` (not in source).
+
+  Either update to accurately describe the current state, or implement the
+  described features and then the README becomes correct.
+
+### 44. Update `AGENTS.md` v4 section
+
+- **File:** `AGENTS.md:52`
+- **What:** The AGENTS.md description of v4 references `src/v4/tasks/` (doesn't
+  exist) and describes the `Module` trait system as if it's implemented. Update
+  to reflect the actual source state and link to `src/v4/TODO.md`.
+
+---
+
+## Phase 12 — Polish & Debt
+
+### 45. Fix `Row` in `item.rs` to return real rows
+
+- **File:** `src/v4/item.rs:240-267`
+- **What:** `Item for Row` currently returns `Rows::new(0..0, table)` — an
+  empty range. Marked `// TODO: Implement`.
+- **Fix:** Return `Rows::new(0..table.count(), table)`. Must ensure the row
+  count is read under appropriate locks — use the count passed to `get()`.
+
+### 46. Implement `Vector` usage or remove it
+
+- **File:** `src/v4/vector.rs`
+- **What:** `Vector` is exported (`pub use vector::Vector`) but not used
+  anywhere in v4. `Insert` uses `Vec<T::Item>` directly for buffering.
+  - If `Vector` is intended for deferred insert buffering, wire it up.
+  - If it's unused vestigial code, remove it.
+
+### 47. Distinguish `Insert::Build` from `Query::Build` by name
+
+- **Files:** `src/v4/insert.rs:9`, `src/v4/query.rs:23`
+- **What:** Both modules define a `Build` struct. If a user imports both
+  (`use crate::v4::insert::*; use crate::v4::query::*;`), they collide.
+- **Fix:** Rename to `InsertBuilder` and `QueryBuilder`, or keep `Build` but
+  ensure they're not both re-exported at the same level.
+
+### 48. `Guard::columns()` should work for single-column queries
+
+- **File:** `src/v4/query.rs:138-143`
+- **What:** `columns()` has bound `where I::Item<'a>: IntoFlat`. For a single
+  `Read<T>`, `Item<'a>` = `&'a [T]`, which doesn't implement `IntoFlat` (only
+  tuples do). This makes it impossible to call `.columns()` on a single-column
+  query.
+- **Fix options:**
+  1. Add `IntoFlat` impls for non-tuple types (identity transform).
+  2. Add a separate `.column()` (singular) method.
+  3. Change the return type to not require `IntoFlat`.
+
+### 49. `Vector::drop` calls `resize` with capacity 0 to deallocate
+
+- **File:** `src/v4/vector.rs:66-69`
+- **What:**
+  ```rust
+  impl Drop for Vector {
+      fn drop(&mut self) {
+          let _ = self.meta.resize(self.data, self.len, (self.cap, 0));
+      }
+  }
+  ```
+  This calls `Meta::resize` which allocates a new buffer of capacity 0 (which
+  is `NonNull::dangling()`), copies data into it (nothing, since capacity is 0),
+  deallocates the old buffer. This is correct but wasteful. Since the only
+  purpose is deallocation, it should just call `deallocate` directly:
+  ```rust
+  fn drop(&mut self) {
+      if let Ok(layout) = self.meta.layout(self.cap) {
+          unsafe { utility::deallocate(self.data, layout) };
+      }
+  }
+  ```
+
+### 50. Add error context / backtrace support
+
+- **File:** `src/v4/error.rs`
+- **What:** `Error` variants don't carry enough context for debugging. Add:
+  - The table index for `MissingTable`, `TableOverflow`, `TableUnderflow`.
+  - The type name or `Meta` for `InvalidItem`, `ReadWriteConflict`,
+    `WriteWriteConflict`.
+  - Source file location for `FailedToAllocate`, `FailedToPush` (via
+    `#[track_caller]` or `std::backtrace::Backtrace`).
+
+### 51. `Store` should validate that `tables` is always valid after any operation
+
+- **File:** `src/v4/mod.rs:21-35`
+- **What:** Currently `Store` is just a wrapper around `Tables`. There's no
+  validation that operations leave the store in a consistent state.
+- **Fix:** Add a `debug_assert!`-based invariant checker:
+  ```rust
+  fn check_invariants(&self) {
+      for table in self.tables.0.load().slice.iter() {
+          debug_assert!(table.count() <= table.capacity());
+          // etc.
+      }
+  }
+  ```
+  Call it after every `resolve()` — only in debug builds.
+
+---
+
+## Summary Table
+
+| # | Phase | Item | Effort | Risk | Depends on |
+|---|-------|------|--------|------|------------|
+| 1 | 1 | Remove unused import | Tiny | None | — |
+| 2 | 1 | Add Store derives | Tiny | None | — |
+| 3 | 1 | Enable unsafe_op_in_unsafe_fn | Medium | Low | — |
+| 4 | 2 | Fix Column Send/Sync | Large | **Critical** | — |
+| 5 | 2 | Fix Tables find_or_add race | Medium | **Critical** | — |
+| 6 | 2 | Document Template::apply safety | Tiny | None | — |
+| 7 | 2 | Document Item::get safety | Tiny | None | — |
+| 8 | 2 | Document Depend safety contract | Tiny | None | — |
+| 9 | 2 | Document Meta::set invariant | Tiny | None | — |
+| 10 | 3 | Add v4 feature flag | Small | Low | — |
+| 11 | 3 | Fix store alias collision | Tiny | Low | 10 |
+| 12 | 3 | Extract row.rs | Small | Low | — |
+| 13 | 4 | Fix failing test | Small | Low | 21 (or workaround) |
+| 14 | 5 | Document Column unsafe fns | Medium | Low | — |
+| 15 | 5 | Document Table::resize invariants | Medium | Low | — |
+| 16 | 5 | Audit Table::insert race | Medium | **High** | — |
+| 17 | 5 | Audit lock ordering | Medium | **High** | — |
+| 18 | 6 | Implement Remove::all() | Small | Low | — |
+| 19 | 6 | Implement filtered destroy | Medium | Low | 18 |
+| 20 | 6 | Implement Modify | Large | Medium | — |
+| 21 | 7 | Implement Keys system | Large | Medium | 4, 5 |
+| 22 | 8 | Implement event system | Large | Medium | 18, 20, 21 |
+| 23 | 9 | Unit tests: Table | Medium | Low | 4, 16 |
+| 24 | 9 | Unit tests: Meta | Small | Low | — |
+| 25 | 9 | Unit tests: Query | Medium | Low | 17 |
+| 26 | 9 | Unit tests: Insert/Remove | Medium | Low | 18 |
+| 27 | 9 | Unit tests: Filter | Small | Low | — |
+| 28 | 9 | Unit tests: Depend/Analysis | Small | Low | — |
+| 29 | 9 | Unit tests: Slice/Vector/Utility | Small | Low | — |
+| 30 | 9 | Integration tests | Large | Low | 21, 22 |
+| 31 | 9 | Miri validation | Medium | Low | 23-30 |
+| 32 | 9 | Benchmarks | Medium | Low | 21 |
+| 33 | 9 | Fuzzing setup | Large | Low | 30 |
+| 34 | 10 | Implement Store::with | Small | Low | — |
+| 35 | 10 | Add Store::len/is_empty | Tiny | Low | — |
+| 36 | 10 | Add Guard::get/get_mut | Small | Low | — |
+| 37 | 10 | Implement or remove Module system | XL | Medium | Decision |
+| 38 | 10 | Proc-macro derives | Large | Low | 10 |
+| 39 | 10 | Add Datum marker trait | Small | Low | — |
+| 40 | 11 | Module-level docs | Medium | Low | — |
+| 41 | 11 | Public API docs | Large | Low | 40 |
+| 42 | 11 | examples/v4/main.rs | Medium | Low | 21, 22 |
+| 43 | 11 | Update README | Medium | Low | 37 decision |
+| 44 | 11 | Update AGENTS.md | Tiny | Low | 43 |
+| 45 | 12 | Fix Row in item.rs | Small | Low | 21 |
+| 46 | 12 | Implement or remove Vector | Small | Low | — |
+| 47 | 12 | Rename Build types | Small | Low | — |
+| 48 | 12 | Fix Guard::columns single-col | Medium | Low | — |
+| 49 | 12 | Fix Vector::drop efficiency | Tiny | Low | — |
+| 50 | 12 | Add error context | Medium | Low | — |
+| 51 | 12 | Add invariants checker | Small | Low | — |
