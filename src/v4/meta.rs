@@ -1,7 +1,3 @@
-use super::{
-    error::Error,
-    utility::{allocate, deallocate},
-};
 use core::{
     alloc::{Layout, LayoutError},
     any::{Any, TypeId, type_name},
@@ -85,36 +81,6 @@ impl Meta {
     #[inline]
     pub(crate) fn extend(self, layout: Layout, count: u32) -> Result<(Layout, usize), LayoutError> {
         layout.extend(self.layout(count)?)
-    }
-
-    #[inline]
-    pub(crate) unsafe fn initialize(
-        self,
-        source: NonNull<u8>,
-        target: NonNull<u8>,
-        count: u32,
-        capacity: u32,
-    ) {
-        unsafe { self.copy(source, target, count.min(capacity)) };
-        unsafe { self.drop_at(source, count, count.saturating_sub(capacity)) };
-    }
-
-    #[inline]
-    pub(crate) fn resize(
-        self,
-        data: NonNull<u8>,
-        count: u32,
-        capacities: (u32, u32),
-    ) -> Result<NonNull<u8>, Error> {
-        let layouts = (
-            self.layout(capacities.0).map_err(Error::Layout)?,
-            self.layout(capacities.1).map_err(Error::Layout)?,
-        );
-        let source = data;
-        let target = unsafe { allocate(layouts.1)? };
-        unsafe { self.initialize(source, target, count, capacities.1) };
-        unsafe { deallocate(source, layouts.0) };
-        Ok(target)
     }
 
     #[inline]

@@ -10,13 +10,12 @@ pub mod slice;
 pub mod table;
 pub mod template;
 pub mod utility;
-pub mod vector;
+// pub mod vector;
 
 use crate::v4::table::Tables;
 pub use error::Error;
 pub use meta::Meta;
 pub use table::{Row, Rows, Table};
-pub use vector::Vector;
 
 #[derive(Default)]
 pub struct Store {
