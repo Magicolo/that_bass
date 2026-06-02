@@ -7,7 +7,7 @@ use crate::v4::{
 };
 use arc_swap::{ArcSwapAny, AsRaw};
 use core::{
-    alloc::Layout,
+    alloc::{Layout, LayoutError},
     any::{Any, TypeId},
     iter::{FusedIterator, empty},
     ops::Range,
@@ -471,31 +471,24 @@ impl Eq for Table {}
 
 impl Drop for Table {
     fn drop(&mut self) {
-        fn next(columns: &mut [Column], count: u32, capacity: u32) -> Result<(), Error> {
-            let mut root = NonNull::dangling();
-            let mut layout = Layout::new::<()>();
-            for column in columns {
-                let pair = column
-                    .meta
-                    .extend(layout, capacity)
-                    .map_err(Error::Layout)?;
-                let data = *column.data.get_mut();
-                unsafe { column.meta.drop(data, count) };
-                root = unsafe { data.sub(pair.1) };
-                layout = pair.0;
-            }
-            unsafe { deallocate(root, layout) };
-            Ok(())
-        }
-
-        self.0.with_arc_mut(|table| {
+        let _ = self.0.with_arc_mut(|table| {
             if let Some(table) = Arc::get_mut(table) {
                 let header = table.header_mut();
                 let count = *header.count.get_mut();
                 let capacity = *header.capacity.get_mut();
-                next(table.slice_mut(), count, capacity).is_ok()
+                let mut root = NonNull::dangling();
+                let mut layout = Layout::new::<()>();
+                for column in table.slice_mut() {
+                    let pair = column.meta.extend(layout, capacity)?;
+                    let data = *column.data.get_mut();
+                    unsafe { column.meta.drop(data, count) };
+                    root = unsafe { data.sub(pair.1) };
+                    layout = pair.0;
+                }
+                unsafe { deallocate(root, layout) };
+                Ok::<_, LayoutError>(true)
             } else {
-                false
+                Ok::<_, LayoutError>(false)
             }
         });
     }
