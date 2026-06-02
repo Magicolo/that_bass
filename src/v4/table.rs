@@ -7,7 +7,7 @@ use crate::v4::{
 };
 use arc_swap::{ArcSwapAny, AsRaw};
 use core::{
-    alloc::{Layout, LayoutErr, LayoutError},
+    alloc::Layout,
     any::{Any, TypeId},
     iter::{FusedIterator, empty},
     ops::Range,
@@ -379,7 +379,7 @@ impl Table {
         let header = self.header();
         let columns = self.columns();
         let mut new_layout = Layout::new::<()>();
-        for column in self.columns() {
+        for column in columns {
             (new_layout, _) = column.meta.extend(new_layout, capacities.1)?;
         }
 
@@ -413,8 +413,8 @@ impl Table {
                 old_layout = old_pair.0;
                 new_layout = new_pair.0;
             }
-            unsafe { deallocate(old_data, old_layout.pad_to_align()) };
             drop(guard);
+            unsafe { deallocate(old_data, old_layout.pad_to_align()) };
         }
         Ok(capacities.0)
     }
