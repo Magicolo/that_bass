@@ -7,11 +7,11 @@ use crate::v4::{
 };
 use arc_swap::{ArcSwapAny, AsRaw};
 use core::{
-    alloc::{Layout, LayoutError},
+    alloc::{Layout, LayoutErr, LayoutError},
     any::{Any, TypeId},
     iter::{FusedIterator, empty},
     ops::Range,
-    ptr::NonNull,
+    ptr::{NonNull, replace},
     slice::{from_raw_parts, from_raw_parts_mut},
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -376,86 +376,45 @@ impl Table {
     }
 
     fn grow(&self, mut capacities: (u32, u32)) -> Result<u32, Error> {
-        enum Next {
-            Done {
-                old: (NonNull<u8>, Layout),
-                new: NonNull<u8>,
-                count: u32,
-                capacity: u32,
-            },
-            Retry(u32),
+        let header = self.header();
+        let columns = self.columns();
+        let mut new_layout = Layout::new::<()>();
+        for column in self.columns() {
+            (new_layout, _) = column.meta.extend(new_layout, capacities.1)?;
         }
 
-        fn next(
-            header: &Header,
-            columns: &[Column],
-            layouts: (Layout, Layout),
-            capacities: (u32, u32),
-        ) -> Result<Next, Error> {
-            match columns.split_first() {
-                Some((head, tail)) => {
-                    let old = head
-                        .meta
-                        .extend(layouts.0, capacities.0)
-                        .map_err(Error::Layout)?;
-                    let new = head
-                        .meta
-                        .extend(layouts.1, capacities.1)
-                        .map_err(Error::Layout)?;
-                    let mut data = head.data.write();
-                    match next(header, tail, (old.0, new.0), capacities)? {
-                        Next::Done {
-                            old: done_old,
-                            new: done_new,
-                            count: done_count,
-                            capacity,
-                        } => {
-                            let source = *data;
-                            let target = unsafe { done_new.add(new.1) };
-                            unsafe { head.meta.copy(source, target, done_count) };
-                            *data = target;
-                            Ok(Next::Done {
-                                old: (unsafe { source.sub(old.1) }, done_old.1),
-                                new: done_new,
-                                count: done_count,
-                                capacity,
-                            })
-                        }
-                        slow => Ok(slow),
-                    }
+        while capacities.0 < capacities.1 {
+            unsafe { self.lock_all(Access::Write) };
+            let guard = defer(|| unsafe { self.unlock_all(Access::Write) });
+            let new_data = match header.capacity.compare_exchange(
+                capacities.0,
+                capacities.1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => unsafe { allocate(new_layout.pad_to_align())? },
+                Err(capacity) => {
+                    capacities.0 = capacity;
+                    continue;
                 }
-                None => {
-                    match header.capacity.compare_exchange(
-                        capacities.0,
-                        capacities.1,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(capacity) => Ok(Next::Done {
-                            old: (NonNull::dangling(), layouts.0.pad_to_align()),
-                            new: unsafe { allocate(layouts.1.pad_to_align())? },
-                            count: header.count.load(Ordering::Acquire),
-                            capacity,
-                        }),
-                        Err(capacity) => Ok(Next::Retry(capacity)),
-                    }
-                }
-            }
-        }
-
-        while capacities.0 > capacities.1 {
-            capacities.0 = match next(
-                self.header(),
-                self.columns(),
-                (Layout::new::<()>(), Layout::new::<()>()),
-                capacities,
-            )? {
-                Next::Done { old, capacity, .. } => {
-                    unsafe { deallocate(old.0, old.1) };
-                    capacity
-                }
-                Next::Retry(old) => old,
             };
+
+            let mut old_layout = Layout::new::<()>();
+            let mut new_layout = Layout::new::<()>();
+            let mut old_data = NonNull::dangling();
+            let count = header.count.load(Ordering::Acquire);
+            for column in columns {
+                let old_pair = column.meta.extend(old_layout, capacities.0)?;
+                let new_pair = column.meta.extend(new_layout, capacities.1)?;
+                let target = unsafe { new_data.add(new_pair.1) };
+                let source = unsafe { replace(column.data.data_ptr(), target) };
+                unsafe { column.meta.copy(source, target, count) };
+                old_data = unsafe { source.sub(old_pair.1) };
+                old_layout = old_pair.0;
+                new_layout = new_pair.0;
+            }
+            unsafe { deallocate(old_data, old_layout.pad_to_align()) };
+            drop(guard);
         }
         Ok(capacities.0)
     }
@@ -490,9 +449,9 @@ impl Drop for Table {
                     layout = pair.0;
                 }
                 unsafe { deallocate(root, layout) };
-                Ok::<_, LayoutError>(true)
+                Ok::<_, Error>(true)
             } else {
-                Ok::<_, LayoutError>(false)
+                Ok::<_, Error>(false)
             }
         });
     }

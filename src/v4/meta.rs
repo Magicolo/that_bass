@@ -1,3 +1,4 @@
+use crate::v4::Error;
 use core::{
     alloc::{Layout, LayoutError},
     any::{Any, TypeId, type_name},
@@ -74,13 +75,13 @@ impl Meta {
     }
 
     #[inline]
-    pub(crate) fn layout(self, count: u32) -> Result<Layout, LayoutError> {
-        (self.0.layout)(count)
+    pub(crate) fn layout(self, count: u32) -> Result<Layout, Error> {
+        (self.0.layout)(count).map_err(Error::Layout)
     }
 
     #[inline]
-    pub(crate) fn extend(self, layout: Layout, count: u32) -> Result<(Layout, usize), LayoutError> {
-        layout.extend(self.layout(count)?)
+    pub(crate) fn extend(self, layout: Layout, count: u32) -> Result<(Layout, usize), Error> {
+        layout.extend(self.layout(count)?).map_err(Error::Layout)
     }
 
     #[inline]
