@@ -5,8 +5,11 @@ pub trait Filter {
     fn filter(&self, table: &Table) -> bool;
 }
 
+#[derive(Debug)]
 pub struct Has<T: ?Sized>(pub(crate) PhantomData<T>);
+#[derive(Debug, Clone, Copy)]
 pub struct HasWith(pub(crate) Meta);
+#[derive(Debug, Clone, Copy)]
 pub struct Not<F: ?Sized>(pub(crate) F);
 
 impl<F: Filter> Filter for &F {
@@ -32,6 +35,14 @@ impl<F0: Filter, F1: Filter> Filter for (F0, F1) {
         self.0.filter(table) && self.1.filter(table)
     }
 }
+
+impl<T: ?Sized> Clone for Has<T> {
+    fn clone(&self) -> Self {
+        Self(self.0)
+    }
+}
+
+impl<T: ?Sized> Copy for Has<T> {}
 
 impl<T: 'static> Filter for Has<T> {
     fn filter(&self, table: &Table) -> bool {

@@ -29,13 +29,21 @@ pub trait Item: Depend {
         Self: 'a;
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct Key(pub(crate) ());
+#[derive(Debug, Clone, Copy)]
 pub struct Row(pub(crate) ());
+#[derive(Debug, Clone, Copy)]
 pub struct Table(pub(crate) ());
+#[derive(Debug, Clone, Copy)]
 pub struct Try<I: ?Sized>(pub(crate) I);
+#[derive(Debug)]
 pub struct Read<T: ?Sized>(pub(crate) PhantomData<T>);
+#[derive(Debug)]
 pub struct Write<T: ?Sized>(pub(crate) PhantomData<T>);
+#[derive(Debug, Clone, Copy)]
 pub struct ReadWith(pub(crate) Meta);
+#[derive(Debug, Clone, Copy)]
 pub struct WriteWith(pub(crate) Meta);
 
 impl<I: Item> Item for &I {
@@ -302,6 +310,14 @@ unsafe impl<T: 'static> Depend for Read<T> {
     }
 }
 
+impl<T: ?Sized> Clone for Read<T> {
+    fn clone(&self) -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T: ?Sized> Copy for Read<T> {}
+
 impl<T: 'static> Item for Read<T> {
     type Item<'a>
         = &'a [T]
@@ -338,6 +354,14 @@ unsafe impl<T: 'static> Depend for Write<T> {
         })
     }
 }
+
+impl<T: ?Sized> Clone for Write<T> {
+    fn clone(&self) -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T: ?Sized> Copy for Write<T> {}
 
 impl<T: 'static> Item for Write<T> {
     type Item<'a>

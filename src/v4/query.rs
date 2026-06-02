@@ -8,7 +8,7 @@ use crate::v4::{
 };
 use core::{marker::PhantomData, slice};
 
-pub struct Table<'a, I: Item> {
+pub struct Guard<'a, I: Item> {
     item: &'a I,
     state: &'a mut I::State,
     table: &'a table::Table,
@@ -21,6 +21,8 @@ pub struct Tables<'a, I: Item> {
 }
 
 pub struct Build<I, F>(I, F);
+
+#[derive(Debug, Clone)]
 pub struct Query<I: Item, F: Filter> {
     item: I,
     filter: F,
@@ -108,14 +110,14 @@ impl<'a, I: Item, F: Filter> IntoIterator for &'a mut Query<I, F> {
 }
 
 impl<'a, I: Item> Iterator for Tables<'a, I> {
-    type Item = Table<'a, I>;
+    type Item = Guard<'a, I>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
         unsafe { table.lock(self.item.declare(state)) };
         // Read the count under the lock.
         let count = table.count();
-        Some(Table {
+        Some(Guard {
             count,
             item: self.item,
             state,
@@ -124,7 +126,7 @@ impl<'a, I: Item> Iterator for Tables<'a, I> {
     }
 }
 
-impl<I: Item> Table<'_, I> {
+impl<I: Item> Guard<'_, I> {
     pub fn table(&self) -> &table::Table {
         &self.table
     }
@@ -141,7 +143,7 @@ impl<I: Item> Table<'_, I> {
     }
 }
 
-impl<'a, I: Item> Drop for Table<'a, I> {
+impl<'a, I: Item> Drop for Guard<'a, I> {
     fn drop(&mut self) {
         unsafe { self.table.unlock(self.item.declare(self.state)) };
     }

@@ -20,7 +20,7 @@ use triomphe::{Arc, ThinArc};
 #[derive(Debug, Clone)]
 pub struct Table(ThinArc<Header, Column>);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Tables(Arc<ArcSwapAny<ThinArc<(), Table>>>);
 
 #[derive(Debug)]

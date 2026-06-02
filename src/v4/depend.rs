@@ -1,4 +1,4 @@
-use crate::v4::Error;
+use crate::v4::{Error, utility::Push};
 use core::{
     any::TypeId,
     iter::{empty, from_fn, once},
@@ -23,6 +23,27 @@ pub enum Resource {
     Tables,
     Table,
     Column(TypeId),
+}
+
+pub struct Analysis<D>(D);
+
+impl Analysis<()> {
+    pub const fn new() -> Self {
+        Analysis(())
+    }
+}
+
+impl<D: Depend> Analysis<D> {
+    pub fn add<E: Depend>(self, depend: E) -> Analysis<D::Out>
+    where
+        D: Push<E>,
+    {
+        Analysis(self.0.push(depend))
+    }
+
+    pub fn analyze(&self) -> Result<(), Error> {
+        self.0.analyze()
+    }
 }
 
 pub unsafe trait Depend {
