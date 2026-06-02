@@ -112,7 +112,7 @@ impl<'a, I: Item> Iterator for Tables<'a, I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
-        unsafe { table.lock(self.item.declare(state).map(|column| (column.0, column.1))) };
+        unsafe { table.lock(self.item.declare(state)) };
         // Read the count under the lock.
         let count = table.count();
         Some(Table {
@@ -143,13 +143,7 @@ impl<I: Item> Table<'_, I> {
 
 impl<'a, I: Item> Drop for Table<'a, I> {
     fn drop(&mut self) {
-        unsafe {
-            self.table.unlock(
-                self.item
-                    .declare(self.state)
-                    .map(|column| (column.0, column.1)),
-            )
-        };
+        unsafe { self.table.unlock(self.item.declare(self.state)) };
     }
 }
 
