@@ -11,7 +11,7 @@ use core::{
     any::{Any, TypeId},
     iter::{FusedIterator, empty},
     ops::Range,
-    ptr::{NonNull, copy_nonoverlapping, slice_from_raw_parts_mut},
+    ptr::NonNull,
     slice::{from_raw_parts, from_raw_parts_mut},
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -49,7 +49,6 @@ pub struct Column {
     data: RwLock<NonNull<u8>>,
 }
 
-// TODO: Is this correct?
 unsafe impl Send for Column {}
 unsafe impl Sync for Column {}
 
@@ -346,7 +345,7 @@ impl Table {
                 let next = end
                     .checked_next_power_of_two()
                     .ok_or(Error::TableOverflow)?;
-                self.resize((capacity, next))?;
+                self.grow((capacity, next))?;
             }
         }
     }
@@ -372,7 +371,7 @@ impl Table {
         Ok(())
     }
 
-    fn resize(&self, mut capacities: (u32, u32)) -> Result<u32, Error> {
+    fn grow(&self, mut capacities: (u32, u32)) -> Result<u32, Error> {
         enum Next {
             Done {
                 old: (NonNull<u8>, Layout),
@@ -380,7 +379,6 @@ impl Table {
                 count: u32,
                 capacity: u32,
             },
-            Skip(u32),
             Retry(u32),
         }
 
@@ -410,7 +408,7 @@ impl Table {
                         } => {
                             let source = *data;
                             let target = unsafe { done_new.add(new.1) };
-                            unsafe { head.meta.initialize(source, target, done_count, capacity) };
+                            unsafe { head.meta.copy(source, target, done_count) };
                             *data = target;
                             Ok(Next::Done {
                                 old: (unsafe { source.sub(old.1) }, done_old.1),
@@ -435,14 +433,13 @@ impl Table {
                             count: header.count.load(Ordering::Acquire),
                             capacity,
                         }),
-                        Err(capacity) if capacity < capacities.1 => Ok(Next::Retry(capacity)),
-                        Err(capacity) => Ok(Next::Skip(capacity)),
+                        Err(capacity) => Ok(Next::Retry(capacity)),
                     }
                 }
             }
         }
 
-        loop {
+        while capacities.0 > capacities.1 {
             capacities.0 = match next(
                 self.header(),
                 self.columns(),
@@ -451,11 +448,72 @@ impl Table {
             )? {
                 Next::Done { old, capacity, .. } => {
                     unsafe { deallocate(old.0, old.1) };
-                    break Ok(capacity);
+                    capacity
                 }
-                Next::Skip(capacity) => break Ok(capacity),
                 Next::Retry(old) => old,
             };
+        }
+        Ok(capacities.0)
+    }
+
+    fn resize_mut(
+        columns: &mut [Column],
+        count: u32,
+        capacities: (u32, u32),
+    ) -> Result<bool, Error> {
+        struct Next {
+            old: (NonNull<u8>, Layout),
+            new: NonNull<u8>,
+        }
+
+        fn next(
+            columns: &mut [Column],
+            layouts: (Layout, Layout),
+            count: u32,
+            capacities: (u32, u32),
+        ) -> Result<Next, Error> {
+            match columns.split_first_mut() {
+                Some((head, tail)) => {
+                    let old = head
+                        .meta
+                        .extend(layouts.0, capacities.0)
+                        .map_err(Error::Layout)?;
+                    let new = head
+                        .meta
+                        .extend(layouts.1, capacities.1)
+                        .map_err(Error::Layout)?;
+                    let Next {
+                        old: done_old,
+                        new: done_new,
+                    } = next(tail, (old.0, new.0), count, capacities)?;
+                    let data = head.data.get_mut();
+                    let source = *data;
+                    let target = unsafe { done_new.add(new.1) };
+                    unsafe { head.meta.initialize(source, target, count, capacities.1) };
+                    *data = target;
+                    Ok(Next {
+                        old: (unsafe { source.sub(old.1) }, done_old.1),
+                        new: done_new,
+                    })
+                }
+                None => Ok(Next {
+                    old: (NonNull::dangling(), layouts.0.pad_to_align()),
+                    new: unsafe { allocate(layouts.1.pad_to_align())? },
+                }),
+            }
+        }
+
+        if capacities.0 == capacities.1 {
+            Ok(false)
+        } else {
+            let Next { old, .. } = next(
+                columns,
+                (Layout::new::<()>(), Layout::new::<()>()),
+                count,
+                capacities,
+            )?;
+            unsafe { deallocate(old.0, old.1) };
+            Ok(true)
         }
     }
 
@@ -474,9 +532,16 @@ impl Eq for Table {}
 
 impl Drop for Table {
     fn drop(&mut self) {
-        if self.0.with_arc(Arc::is_unique) {
-            let _ = self.resize((self.capacity(), 0));
-        }
+        self.0.with_arc_mut(|table| {
+            if let Some(table) = Arc::get_mut(table) {
+                let header = table.header_mut();
+                let count = *header.count.get_mut();
+                let capacity = *header.capacity.get_mut();
+                if let Ok(true) = Self::resize_mut(table.slice_mut(), count, (capacity, 0)) {
+                    *table.header_mut().capacity.get_mut() = 0;
+                }
+            }
+        });
     }
 }
 
