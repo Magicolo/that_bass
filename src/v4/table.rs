@@ -60,8 +60,12 @@ impl Tables {
         ))))
     }
 
-    pub(crate) fn get(&self, index: u32) -> Option<Table> {
-        self.0.load().slice.get(index as usize).cloned()
+    pub fn len(&self) -> usize {
+        self.0.load().slice.len()
+    }
+
+    pub fn get(&self, index: u32) -> Option<Table> {
+        self.map(index, Table::clone)
     }
 
     pub(crate) fn map<T>(&self, index: u32, map: impl FnOnce(&Table) -> T) -> Option<T> {
@@ -108,6 +112,12 @@ impl Tables {
                     .eq(metas.iter().map(|meta| meta.identifier()))
             })
             .cloned()
+    }
+}
+
+impl Default for Tables {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::v4::{
-    Error, Meta, Rows, Store, Table,
+    Error, Meta, Store, Table,
     depend::{Access, Depend, Dependency, Resource},
     template::{Column, ColumnWith, Key, Template},
     utility::{IntoNest, Push},

@@ -6,47 +6,6 @@ picked up without prior context of the codebase.
 
 ---
 
-## Phase 1 — Immediate Low-Risk Fixes
-
-These are cheap, have zero or minimal blast radius, and unblock everything else.
-Do them first.
-
-### 1. Remove unused import in `insert.rs`
-
-- **File:** `src/v4/insert.rs:2`
-- **What:** `Rows` is imported but never used.
-- **Fix:** Delete `Rows` from the `use crate::v4::{...}` import list.
-- **Verify:** `cargo check` produces no `unused import` warnings for v4.
-
-### 2. Add standard derives to `Store`
-
-- **File:** `src/v4/mod.rs:21`
-- **What:** `Store` has no `Debug`, `Clone`, or `Default` impl.
-  - `Tables` already derives `Clone` and `Debug` (`table.rs:23-24`), so `Store` can derive them too.
-  - `Default` is trivial because `Store::new()` exists.
-- **Fix:**
-  ```rust
-  #[derive(Debug, Clone, Default)]
-  pub struct Store {
-      tables: Tables,
-  }
-  ```
-- **Verify:** `cargo build` succeeds. A test constructing `Store::default()` works.
-
-### 3. Add `#![deny(unsafe_op_in_unsafe_fn)]` to v4 (or the whole crate)
-
-- **File:** `src/v4/mod.rs` (or `src/lib.rs`)
-- **What:** The v4 code has 57 `unsafe fn` signatures. Many unsafe operations inside them lack explicit `unsafe {}` blocks. The v1 code already has this problem (visible in `cargo check` warnings). Adding the lint prevents new unsafe code from skipping the block requirement.
-- **Fix:** Add `#![deny(unsafe_op_in_unsafe_fn)]` at the top of `src/v4/mod.rs`. Then wrap every unsafe operation in `unsafe {}` blocks throughout v4. This is mechanical but touches many files.
-- **Verify:** `cargo check` produces zero `unsafe_op_in_unsafe_fn` warnings for v4.
-
----
-
-## Phase 2 — Critical Correctness Bugs
-
-These are potential UB or data corruption. They must be fixed before any
-serious use of the library.
-
 ### 4. `Column` `Send` / `Sync` impls are unsound
 
 - **File:** `src/v4/table.rs:51-53`
