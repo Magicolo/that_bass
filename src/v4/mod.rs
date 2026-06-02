@@ -18,6 +18,7 @@ pub use meta::Meta;
 pub use table::{Row, Rows, Table};
 pub use vector::Vector;
 
+#[derive(Default)]
 pub struct Store {
     tables: Tables,
 }
