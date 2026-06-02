@@ -57,30 +57,37 @@ impl Meta {
         }))
     }
 
-    pub fn identifier(self) -> TypeId {
+    #[inline]
+    pub const fn identifier(self) -> TypeId {
         self.0.identifier
     }
 
-    pub fn size(self) -> usize {
+    #[inline]
+    pub const fn size(self) -> usize {
         self.0.size
     }
 
-    pub fn name(self) -> &'static str {
+    #[inline]
+    pub const fn name(self) -> &'static str {
         self.0.name
     }
 
+    #[inline]
     pub const fn drops(self) -> bool {
         self.0.drop.is_some()
     }
 
+    #[inline]
     pub(crate) fn layout(self, count: u32) -> Result<Layout, LayoutError> {
         (self.0.layout)(count)
     }
 
+    #[inline]
     pub(crate) fn extend(self, layout: Layout, count: u32) -> Result<(Layout, usize), LayoutError> {
         layout.extend(self.layout(count)?)
     }
 
+    #[inline]
     pub(crate) unsafe fn initialize(
         self,
         source: NonNull<u8>,
@@ -92,6 +99,7 @@ impl Meta {
         unsafe { self.drop_at(source, count, count.saturating_sub(capacity)) };
     }
 
+    #[inline]
     pub(crate) fn resize(
         self,
         data: NonNull<u8>,
@@ -109,11 +117,18 @@ impl Meta {
         Ok(target)
     }
 
-    pub(crate) unsafe fn offset(self, data: NonNull<u8>, count: u32) -> NonNull<u8> {
+    #[inline]
+    pub(crate) const unsafe fn offset(self, data: NonNull<u8>, count: u32) -> NonNull<u8> {
         unsafe { data.add(self.0.size * count as usize) }
     }
 
-    pub(crate) unsafe fn copy(self, source: NonNull<u8>, target: NonNull<u8>, count: u32) -> bool {
+    #[inline]
+    pub(crate) const unsafe fn copy(
+        self,
+        source: NonNull<u8>,
+        target: NonNull<u8>,
+        count: u32,
+    ) -> bool {
         let count = self.0.size * count as usize;
         if count > 0 {
             unsafe { copy_nonoverlapping(source.as_ptr(), target.as_ptr(), count) };
@@ -123,7 +138,8 @@ impl Meta {
         }
     }
 
-    pub(crate) unsafe fn copy_at(
+    #[inline]
+    pub(crate) const unsafe fn copy_at(
         self,
         source: (NonNull<u8>, u32),
         target: (NonNull<u8>, u32),
@@ -138,6 +154,7 @@ impl Meta {
         }
     }
 
+    #[inline]
     pub(crate) unsafe fn drop(self, data: NonNull<u8>, count: u32) -> bool {
         if count > 0
             && let Some(drop) = self.0.drop
@@ -149,37 +166,43 @@ impl Meta {
         }
     }
 
+    #[inline]
     pub(crate) unsafe fn drop_at(self, data: NonNull<u8>, index: u32, count: u32) -> bool {
         unsafe { self.drop(self.offset(data, index), count) }
     }
 
+    #[inline]
     pub(crate) unsafe fn get<'a>(self, data: NonNull<u8>) -> &'a dyn Any {
         let item = unsafe { (self.0.get)(data) };
         debug_assert_eq!(item.type_id(), self.identifier());
         item
     }
 
+    #[inline]
     pub(crate) unsafe fn get_at<'a>(self, data: NonNull<u8>, index: u32) -> &'a dyn Any {
         unsafe { self.get(self.offset(data, index)) }
     }
 
+    #[inline]
     pub(crate) unsafe fn get_mut<'a>(self, data: NonNull<u8>) -> &'a mut dyn Any {
         let item = unsafe { (self.0.get_mut)(data) };
         debug_assert_eq!(item.type_id(), self.identifier());
         item
     }
 
+    #[inline]
     pub(crate) unsafe fn get_mut_at<'a>(self, data: NonNull<u8>, index: u32) -> &'a mut dyn Any {
         unsafe { self.get_mut(self.offset(data, index)) }
     }
 
+    #[inline]
     pub(crate) unsafe fn set(self, data: NonNull<u8>, value: Box<dyn Any>) {
         debug_assert_eq!(self.identifier(), value.type_id());
         unsafe { (self.0.set)(value, data) };
     }
 
+    #[inline]
     pub(crate) unsafe fn set_at(self, data: NonNull<u8>, value: Box<dyn Any>, index: u32) {
-        debug_assert_eq!(self.identifier(), value.type_id());
         unsafe { self.set(self.offset(data, index), value) };
     }
 }

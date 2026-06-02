@@ -120,7 +120,7 @@ impl Template for ColumnWith {
             table
                 .columns()
                 .get_unchecked(*state as usize)
-                .set_at(item, index)
+                .set_at_with(item, index)
         };
     }
 }
@@ -142,7 +142,7 @@ impl<T: 'static> Template for Column<T> {
             table
                 .columns()
                 .get_unchecked(*state as usize)
-                .set(item, index)
+                .set_at(item, index)
         };
     }
 }

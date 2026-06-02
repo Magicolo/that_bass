@@ -122,6 +122,7 @@ impl Default for Tables {
 }
 
 impl Column {
+    #[inline]
     pub(crate) const fn new(meta: Meta) -> Self {
         Self {
             meta,
@@ -129,10 +130,12 @@ impl Column {
         }
     }
 
+    #[inline]
     pub const fn meta(&self) -> Meta {
         self.meta
     }
 
+    #[inline]
     pub(crate) unsafe fn lock(&self, access: Access) -> bool {
         if self.meta.size() == 0 {
             false
@@ -145,6 +148,7 @@ impl Column {
         }
     }
 
+    #[inline]
     pub(crate) unsafe fn unlock(&self, access: Access) -> bool {
         if self.meta.size() == 0 {
             false
@@ -157,36 +161,43 @@ impl Column {
         }
     }
 
+    #[inline]
     pub(crate) unsafe fn get<T: 'static>(&self, count: u32) -> &[T] {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
         unsafe { from_raw_parts(self.data().cast::<T>().as_ptr(), count as usize) }
     }
 
+    #[inline]
     pub(crate) unsafe fn get_mut<T: 'static>(&self, count: u32) -> &mut [T] {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
         unsafe { from_raw_parts_mut(self.data().cast::<T>().as_ptr(), count as usize) }
     }
 
+    #[inline]
     pub(crate) unsafe fn get_in(&self, slice: &mut Slice, count: u32) {
         debug_assert_eq!(self.meta, slice.meta());
         unsafe { slice.set_parts(self.data(), count as _) };
     }
 
-    pub(crate) unsafe fn set<T: 'static>(&self, item: T, row: u32) {
+    #[inline]
+    pub(crate) unsafe fn set_at<T: 'static>(&self, item: T, row: u32) {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
         unsafe { self.data().cast::<T>().add(row as usize).write(item) };
     }
 
-    pub(crate) unsafe fn set_at(&self, item: Box<dyn Any>, row: u32) {
+    #[inline]
+    pub(crate) unsafe fn set_at_with(&self, item: Box<dyn Any>, row: u32) {
         debug_assert_eq!(self.meta.identifier(), item.type_id());
         unsafe { self.meta.set_at(self.data(), item, row) };
     }
 
+    #[inline]
     pub(crate) unsafe fn copy_at(&self, source: u32, target: u32, count: u32) -> bool {
         let data = unsafe { self.data() };
         unsafe { self.meta.copy_at((data, source), (data, target), count) }
     }
 
+    #[inline]
     pub(crate) unsafe fn drop_at(&self, row: u32, count: u32) -> bool {
         unsafe { self.meta.drop_at(self.data(), row, count) }
     }
