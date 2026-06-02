@@ -4,11 +4,9 @@ pub mod filter;
 pub mod insert;
 pub mod item;
 pub mod meta;
-pub mod module;
 pub mod query;
 pub mod remove;
 pub mod slice;
-pub mod state;
 pub mod table;
 pub mod template;
 pub mod utility;
@@ -39,12 +37,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v4::{
-        depend::{Analysis, Depend},
-        insert::Insert,
-        query::Query,
-        remove::Remove,
-    };
+    use crate::v4::{depend::Analysis, insert::Insert, query::Query, remove::Remove};
     use itertools::izip;
     use std::{
         sync::atomic::{AtomicU32, Ordering},

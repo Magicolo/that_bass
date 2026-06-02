@@ -46,7 +46,7 @@ pub struct ReadWith(pub(crate) Meta);
 #[derive(Debug, Clone, Copy)]
 pub struct WriteWith(pub(crate) Meta);
 
-impl<I: Item> Item for &I {
+impl<I: Item + ?Sized> Item for &I {
     type Item<'a>
         = I::Item<'a>
     where
@@ -70,11 +70,11 @@ impl<I: Item> Item for &I {
     where
         Self: 'a,
     {
-        I::get(self, state, count, table)
+        unsafe { I::get(self, state, count, table) }
     }
 }
 
-impl<I: Item> Item for &mut I {
+impl<I: Item + ?Sized> Item for &mut I {
     type Item<'a>
         = I::Item<'a>
     where
@@ -98,7 +98,7 @@ impl<I: Item> Item for &mut I {
     where
         Self: 'a,
     {
-        I::get(self, state, count, table)
+        unsafe { I::get(self, state, count, table) }
     }
 }
 
@@ -148,20 +148,22 @@ impl<I0: Item, I1: Item> Item for (I0, I1) {
     where
         Self: 'a,
     {
-        (
-            self.0.get(&mut state.0, count, table),
-            self.1.get(&mut state.1, count, table),
-        )
+        unsafe {
+            (
+                self.0.get(&mut state.0, count, table),
+                self.1.get(&mut state.1, count, table),
+            )
+        }
     }
 }
 
-unsafe impl<I: Item> Depend for Try<I> {
+unsafe impl<I: Item + ?Sized> Depend for Try<I> {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         self.0.depend()
     }
 }
 
-impl<I: Item> Item for Try<I> {
+impl<I: Item + ?Sized> Item for Try<I> {
     type Item<'a>
         = Option<I::Item<'a>>
     where
@@ -188,7 +190,7 @@ impl<I: Item> Item for Try<I> {
     where
         Self: 'a,
     {
-        Some(self.0.get(state.as_mut()?, count, table))
+        Some(unsafe { self.0.get(state.as_mut()?, count, table) })
     }
 }
 

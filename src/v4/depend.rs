@@ -3,7 +3,11 @@ use core::{
     any::TypeId,
     iter::{empty, from_fn, once},
 };
-use std::collections::{HashMap, hash_map::Entry};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    rc::Rc,
+    sync::Arc,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Dependency {
@@ -53,13 +57,13 @@ pub unsafe trait Depend {
     }
 }
 
-unsafe impl<D: Depend> Depend for &D {
+unsafe impl<D: Depend + ?Sized> Depend for &D {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         D::depend(self)
     }
 }
 
-unsafe impl<D: Depend> Depend for &mut D {
+unsafe impl<D: Depend + ?Sized> Depend for &mut D {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         D::depend(self)
     }
@@ -74,6 +78,48 @@ unsafe impl Depend for () {
 unsafe impl<D0: Depend, D1: Depend> Depend for (D0, D1) {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         self.0.depend().chain(self.1.depend())
+    }
+}
+
+unsafe impl<D: Depend + ?Sized> Depend for Box<D> {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        D::depend(self)
+    }
+}
+
+unsafe impl<D: Depend + ?Sized> Depend for Rc<D> {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        D::depend(self)
+    }
+}
+
+unsafe impl<D: Depend + ?Sized> Depend for Arc<D> {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        D::depend(self)
+    }
+}
+
+unsafe impl<D: Depend + ?Sized> Depend for triomphe::Arc<D> {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        D::depend(self)
+    }
+}
+
+unsafe impl<D: Depend> Depend for Vec<D> {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        self.iter().flat_map(D::depend)
+    }
+}
+
+unsafe impl<D: Depend> Depend for [D] {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        self.iter().flat_map(D::depend)
+    }
+}
+
+unsafe impl<D: Depend, const N: usize> Depend for [D; N] {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        self.iter().flat_map(D::depend)
     }
 }
 

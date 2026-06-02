@@ -18,7 +18,7 @@ pub struct Key(pub(crate) ());
 pub struct Column<T: ?Sized>(pub(crate) PhantomData<T>);
 pub struct ColumnWith(pub(crate) Meta);
 
-impl<T: Template> Template for &T {
+impl<T: Template + ?Sized> Template for &T {
     type Item = T::Item;
     type State = T::State;
 
@@ -35,7 +35,7 @@ impl<T: Template> Template for &T {
     }
 }
 
-impl<T: Template> Template for &mut T {
+impl<T: Template + ?Sized> Template for &mut T {
     type Item = T::Item;
     type State = T::State;
 

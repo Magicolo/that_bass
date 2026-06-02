@@ -12,13 +12,13 @@ pub struct HasWith(pub(crate) Meta);
 #[derive(Debug, Clone, Copy)]
 pub struct Not<F: ?Sized>(pub(crate) F);
 
-impl<F: Filter> Filter for &F {
+impl<F: Filter + ?Sized> Filter for &F {
     fn filter(&self, table: &Table) -> bool {
         F::filter(self, table)
     }
 }
 
-impl<F: Filter> Filter for &mut F {
+impl<F: Filter + ?Sized> Filter for &mut F {
     fn filter(&self, table: &Table) -> bool {
         F::filter(self, table)
     }
