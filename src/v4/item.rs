@@ -2,11 +2,10 @@ use crate::v4::{
     Meta, Rows,
     depend::{Access, Depend, Dependency, Resource},
     slice::Slice,
-    table,
+    table::{self, Lock},
 };
 use core::{
     any::TypeId,
-    cell::RefCell,
     iter::{empty, once},
     marker::PhantomData,
 };
@@ -19,7 +18,7 @@ pub trait Item: Depend {
         Self: 'a;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State>;
-    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)>;
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock>;
     unsafe fn get<'a>(
         &'a self,
         state: &'a mut Self::State,
@@ -58,7 +57,7 @@ impl<I: Item + ?Sized> Item for &I {
         I::initialize(self, table)
     }
 
-    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
         I::declare(self, state)
     }
 
@@ -86,7 +85,7 @@ impl<I: Item + ?Sized> Item for &mut I {
         I::initialize(self, table)
     }
 
-    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
         I::declare(self, state)
     }
 
@@ -114,7 +113,7 @@ impl Item for () {
         Some(())
     }
 
-    fn declare(&self, _: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+    fn declare(&self, _: &Self::State) -> impl Iterator<Item = Lock> {
         empty()
     }
 
@@ -136,7 +135,7 @@ impl<I0: Item, I1: Item> Item for (I0, I1) {
         Some((self.0.initialize(table)?, self.1.initialize(table)?))
     }
 
-    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
         self.0.declare(&state.0).merge(self.1.declare(&state.1))
     }
 
@@ -175,7 +174,7 @@ impl<I: Item + ?Sized> Item for Try<I> {
         Some(self.0.initialize(table))
     }
 
-    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
         state
             .as_ref()
             .into_iter()
@@ -213,7 +212,7 @@ impl Item for Key {
         None
     }
 
-    fn declare(&self, _: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+    fn declare(&self, _: &Self::State) -> impl Iterator<Item = Lock> {
         empty()
     }
 
@@ -238,20 +237,19 @@ unsafe impl Depend for Row {
     }
 }
 
-// TODO: Implement
 impl Item for Row {
     type Item<'a>
         = Rows<'a>
     where
         Self: 'a;
-    type State = RefCell<Vec<u32>>;
+    type State = Vec<u32>;
 
     fn initialize(&self, _: &table::Table) -> Option<Self::State> {
-        Some(RefCell::new(Vec::new()))
+        Some(Vec::new())
     }
 
-    fn declare(&self, _: &Self::State) -> impl Iterator<Item = (u32, Access)> {
-        empty()
+    fn declare(&self, _: &Self::State) -> impl Iterator<Item = Lock> {
+        once(Lock::State)
     }
 
     unsafe fn get<'a>(
@@ -287,7 +285,7 @@ impl Item for Table {
         Some(())
     }
 
-    fn declare(&self, _: &Self::State) -> impl Iterator<Item = (u32, Access)> {
+    fn declare(&self, _: &Self::State) -> impl Iterator<Item = Lock> {
         empty()
     }
 
@@ -332,8 +330,8 @@ impl<T: 'static> Item for Read<T> {
         table.column(TypeId::of::<T>())
     }
 
-    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
-        once((*state, Access::Read))
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
+        once(Lock::Column(*state, Access::Read))
     }
 
     unsafe fn get<'a>(
@@ -377,8 +375,8 @@ impl<T: 'static> Item for Write<T> {
         table.column(TypeId::of::<T>())
     }
 
-    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
-        once((*state, Access::Write))
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
+        once(Lock::Column(*state, Access::Write))
     }
 
     unsafe fn get<'a>(
@@ -419,8 +417,8 @@ impl Item for ReadWith {
         Some((table.column(self.0.identifier())?, Slice::empty(self.0)))
     }
 
-    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
-        once((state.0, Access::Read))
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
+        once(Lock::Column(state.0, Access::Read))
     }
 
     unsafe fn get<'a>(
@@ -462,8 +460,8 @@ impl Item for WriteWith {
         Some((table.column(self.0.identifier())?, Slice::empty(self.0)))
     }
 
-    fn declare(&self, state: &Self::State) -> impl Iterator<Item = (u32, Access)> {
-        once((state.0, Access::Write))
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
+        once(Lock::Column(state.0, Access::Write))
     }
 
     unsafe fn get<'a>(
