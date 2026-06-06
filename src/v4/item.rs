@@ -6,6 +6,7 @@ use crate::v4::{
 };
 use core::{
     any::TypeId,
+    cell::RefCell,
     iter::{empty, once},
     marker::PhantomData,
 };
@@ -243,10 +244,10 @@ impl Item for Row {
         = Rows<'a>
     where
         Self: 'a;
-    type State = ();
+    type State = RefCell<Vec<u32>>;
 
     fn initialize(&self, _: &table::Table) -> Option<Self::State> {
-        Some(())
+        Some(RefCell::new(Vec::new()))
     }
 
     fn declare(&self, _: &Self::State) -> impl Iterator<Item = (u32, Access)> {
@@ -255,14 +256,14 @@ impl Item for Row {
 
     unsafe fn get<'a>(
         &'a self,
-        _: &'a mut Self::State,
-        _: u32,
+        state: &'a mut Self::State,
+        count: u32,
         table: &'a table::Table,
     ) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        Rows::new(0..0, table)
+        Rows::new(0..count, table, state)
     }
 }
 

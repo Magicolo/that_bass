@@ -9,13 +9,14 @@ use arc_swap::{ArcSwapAny, AsRaw};
 use core::{
     alloc::Layout,
     any::{Any, TypeId},
+    cell::RefCell,
     iter::{FusedIterator, empty},
     ops::Range,
     ptr::{NonNull, replace},
     slice::{from_raw_parts, from_raw_parts_mut},
     sync::atomic::{AtomicU32, Ordering},
 };
-use parking_lot::{RwLock, lock_api::RawRwLock};
+use parking_lot::{Condvar, Mutex, RwLock, lock_api::RawRwLock};
 use triomphe::{Arc, ThinArc};
 
 #[derive(Debug, Clone)]
@@ -29,18 +30,40 @@ struct Header {
     index: u32,
     count: AtomicU32,
     capacity: AtomicU32,
+    /*
+        - On new: `Rows<'a>` takes the lock.
+            - If the rows are empty, increment the counter, drop the lock, complete `Rows<'a>::new`.
+            - If the rows are non-empty, it means that another `Rows<'a>`'s drop is waiting, `wait.wait_while(guard, |pair| pair.1.len() > 0)`, loop.
+        - On drop: `Rows<'a>` takes the lock, extends the rows, decrements the counter.
+            - If the counter is 0, hold the lock, resolve removals (no other `Rows<'a>` exist for this table), `wait.notify_all`.
+            - If the counter is > 0, `wait.wait_while(guard, |pair| pair.0 > 0)`, loop.
+    */
+    wait: Condvar,
+    removals: Mutex<(u32, Vec<u32>)>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Lock {
+    access: Access,
+    target: Target,
+}
+
+pub enum Target {
+    Count,
+    Column(u32),
+}
+
+#[derive(Debug)]
 pub struct Row<'a> {
     row: u32,
     table: &'a Table,
+    remove: &'a RefCell<Vec<u32>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug)]
 pub struct Rows<'a> {
     rows: Range<u32>,
     table: &'a Table,
+    remove: &'a RefCell<Vec<u32>>,
 }
 
 #[derive(Debug)]
@@ -197,10 +220,6 @@ impl Column {
 }
 
 impl<'a> Row<'a> {
-    pub(crate) const fn new(row: u32, table: &'a Table) -> Self {
-        Self { row, table }
-    }
-
     pub const fn row(&self) -> u32 {
         self.row
     }
@@ -208,27 +227,73 @@ impl<'a> Row<'a> {
     pub fn table(&self) -> u32 {
         self.table.index()
     }
+
+    pub fn remove(&mut self) -> bool {
+        let mut remove = self.remove.borrow_mut();
+        match remove.last() {
+            Some(&last) if self.row > last => {
+                remove.push(self.row);
+                true
+            }
+            Some(&last) if self.row == last => false,
+            Some(_) => match remove.binary_search(&self.row) {
+                Ok(_) => false,
+                Err(index) => {
+                    remove.insert(index, self.row);
+                    true
+                }
+            },
+            None => {
+                remove.push(self.row);
+                true
+            }
+        }
+    }
 }
+
+impl PartialEq for Row<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        (self.row, self.table) == (other.row, other.table)
+    }
+}
+
+impl Eq for Row<'_> {}
 
 impl PartialOrd for Row<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        (self.table.address(), self.row).partial_cmp(&(other.table.address(), other.row))
+        (self.table, self.row).partial_cmp(&(other.table, other.row))
     }
 }
 
 impl Ord for Row<'_> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.table.address(), self.row).cmp(&(other.table.address(), other.row))
+        (self.table, self.row).cmp(&(other.table, other.row))
     }
 }
 
 impl<'a> Rows<'a> {
-    pub(crate) const fn new(rows: Range<u32>, table: &'a Table) -> Self {
-        Self { rows, table }
+    pub(crate) const fn new(
+        rows: Range<u32>,
+        table: &'a Table,
+        remove: &'a RefCell<Vec<u32>>,
+    ) -> Self {
+        Self {
+            rows,
+            table,
+            remove,
+        }
     }
 
     pub fn table(&self) -> u32 {
         self.table.index()
+    }
+
+    fn row(&self, row: u32) -> Row<'a> {
+        Row {
+            row,
+            table: self.table,
+            remove: self.remove,
+        }
     }
 }
 
@@ -236,7 +301,7 @@ impl<'a> Iterator for Rows<'a> {
     type Item = Row<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(Row::new(self.rows.next()?, self.table))
+        self.rows.next().map(|row| self.row(row))
     }
 }
 
@@ -248,7 +313,7 @@ impl ExactSizeIterator for Rows<'_> {
 
 impl DoubleEndedIterator for Rows<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        Some(Row::new(self.rows.next_back()?, self.table))
+        self.rows.next_back().map(|row| self.row(row))
     }
 }
 
@@ -296,11 +361,16 @@ impl Table {
         self.columns().iter().map(|column| column.meta()).eq(metas)
     }
 
-    pub(crate) unsafe fn lock(&self, locks: impl Iterator<Item = (u32, Access)>) {
+    pub(crate) unsafe fn lock(&self, locks: impl Iterator<Item = Lock>) {
         let columns = self.columns();
-        for (index, access) in locks {
-            if let Some(column) = columns.get(index as usize) {
-                unsafe { column.lock(access) };
+        for Lock { access, target } in locks {
+            match target {
+                Target::Count => self.count.raw,
+                Target::Column(column) => {
+                    if let Some(column) = columns.get(column as usize) {
+                        unsafe { column.lock(access) };
+                    }
+                }
             }
         }
     }
@@ -430,11 +500,23 @@ impl Table {
 
 impl PartialEq for Table {
     fn eq(&self, other: &Self) -> bool {
-        self.address() == other.address()
+        self.address().eq(&other.address())
     }
 }
 
 impl Eq for Table {}
+
+impl PartialOrd for Table {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.address().partial_cmp(&other.address())
+    }
+}
+
+impl Ord for Table {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.address().cmp(&other.address())
+    }
+}
 
 impl Drop for Table {
     fn drop(&mut self) {
