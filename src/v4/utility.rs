@@ -46,19 +46,15 @@ pub trait Push<T> {
     fn push(self, item: T) -> Self::Out;
 }
 
-pub struct Defer<T, F: FnOnce() -> T>(Option<F>);
+pub struct Defer<F: FnOnce()>(Option<F>);
 
-impl<T, F: FnOnce() -> T> Defer<T, F> {
+impl<F: FnOnce()> Defer<F> {
     pub const fn new(defer: F) -> Self {
         Self(Some(defer))
     }
-
-    pub fn run(mut self) -> T {
-        self.0.take().expect("must be `Some`")()
-    }
 }
 
-impl<T, F: FnOnce() -> T> Drop for Defer<T, F> {
+impl<F: FnOnce()> Drop for Defer<F> {
     fn drop(&mut self) {
         if let Some(defer) = self.0.take() {
             defer();
@@ -66,7 +62,7 @@ impl<T, F: FnOnce() -> T> Drop for Defer<T, F> {
     }
 }
 
-pub fn defer<T, F: FnOnce() -> T>(defer: F) -> Defer<T, F> {
+pub fn defer<F: FnOnce()>(defer: F) -> Defer<F> {
     Defer::new(defer)
 }
 

@@ -11,7 +11,7 @@ build = "build.rs"
 
 [dependencies]
 that_base_derive = { path = "./that_base_derive" }
-parking_lot = { version = "0.12.5", features = ["hardware-lock-elision", "deadlock_detection"] }
+parking_lot = { version = "0.12.5", features = ["deadlock_detection"] }
 slice-dst = "1.6.0"
 orn = "1.0.0"
 atomic-wait = "1.1.0"
