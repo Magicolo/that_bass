@@ -12,7 +12,6 @@ use core::{
     cmp::{self, Reverse},
     fmt::{self, Debug, Formatter},
     iter::{FusedIterator, empty},
-    mem::take,
     ops::Range,
     ptr::NonNull,
     slice::{from_raw_parts, from_raw_parts_mut},
@@ -277,14 +276,6 @@ impl Ord for Row<'_> {
 }
 
 impl<'a> Rows<'a> {
-    pub(crate) unsafe fn new(rows: Range<u32>, table: &'a Table, remove: &'a mut Vec<u32>) -> Self {
-        Self {
-            rows,
-            table,
-            remove,
-        }
-    }
-
     pub fn remove(&mut self) {
         self.remove.extend(self.rows.clone());
     }
@@ -385,7 +376,7 @@ impl Table {
     pub(crate) unsafe fn lock_all(&self, locks: impl IntoIterator<Item = Lock>) -> Option<u32> {
         locks
             .into_iter()
-            .fold(None, |count, lock| count.or(unsafe { self.lock_one(lock) }))
+            .fold(None, |count, lock| unsafe { self.lock_one(lock) }.or(count))
     }
 
     pub(crate) unsafe fn lock_one(&self, lock: Lock) -> Option<u32> {
@@ -409,8 +400,8 @@ impl Table {
     }
 
     pub(crate) unsafe fn unlock_all(&self, locks: impl IntoIterator<Item = Lock>) -> bool {
-        locks.into_iter().fold(false, |resolve, lock| {
-            resolve | unsafe { self.unlock_one(lock) }
+        locks.into_iter().fold(false, |resolve, lock| unsafe {
+            self.unlock_one(lock) | resolve
         })
     }
 
@@ -431,18 +422,6 @@ impl Table {
                 }
                 false
             }
-        }
-    }
-
-    pub(crate) unsafe fn lock_columns(&self, access: Access) {
-        for column in self.columns() {
-            unsafe { column.lock(access) };
-        }
-    }
-
-    pub(crate) unsafe fn unlock_columns(&self, access: Access) {
-        for column in self.columns() {
-            unsafe { column.unlock(access) };
         }
     }
 
