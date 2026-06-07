@@ -5,12 +5,10 @@ pub mod insert;
 pub mod item;
 pub mod meta;
 pub mod query;
-pub mod remove;
 pub mod slice;
 pub mod table;
 pub mod template;
 pub mod utility;
-// pub mod vector;
 
 use crate::v4::table::Tables;
 pub use error::Error;
@@ -37,7 +35,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v4::{depend::Analysis, insert::Insert, query::Query, remove::Remove};
+    use crate::v4::{depend::Analysis, insert::Insert, query::Query};
     use itertools::izip;
     use std::{
         sync::atomic::{AtomicU32, Ordering},
@@ -70,8 +68,8 @@ mod tests {
             .build(&store)?;
         let mut query3 = query1.clone();
         let mut query4 = query2.clone();
+        let mut query5 = Query::builder().rows().build(&store)?;
         let mut insert = Insert::builder().key().column::<char>().build(&store)?;
-        let mut remove = Remove::builder().build(&store)?;
         {
             let signal = AtomicU32::new(0);
             scope(|scope| {
@@ -79,11 +77,11 @@ mod tests {
                 scope.spawn(|| {
                     Analysis::new().add(&query3).add(&query4).analyze()?;
                     for mut outer in query3.tables() {
-                        let (a, b) = outer.columns();
+                        let (a, b) = outer.get();
                         let Some(b) = b else { continue };
 
                         for mut inner in query4.tables() {
-                            let (c, d) = inner.columns();
+                            let (c, d) = inner.get();
                             for (a, b, c, d) in izip!(&*a, &mut *b, &*c, &*d) {
                                 b.push(*a);
                                 b.push(*c);
@@ -97,7 +95,7 @@ mod tests {
                 });
                 scope.spawn(|| {
                     for mut guard in query1.tables() {
-                        let (a, b) = guard.columns();
+                        let (a, b) = guard.get();
                         let Some(b) = b else { continue };
                         for (a, b) in izip!(a, b) {
                             b.push(*a);
@@ -108,7 +106,7 @@ mod tests {
                 });
                 scope.spawn(move || {
                     for mut guard in query2.tables() {
-                        let (a, b) = guard.columns();
+                        let (a, b) = guard.get();
                         for (a, b) in izip!(a, b) {
                             *b = *a as u32;
                         }
@@ -123,7 +121,10 @@ mod tests {
                 });
                 scope.spawn(move || {
                     wait_for(&signal, 1);
-                    remove.all();
+                    for mut guard in query5.tables() {
+                        let (mut rows,) = guard.get();
+                        rows.remove();
+                    }
                     anyhow::Ok(())
                 });
                 anyhow::Ok(())

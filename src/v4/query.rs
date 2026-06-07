@@ -1,8 +1,10 @@
+#[cfg(debug_assertions)]
+use crate::v4::table::Lock;
 use crate::v4::{
     Error, Meta, Store,
     depend::{Depend, Dependency},
     filter::{Filter, Has, HasWith, Not},
-    item::{self, Item, Read, ReadWith, Try, Write, WriteWith},
+    item::{self, Context, Item, Read, ReadWith, Try, Write, WriteWith},
     table,
     utility::{IntoFlat, Push},
 };
@@ -13,6 +15,8 @@ pub struct Guard<'a, I: Item> {
     state: &'a mut I::State,
     table: &'a table::Table,
     count: u32,
+    #[cfg(debug_assertions)]
+    locks: Vec<Lock>,
 }
 
 pub struct Tables<'a, I: Item> {
@@ -114,10 +118,11 @@ impl<'a, I: Item> Iterator for Tables<'a, I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
-        unsafe { table.lock_all(self.item.declare(state)) };
-        let count = table.count();
+        let count = unsafe { table.lock_all(self.item.declare(state)) };
         Some(Guard {
-            count,
+            #[cfg(debug_assertions)]
+            locks: self.item.declare(state).collect(),
+            count: count.unwrap_or_else(|| table.count()),
             item: self.item,
             state,
             table,
@@ -134,17 +139,23 @@ impl<I: Item> Guard<'_, I> {
         self.count
     }
 
-    pub fn columns<'a>(&'a mut self) -> <I::Item<'a> as IntoFlat>::Flat
+    pub fn get<'a>(&'a mut self) -> <I::Item<'a> as IntoFlat>::Flat
     where
         I::Item<'a>: IntoFlat,
     {
-        unsafe { self.item.get(&mut self.state, self.count, self.table) }.into_flat()
+        #[cfg(debug_assertions)]
+        let context = Context::new(self.count, self.table, &self.locks);
+        #[cfg(not(debug_assertions))]
+        let context = Context::new(self.count, self.table);
+        unsafe { self.item.get(&mut self.state, context) }.into_flat()
     }
 }
 
 impl<'a, I: Item> Drop for Guard<'a, I> {
     fn drop(&mut self) {
-        unsafe { self.table.unlock_all(self.item.declare(self.state)) };
+        if unsafe { self.table.unlock_all(self.item.declare(self.state)) } {
+            let _ = self.table.resolve();
+        }
     }
 }
 
@@ -156,11 +167,11 @@ impl<I, F> Build<I, F> {
         self.push_item(item::Key(()))
     }
 
-    pub fn row(self) -> Build<I::Out, F>
+    pub fn rows(self) -> Build<I::Out, F>
     where
-        I: Push<item::Row>,
+        I: Push<item::Rows>,
     {
-        self.push_item(item::Row(()))
+        self.push_item(item::Rows(()))
     }
 
     pub fn table(self) -> Build<I::Out, F>

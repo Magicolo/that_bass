@@ -9,10 +9,12 @@ use arc_swap::{ArcSwapAny, AsRaw};
 use core::{
     alloc::Layout,
     any::{Any, TypeId},
-    cell::RefCell,
+    cmp::{self, Reverse},
+    fmt::{self, Debug, Formatter},
     iter::{FusedIterator, empty},
+    mem::take,
     ops::Range,
-    ptr::{NonNull, replace},
+    ptr::NonNull,
     slice::{from_raw_parts, from_raw_parts_mut},
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -25,45 +27,48 @@ pub struct Table(ThinArc<Header, Column>);
 #[derive(Debug, Clone)]
 pub struct Tables(Arc<ArcSwapAny<ThinArc<(), Table>>>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Lock {
+    Rows,
+    Column(u32, Access),
+}
+
+pub struct Row<'a> {
+    row: u32,
+    table: &'a Table,
+    remove: *mut Vec<u32>,
+}
+
+#[derive(Debug)]
+pub(crate) struct State {
+    pub(crate) lock: u32,
+    pub(crate) count: u32,
+    pub(crate) capacity: u32,
+    remove: Vec<u32>,
+}
+
 #[derive(Debug)]
 struct Header {
     index: u32,
     count: AtomicU32,
-    capacity: AtomicU32,
-    /*
-        - On new: `Rows<'a>` takes the lock.
-            - If the rows are empty, increment the counter, drop the lock, complete `Rows<'a>::new`.
-            - If the rows are non-empty, it means that another `Rows<'a>`'s drop is waiting, `wait.wait_while(guard, |pair| pair.1.len() > 0)`, loop.
-        - On drop: `Rows<'a>` takes the lock, extends the rows, decrements the counter.
-            - If the counter is 0, hold the lock, resolve removals (no other `Rows<'a>` exist for this table), `wait.notify_all`.
-            - If the counter is > 0, `wait.wait_while(guard, |pair| pair.0 > 0)`, loop.
-    */
     wait: Condvar,
-    removals: Mutex<(u32, Vec<u32>)>,
+    state: Mutex<State>,
 }
 
-pub struct Lock {
-    access: Access,
-    target: Target,
-}
-
-pub enum Target {
-    Count,
-    Column(u32),
-}
-
-#[derive(Debug)]
-pub struct Row<'a> {
-    row: u32,
-    table: &'a Table,
-    remove: &'a RefCell<Vec<u32>>,
+impl Debug for Row<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Row")
+            .field("row", &self.row)
+            .field("table", &self.table.index())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
 pub struct Rows<'a> {
     rows: Range<u32>,
     table: &'a Table,
-    remove: &'a RefCell<Vec<u32>>,
+    remove: &'a mut Vec<u32>,
 }
 
 #[derive(Debug)]
@@ -229,22 +234,22 @@ impl<'a> Row<'a> {
     }
 
     pub fn remove(&mut self) -> bool {
-        let mut remove = self.remove.borrow_mut();
-        match remove.last() {
+        let local = unsafe { &mut *self.remove };
+        match local.last() {
             Some(&last) if self.row > last => {
-                remove.push(self.row);
+                local.push(self.row);
                 true
             }
             Some(&last) if self.row == last => false,
-            Some(_) => match remove.binary_search(&self.row) {
+            Some(_) => match local.binary_search(&self.row) {
                 Ok(_) => false,
                 Err(index) => {
-                    remove.insert(index, self.row);
+                    local.insert(index, self.row);
                     true
                 }
             },
             None => {
-                remove.push(self.row);
+                local.push(self.row);
                 true
             }
         }
@@ -260,23 +265,19 @@ impl PartialEq for Row<'_> {
 impl Eq for Row<'_> {}
 
 impl PartialOrd for Row<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         (self.table, self.row).partial_cmp(&(other.table, other.row))
     }
 }
 
 impl Ord for Row<'_> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
         (self.table, self.row).cmp(&(other.table, other.row))
     }
 }
 
 impl<'a> Rows<'a> {
-    pub(crate) const fn new(
-        rows: Range<u32>,
-        table: &'a Table,
-        remove: &'a RefCell<Vec<u32>>,
-    ) -> Self {
+    pub(crate) unsafe fn new(rows: Range<u32>, table: &'a Table, remove: &'a mut Vec<u32>) -> Self {
         Self {
             rows,
             table,
@@ -284,16 +285,26 @@ impl<'a> Rows<'a> {
         }
     }
 
-    pub fn table(&self) -> u32 {
-        self.table.index()
+    pub fn remove(&mut self) {
+        self.remove.extend(self.rows.clone());
     }
 
-    fn row(&self, row: u32) -> Row<'a> {
+    fn row(&mut self, row: u32) -> Row<'a> {
         Row {
             row,
             table: self.table,
-            remove: self.remove,
+            remove: self.remove as *mut _,
         }
+    }
+}
+
+impl Drop for Rows<'_> {
+    fn drop(&mut self) {
+        let header = self.table.header();
+        let mut guard = header.state.lock();
+        debug_assert!(guard.lock > 0);
+        guard.remove.append(&mut self.remove);
+        guard.lock -= 1;
     }
 }
 
@@ -325,7 +336,13 @@ impl Table {
             Header {
                 index,
                 count: AtomicU32::new(0),
-                capacity: AtomicU32::new(0),
+                wait: Condvar::new(),
+                state: Mutex::new(State {
+                    lock: 0,
+                    count: 0,
+                    capacity: 0,
+                    remove: Vec::new(),
+                }),
             },
             metas.iter().copied().map(Column::new),
         ))
@@ -353,143 +370,181 @@ impl Table {
         self.header().count.load(Ordering::Acquire)
     }
 
-    pub fn capacity(&self) -> u32 {
-        self.header().capacity.load(Ordering::Acquire)
+    pub(crate) unsafe fn rows<'a>(&'a self, count: u32, remove: &'a mut Vec<u32>) -> Rows<'a> {
+        Rows {
+            rows: 0..count,
+            table: self,
+            remove,
+        }
     }
 
     pub(crate) fn is(&self, metas: impl IntoIterator<Item = Meta>) -> bool {
         self.columns().iter().map(|column| column.meta()).eq(metas)
     }
 
-    pub(crate) unsafe fn lock(&self, locks: impl Iterator<Item = Lock>) {
-        let columns = self.columns();
-        for Lock { access, target } in locks {
-            match target {
-                Target::Count => self.count.raw,
-                Target::Column(column) => {
-                    if let Some(column) = columns.get(column as usize) {
-                        unsafe { column.lock(access) };
-                    }
+    pub(crate) unsafe fn lock_all(&self, locks: impl IntoIterator<Item = Lock>) -> Option<u32> {
+        locks
+            .into_iter()
+            .fold(None, |count, lock| count.or(unsafe { self.lock_one(lock) }))
+    }
+
+    pub(crate) unsafe fn lock_one(&self, lock: Lock) -> Option<u32> {
+        match lock {
+            Lock::Rows => {
+                let header = self.header();
+                let mut guard = header.state.lock();
+                header
+                    .wait
+                    .wait_while(&mut guard, |state| state.remove.len() > 0);
+                guard.lock += 1;
+                Some(guard.count)
+            }
+            Lock::Column(column, access) => {
+                if let Some(column) = self.columns().get(column as usize) {
+                    unsafe { column.lock(access) };
                 }
+                None
             }
         }
     }
 
-    pub(crate) unsafe fn lock_all(&self, access: Access) {
+    pub(crate) unsafe fn unlock_all(&self, locks: impl IntoIterator<Item = Lock>) -> bool {
+        locks.into_iter().fold(false, |resolve, lock| {
+            resolve | unsafe { self.unlock_one(lock) }
+        })
+    }
+
+    pub(crate) unsafe fn unlock_one(&self, lock: Lock) -> bool {
+        match lock {
+            Lock::Rows => {
+                let header = self.header();
+                let mut guard = header.state.lock();
+                guard.lock -= 1;
+                let remove = guard.remove.len() > 0;
+                drop(guard);
+                header.wait.notify_all();
+                remove
+            }
+            Lock::Column(column, access) => {
+                if let Some(column) = self.columns().get(column as usize) {
+                    unsafe { column.unlock(access) };
+                }
+                false
+            }
+        }
+    }
+
+    pub(crate) unsafe fn lock_columns(&self, access: Access) {
         for column in self.columns() {
             unsafe { column.lock(access) };
         }
     }
 
-    pub(crate) unsafe fn unlock(&self, locks: impl Iterator<Item = (u32, Access)>) {
-        let columns = self.columns();
-        for (index, access) in locks {
-            if let Some(column) = columns.get(index as usize) {
-                unsafe { column.unlock(access) };
-            }
-        }
-    }
-
-    pub(crate) unsafe fn unlock_all(&self, access: Access) {
+    pub(crate) unsafe fn unlock_columns(&self, access: Access) {
         for column in self.columns() {
             unsafe { column.unlock(access) };
         }
     }
 
-    pub(crate) fn insert<F: FnOnce(u32)>(&self, count: u32, apply: F) -> Result<Range<u32>, Error> {
+    pub(crate) fn insert<F: FnOnce(u32)>(&self, count: u32, apply: F) -> Result<(), Error> {
         if count == 0 {
-            return Ok(0..0);
+            return Ok(());
         }
 
-        loop {
-            unsafe { self.lock_all(Access::Read) };
-            let guard = defer(|| unsafe { self.unlock_all(Access::Read) });
-            let header = self.header();
-            let start = header.count.load(Ordering::Acquire);
-            let end = start.checked_add(count).ok_or(Error::TableOverflow)?;
-            let capacity = header.capacity.load(Ordering::Acquire);
-            if end <= capacity {
-                let rows = start..end;
-                apply(start);
-                header.count.store(end, Ordering::Release);
-                drop(guard);
-                break Ok(rows);
-            } else {
-                drop(guard);
-                let next = end
-                    .checked_next_power_of_two()
-                    .ok_or(Error::TableOverflow)?;
-                self.grow((capacity, next))?;
-            }
-        }
-    }
-
-    pub(crate) fn remove(&self, rows: impl Iterator<Item = u32>) -> Result<(), Error> {
-        unsafe { self.lock_all(Access::Write) };
-        let guard = defer(|| unsafe { self.unlock_all(Access::Write) });
         let header = self.header();
         let columns = self.columns();
-        let mut count = header.count.load(Ordering::Acquire);
-        for row in rows {
-            debug_assert!(row < count);
-            count = count.checked_sub(1).ok_or(Error::TableUnderflow)?;
-            for column in columns {
-                unsafe { column.drop_at(row, 1) };
-                if row < count {
-                    unsafe { column.copy_at(count, row, 1) };
-                }
-            }
-        }
-        header.count.store(count, Ordering::Release);
-        drop(guard);
+        let mut state = header.state.lock();
+        let start = state.count;
+        let end = start.checked_add(count).ok_or(Error::TableOverflow)?;
+        Self::ensure(&mut state, columns, end)?;
+        apply(start);
+        state.count = end;
+        header.count.store(state.count, Ordering::Release);
         Ok(())
     }
 
-    fn grow(&self, mut capacities: (u32, u32)) -> Result<(), Error> {
+    pub(crate) fn resolve(&self) -> Result<(), Error> {
         let header = self.header();
         let columns = self.columns();
-        let mut new_layout = Layout::new::<()>();
+        let mut state = header.state.lock();
+        state.remove.sort_unstable_by_key(|&row| Reverse(row));
+        header.wait.wait_while(&mut state, |state| state.lock > 0);
+        if state.remove.is_empty() {
+            return Ok(());
+        }
+
         for column in columns {
-            (new_layout, _) = column.meta.extend(new_layout, capacities.1)?;
+            unsafe { column.lock(Access::Write) };
         }
-
-        while capacities.0 < capacities.1 {
-            unsafe { self.lock_all(Access::Write) };
-            let guard = defer(|| unsafe { self.unlock_all(Access::Write) });
-            let new_data = match header.capacity.compare_exchange(
-                capacities.0,
-                capacities.1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(capacity) => {
-                    capacities.0 = capacity;
-                    unsafe { allocate(new_layout.pad_to_align())? }
-                }
-                Err(capacity) => {
-                    capacities.0 = capacity;
-                    continue;
-                }
-            };
-
-            let mut old_layout = Layout::new::<()>();
-            let mut new_layout = Layout::new::<()>();
-            let mut old_data = NonNull::dangling();
-            let count = header.count.load(Ordering::Acquire);
+        let guard = defer(|| {
             for column in columns {
-                let old_pair = column.meta.extend(old_layout, capacities.0)?;
-                let new_pair = column.meta.extend(new_layout, capacities.1)?;
-                let target = unsafe { new_data.add(new_pair.1) };
-                let source = unsafe { replace(column.data.data_ptr(), target) };
-                unsafe { column.meta.copy(source, target, count) };
-                old_data = unsafe { source.sub(old_pair.1) };
-                old_layout = old_pair.0;
-                new_layout = new_pair.0;
+                unsafe { column.unlock(Access::Write) };
             }
-            drop(guard);
-            unsafe { deallocate(old_data, old_layout.pad_to_align()) };
-            break;
+        });
+
+        let state = &mut *state;
+        for chunk in state
+            .remove
+            .chunk_by(|&left, &right| left.saturating_sub(right) <= 1)
+        {
+            if let Some(&end) = chunk.first()
+                && let Some(&start) = chunk.last()
+            {
+                let count = end
+                    .checked_sub(start)
+                    .ok_or(Error::TableUnderflow)?
+                    .checked_add(1)
+                    .ok_or(Error::TableUnderflow)?;
+                debug_assert!(start < state.count);
+                debug_assert!(end < state.count);
+                debug_assert!(count <= state.count);
+                state.count = state
+                    .count
+                    .checked_sub(count)
+                    .ok_or(Error::TableUnderflow)?;
+                for column in columns {
+                    unsafe { column.drop_at(start, count) };
+                    if start < state.count {
+                        unsafe { column.copy_at(state.count, start, count) };
+                    }
+                }
+            }
         }
+        drop(guard);
+        state.remove.clear();
+        header.count.store(state.count, Ordering::Release);
+        Ok(())
+    }
+
+    fn ensure(state: &mut State, columns: &[Column], count: u32) -> Result<(), Error> {
+        if count <= state.capacity {
+            return Ok(());
+        }
+
+        let capacity = count
+            .checked_next_power_of_two()
+            .ok_or(Error::TableOverflow)?;
+        let new_layout = columns
+            .iter()
+            .try_fold(Layout::new::<()>(), |layout, column| {
+                Ok(column.meta.extend(layout, state.capacity)?.0)
+            })?;
+        let new_data = unsafe { allocate(new_layout.pad_to_align())? };
+        let mut old_layout = Layout::new::<()>();
+        let mut new_layout = Layout::new::<()>();
+        let mut old_data = NonNull::dangling();
+        for column in columns {
+            let old_pair = column.meta.extend(old_layout, state.capacity)?;
+            let new_pair = column.meta.extend(new_layout, capacity)?;
+            let target = unsafe { new_data.add(new_pair.1) };
+            let mut source = column.data.write();
+            unsafe { column.meta.copy(*source, target, state.count) };
+            *source = target;
+            old_data = unsafe { source.sub(old_pair.1) };
+            old_layout = old_pair.0;
+            new_layout = new_pair.0;
+        }
+        unsafe { deallocate(old_data, old_layout.pad_to_align()) };
         Ok(())
     }
 
@@ -507,13 +562,13 @@ impl PartialEq for Table {
 impl Eq for Table {}
 
 impl PartialOrd for Table {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         self.address().partial_cmp(&other.address())
     }
 }
 
 impl Ord for Table {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
         self.address().cmp(&other.address())
     }
 }
@@ -523,8 +578,9 @@ impl Drop for Table {
         let _ = self.0.with_arc_mut(|table| {
             if let Some(table) = Arc::get_mut(table) {
                 let header = table.header_mut();
-                let count = *header.count.get_mut();
-                let capacity = *header.capacity.get_mut();
+                let state = header.state.get_mut();
+                let count = state.count;
+                let capacity = state.capacity;
                 let mut old_data = NonNull::dangling();
                 let mut old_layout = Layout::new::<()>();
                 for column in table.slice_mut() {

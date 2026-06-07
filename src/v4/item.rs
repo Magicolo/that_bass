@@ -1,5 +1,5 @@
 use crate::v4::{
-    Meta, Rows,
+    Meta,
     depend::{Access, Depend, Dependency, Resource},
     slice::Slice,
     table::{self, Lock},
@@ -19,20 +19,23 @@ pub trait Item: Depend {
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State>;
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock>;
-    unsafe fn get<'a>(
-        &'a self,
-        state: &'a mut Self::State,
-        count: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a;
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct Context<'a> {
+    table: &'a table::Table,
+    count: u32,
+    #[cfg(debug_assertions)]
+    locks: &'a [Lock],
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct Key(pub(crate) ());
 #[derive(Debug, Clone, Copy)]
-pub struct Row(pub(crate) ());
+pub struct Rows(pub(crate) ());
 #[derive(Debug, Clone, Copy)]
 pub struct Table(pub(crate) ());
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +48,82 @@ pub struct Write<T: ?Sized>(pub(crate) PhantomData<T>);
 pub struct ReadWith(pub(crate) Meta);
 #[derive(Debug, Clone, Copy)]
 pub struct WriteWith(pub(crate) Meta);
+
+impl<'a> Context<'a> {
+    #[cfg(not(debug_assertions))]
+    pub const fn new(count: u32, table: &'a table::Table) -> Self {
+        Self { table, count }
+    }
+
+    #[cfg(debug_assertions)]
+    pub const fn new(count: u32, table: &'a table::Table, locks: &'a [Lock]) -> Self {
+        Self {
+            table,
+            count,
+            locks,
+        }
+    }
+
+    pub const fn table(self) -> &'a table::Table {
+        self.table
+    }
+
+    pub const fn count(self) -> u32 {
+        self.count
+    }
+
+    pub unsafe fn rows(self, remove: &'a mut Vec<u32>) -> table::Rows<'a> {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.locks.contains(&Lock::Rows));
+        unsafe { self.table.rows(self.count, remove) }
+    }
+
+    pub unsafe fn column<T: 'static>(self, index: u32) -> &'a [T] {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Read)));
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get(self.count)
+        }
+    }
+
+    pub unsafe fn column_in(self, index: u32, slice: &mut Slice) -> &Slice {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Read)));
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_in(slice, self.count)
+        };
+        slice
+    }
+
+    pub unsafe fn column_mut<T: 'static>(self, index: u32) -> &'a mut [T] {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Write)));
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_mut(self.count)
+        }
+    }
+
+    pub unsafe fn column_mut_in(self, index: u32, slice: &mut Slice) -> &mut Slice {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Write)));
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_in(slice, self.count)
+        };
+        slice
+    }
+}
 
 impl<I: Item + ?Sized> Item for &I {
     type Item<'a>
@@ -61,16 +140,11 @@ impl<I: Item + ?Sized> Item for &I {
         I::declare(self, state)
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        state: &'a mut Self::State,
-        count: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        unsafe { I::get(self, state, count, table) }
+        unsafe { I::get(self, state, context) }
     }
 }
 
@@ -89,16 +163,11 @@ impl<I: Item + ?Sized> Item for &mut I {
         I::declare(self, state)
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        state: &'a mut Self::State,
-        count: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        unsafe { I::get(self, state, count, table) }
+        unsafe { I::get(self, state, context) }
     }
 }
 
@@ -117,7 +186,7 @@ impl Item for () {
         empty()
     }
 
-    unsafe fn get<'a>(&self, _: &'a mut Self::State, _: u32, _: &'a table::Table) -> Self::Item<'a>
+    unsafe fn get<'a>(&self, _: &'a mut Self::State, _: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
@@ -139,19 +208,14 @@ impl<I0: Item, I1: Item> Item for (I0, I1) {
         self.0.declare(&state.0).merge(self.1.declare(&state.1))
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        state: &'a mut Self::State,
-        count: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
         unsafe {
             (
-                self.0.get(&mut state.0, count, table),
-                self.1.get(&mut state.1, count, table),
+                self.0.get(&mut state.0, context),
+                self.1.get(&mut state.1, context),
             )
         }
     }
@@ -181,16 +245,11 @@ impl<I: Item + ?Sized> Item for Try<I> {
             .flat_map(|state| self.0.declare(state))
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        state: &'a mut Self::State,
-        count: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        Some(unsafe { self.0.get(state.as_mut()?, count, table) })
+        Some(unsafe { self.0.get(state.as_mut()?, context) })
     }
 }
 
@@ -216,19 +275,14 @@ impl Item for Key {
         empty()
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        _: &'a mut Self::State,
-        _: u32,
-        _: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, _: &'a mut Self::State, _: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
     }
 }
 
-unsafe impl Depend for Row {
+unsafe impl Depend for Rows {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         once(Dependency {
             access: Access::Read,
@@ -237,9 +291,9 @@ unsafe impl Depend for Row {
     }
 }
 
-impl Item for Row {
+impl Item for Rows {
     type Item<'a>
-        = Rows<'a>
+        = table::Rows<'a>
     where
         Self: 'a;
     type State = Vec<u32>;
@@ -249,19 +303,14 @@ impl Item for Row {
     }
 
     fn declare(&self, _: &Self::State) -> impl Iterator<Item = Lock> {
-        once(Lock::State)
+        once(Lock::Rows)
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        state: &'a mut Self::State,
-        count: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        Rows::new(0..count, table, state)
+        unsafe { context.rows(state) }
     }
 }
 
@@ -289,16 +338,11 @@ impl Item for Table {
         empty()
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        _: &'a mut Self::State,
-        _: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        table
+        context.table()
     }
 }
 
@@ -334,16 +378,11 @@ impl<T: 'static> Item for Read<T> {
         once(Lock::Column(*state, Access::Read))
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        state: &'a mut Self::State,
-        count: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        unsafe { table.columns().get_unchecked(*state as usize).get(count) }
+        unsafe { context.column(*state) }
     }
 }
 
@@ -379,21 +418,11 @@ impl<T: 'static> Item for Write<T> {
         once(Lock::Column(*state, Access::Write))
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        state: &'a mut Self::State,
-        count: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        unsafe {
-            table
-                .columns()
-                .get_unchecked(*state as usize)
-                .get_mut(count)
-        }
+        unsafe { context.column_mut(*state) }
     }
 }
 
@@ -421,22 +450,11 @@ impl Item for ReadWith {
         once(Lock::Column(state.0, Access::Read))
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        state: &'a mut Self::State,
-        count: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        unsafe {
-            table
-                .columns()
-                .get_unchecked(state.0 as usize)
-                .get_in(&mut state.1, count)
-        };
-        &state.1
+        unsafe { context.column_in(state.0, &mut state.1) }
     }
 }
 
@@ -464,21 +482,10 @@ impl Item for WriteWith {
         once(Lock::Column(state.0, Access::Write))
     }
 
-    unsafe fn get<'a>(
-        &'a self,
-        state: &'a mut Self::State,
-        count: u32,
-        table: &'a table::Table,
-    ) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        unsafe {
-            table
-                .columns()
-                .get_unchecked(state.0 as usize)
-                .get_in(&mut state.1, count)
-        };
-        &mut state.1
+        unsafe { context.column_mut_in(state.0, &mut state.1) }
     }
 }
