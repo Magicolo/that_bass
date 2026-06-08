@@ -487,8 +487,10 @@ impl Table {
         let new_layout = columns
             .iter()
             .try_fold(Layout::new::<()>(), |layout, column| {
-                Ok(column.meta.extend(layout, state.capacity)?.0)
+                Ok(column.meta.extend(layout, capacity)?.0)
             })?;
+        // TODO: Restore a valid state if an error occurs after allocation and/or while
+        // some columns have been updated.
         let new_data = unsafe { allocate(new_layout.pad_to_align())? };
         let mut old_layout = Layout::new::<()>();
         let mut new_layout = Layout::new::<()>();
@@ -505,6 +507,7 @@ impl Table {
             new_layout = new_pair.0;
         }
         unsafe { deallocate(old_data, old_layout.pad_to_align()) };
+        state.capacity = capacity;
         Ok(())
     }
 

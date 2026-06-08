@@ -159,10 +159,11 @@ impl<I: Item> Guard<'_, I> {
 
 impl<'a, I: Item> Drop for Guard<'a, I> {
     fn drop(&mut self) {
-        let mut remove = self.remove.borrow_mut();
         let resolve = unsafe {
-            self.table
-                .unlock_all(self.item.declare(self.state), &mut remove)
+            self.table.unlock_all(
+                self.item.declare(self.state),
+                &mut *self.remove.borrow_mut(),
+            )
         };
         if resolve {
             let _ = self.table.resolve();

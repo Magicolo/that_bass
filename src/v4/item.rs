@@ -53,8 +53,12 @@ pub struct WriteWith(pub(crate) Meta);
 
 impl<'a> Context<'a> {
     #[cfg(not(debug_assertions))]
-    pub const fn new(count: u32, table: &'a table::Table) -> Self {
-        Self { table, count }
+    pub const fn new(count: u32, table: &'a table::Table, remove: &'a RefCell<Vec<u32>>) -> Self {
+        Self {
+            table,
+            count,
+            remove,
+        }
     }
 
     #[cfg(debug_assertions)]
