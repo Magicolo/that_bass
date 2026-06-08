@@ -123,10 +123,14 @@ impl<'a, I: Item> Iterator for Tables<'a, I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
-        let count = unsafe { table.lock_all(self.item.declare(state)) };
+        let count = unsafe { table.lock(self.item.declare(state)) };
+        #[cfg(debug_assertions)]
+        let locks = self.item.declare(state).collect::<Vec<_>>();
+        #[cfg(debug_assertions)]
+        debug_assert!(locks.is_sorted());
         Some(Guard {
             #[cfg(debug_assertions)]
-            locks: self.item.declare(state).collect(),
+            locks,
             count: count.unwrap_or_else(|| table.count()),
             item: self.item,
             remove: self.remove,
@@ -152,7 +156,7 @@ impl<I: Item> Guard<'_, I> {
         #[cfg(debug_assertions)]
         let context = Context::new(self.count, self.table, self.remove, &self.locks);
         #[cfg(not(debug_assertions))]
-        let context = Context::new(self.count, self.table);
+        let context = Context::new(self.count, self.table, self.remove);
         unsafe { self.item.get(&mut self.state, context) }.into_flat()
     }
 }
@@ -160,7 +164,7 @@ impl<I: Item> Guard<'_, I> {
 impl<'a, I: Item> Drop for Guard<'a, I> {
     fn drop(&mut self) {
         let resolve = unsafe {
-            self.table.unlock_all(
+            self.table.unlock(
                 self.item.declare(self.state),
                 &mut *self.remove.borrow_mut(),
             )

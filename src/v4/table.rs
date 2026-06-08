@@ -346,63 +346,61 @@ impl Table {
         self.columns().iter().map(|column| column.meta()).eq(metas)
     }
 
-    pub(crate) unsafe fn lock_all(&self, locks: impl IntoIterator<Item = Lock>) -> Option<u32> {
-        locks
-            .into_iter()
-            .fold(None, |count, lock| unsafe { self.lock_one(lock).or(count) })
-    }
-
-    pub(crate) unsafe fn lock_one(&self, lock: Lock) -> Option<u32> {
-        match lock {
-            Lock::Rows => {
-                let header = self.header();
-                let mut guard = header.state.lock();
-                header
-                    .wait
-                    .wait_while(&mut guard, |state| state.remove.len() > 0);
-                guard.lock += 1;
-                Some(guard.count)
-            }
-            Lock::Column(column, access) => {
-                if let Some(column) = self.columns().get(column as usize) {
-                    unsafe { column.lock(access) };
+    pub(crate) unsafe fn lock(&self, locks: impl IntoIterator<Item = Lock>) -> Option<u32> {
+        let header = self.header();
+        let columns = self.columns();
+        let mut count = None;
+        for lock in locks {
+            match lock {
+                Lock::Rows => {
+                    let mut guard = header.state.lock();
+                    header
+                        .wait
+                        .wait_while(&mut guard, |state| state.remove.len() > 0);
+                    guard.lock += 1;
+                    count = Some(guard.count);
                 }
-                None
+                Lock::Column(column, access) => {
+                    if let Some(column) = columns.get(column as usize) {
+                        unsafe { column.lock(access) };
+                    }
+                }
             }
         }
+        count
     }
 
-    pub(crate) unsafe fn unlock_all(
+    pub(crate) unsafe fn unlock(
         &self,
         locks: impl IntoIterator<Item = Lock>,
         remove: &mut Vec<u32>,
     ) -> bool {
-        locks.into_iter().fold(false, |resolve, lock| unsafe {
-            self.unlock_one(lock, remove) || resolve
-        })
-    }
-
-    pub(crate) unsafe fn unlock_one(&self, lock: Lock, remove: &mut Vec<u32>) -> bool {
-        match lock {
-            Lock::Rows => {
-                let header = self.header();
-                let mut guard = header.state.lock();
-                guard.lock -= 1;
-                guard.remove.append(remove);
-                let lock = guard.lock;
-                let resolve = guard.remove.len() > 0;
-                drop(guard);
-                if lock == 0 {
-                    header.wait.notify_all();
+        let header = self.header();
+        let columns = self.columns();
+        let mut rows = false;
+        for lock in locks {
+            match lock {
+                Lock::Rows => rows = true,
+                Lock::Column(column, access) => {
+                    if let Some(column) = columns.get(column as usize) {
+                        unsafe { column.unlock(access) };
+                    }
                 }
-                resolve
             }
-            Lock::Column(column, access) => {
-                if let Some(column) = self.columns().get(column as usize) {
-                    unsafe { column.unlock(access) };
-                }
-                false
+        }
+        if rows {
+            let mut guard = header.state.lock();
+            guard.lock -= 1;
+            guard.remove.append(remove);
+            let lock = guard.lock;
+            let resolve = guard.remove.len() > 0;
+            drop(guard);
+            if lock == 0 {
+                header.wait.notify_all();
             }
+            resolve
+        } else {
+            false
         }
     }
 
