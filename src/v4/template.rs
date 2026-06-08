@@ -4,6 +4,7 @@ use core::{
     iter::{empty, once},
     marker::PhantomData,
 };
+use itertools::Itertools;
 
 pub trait Template {
     type Item;
@@ -72,7 +73,7 @@ impl<T0: Template, T1: Template> Template for (T0, T1) {
     type State = (T0::State, T1::State);
 
     fn declare(&self) -> impl Iterator<Item = Meta> {
-        self.0.declare().chain(self.1.declare())
+        self.0.declare().merge(self.1.declare())
     }
 
     fn initialize(&self, table: &Table) -> Option<Self::State> {

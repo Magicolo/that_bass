@@ -10,8 +10,8 @@ pub struct Build<T>(T);
 
 pub struct Insert<T: Template> {
     template: T,
-    items: Vec<T::Item>,
     state: T::State,
+    items: Vec<T::Item>,
     table: Table,
 }
 
@@ -24,6 +24,10 @@ impl Insert<()> {
 impl<T: Template> Insert<T> {
     pub fn one<N: IntoNest<Nest = T::Item>>(&mut self, item: N) {
         self.items.push(item.into_nest());
+    }
+
+    pub fn all<I: IntoIterator<Item: IntoNest<Nest = T::Item>>>(&mut self, items: I) {
+        self.items.extend(items.into_iter().map(I::Item::into_nest));
     }
 
     pub fn resolve(&mut self) -> Result<(), Error> {

@@ -3,30 +3,27 @@ use core::{
     any::TypeId,
     iter::{empty, from_fn, once},
 };
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    rc::Rc,
-    sync::Arc,
-};
+use itertools::Itertools;
+use std::{rc::Rc, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Dependency {
-    pub access: Access,
     pub resource: Resource,
+    pub access: Access,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum Access {
-    Read,
     Write,
+    Read,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum Resource {
-    Store,
-    Tables,
-    Table,
     Column(TypeId),
+    Table,
+    Tables,
+    Store,
 }
 
 pub struct Analysis<D>(D);
@@ -53,7 +50,17 @@ impl<D: Depend> Analysis<D> {
 pub unsafe trait Depend {
     fn depend(&self) -> impl Iterator<Item = Dependency>;
     fn analyze(&self) -> Result<(), Error> {
-        analyze(&mut HashMap::new(), self.depend()).map_or(Ok(()), Err)
+        analyze(self.depend()).map_or(Ok(()), Err)
+    }
+}
+
+unsafe impl Depend for Dependency {
+    fn depend(&self) -> impl Iterator<Item = Dependency> {
+        once(*self)
+    }
+
+    fn analyze(&self) -> Result<(), Error> {
+        Ok(())
     }
 }
 
@@ -61,11 +68,19 @@ unsafe impl<D: Depend + ?Sized> Depend for &D {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         D::depend(self)
     }
+
+    fn analyze(&self) -> Result<(), Error> {
+        D::analyze(self)
+    }
 }
 
 unsafe impl<D: Depend + ?Sized> Depend for &mut D {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         D::depend(self)
+    }
+
+    fn analyze(&self) -> Result<(), Error> {
+        D::analyze(self)
     }
 }
 
@@ -73,11 +88,15 @@ unsafe impl Depend for () {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         empty()
     }
+
+    fn analyze(&self) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 unsafe impl<D0: Depend, D1: Depend> Depend for (D0, D1) {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        self.0.depend().chain(self.1.depend())
+        self.0.depend().merge(self.1.depend())
     }
 }
 
@@ -85,11 +104,19 @@ unsafe impl<D: Depend + ?Sized> Depend for Box<D> {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         D::depend(self)
     }
+
+    fn analyze(&self) -> Result<(), Error> {
+        D::analyze(self)
+    }
 }
 
 unsafe impl<D: Depend + ?Sized> Depend for Rc<D> {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         D::depend(self)
+    }
+
+    fn analyze(&self) -> Result<(), Error> {
+        D::analyze(self)
     }
 }
 
@@ -97,29 +124,19 @@ unsafe impl<D: Depend + ?Sized> Depend for Arc<D> {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         D::depend(self)
     }
+
+    fn analyze(&self) -> Result<(), Error> {
+        D::analyze(self)
+    }
 }
 
 unsafe impl<D: Depend + ?Sized> Depend for triomphe::Arc<D> {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
         D::depend(self)
     }
-}
 
-unsafe impl<D: Depend> Depend for Vec<D> {
-    fn depend(&self) -> impl Iterator<Item = Dependency> {
-        self.iter().flat_map(D::depend)
-    }
-}
-
-unsafe impl<D: Depend> Depend for [D] {
-    fn depend(&self) -> impl Iterator<Item = Dependency> {
-        self.iter().flat_map(D::depend)
-    }
-}
-
-unsafe impl<D: Depend, const N: usize> Depend for [D; N] {
-    fn depend(&self) -> impl Iterator<Item = Dependency> {
-        self.iter().flat_map(D::depend)
+    fn analyze(&self) -> Result<(), Error> {
+        D::analyze(self)
     }
 }
 
@@ -142,40 +159,33 @@ impl Resource {
     }
 }
 
-fn analyze(
-    map: &mut HashMap<Resource, Access>,
-    dependencies: impl IntoIterator<Item = Dependency>,
-) -> Option<Error> {
+fn analyze(dependencies: impl IntoIterator<Item = Dependency>) -> Option<Error> {
+    let mut last = None::<Dependency>;
     let errors = dependencies
         .into_iter()
-        .flat_map(|Dependency { access, resource }| {
-            resource
-                .ancestors()
-                .map(|resource| (resource, Access::Read))
-                .chain(once((resource, access)))
+        .flat_map(|dependency| {
+            once(dependency).chain(dependency.resource.ancestors().map(|resource| Dependency {
+                resource,
+                access: Access::Read,
+            }))
         })
-        .filter_map(|(resource, access)| conflict(map, resource, access));
+        .filter_map(|dependency| match last {
+            Some(last) if last.resource == dependency.resource => {
+                match (last.access, dependency.access) {
+                    (Access::Read, Access::Write) | (Access::Write, Access::Read) => {
+                        Some(Error::ReadWriteConflict(dependency.resource, last.resource))
+                    }
+                    (Access::Write, Access::Write) => Some(Error::WriteWriteConflict(
+                        dependency.resource,
+                        last.resource,
+                    )),
+                    (Access::Read, Access::Read) => None,
+                }
+            }
+            Some(_) | None => {
+                last = Some(dependency);
+                None
+            }
+        });
     Error::all(errors)
-}
-
-fn conflict(
-    map: &mut HashMap<Resource, Access>,
-    resource: Resource,
-    access: Access,
-) -> Option<Error> {
-    let entry = map.entry(resource);
-    match (entry, access) {
-        (Entry::Occupied(entry), Access::Read) => match entry.get() {
-            Access::Read => None,
-            Access::Write => Some(Error::ReadWriteConflict(resource, *entry.key())),
-        },
-        (Entry::Occupied(entry), Access::Write) => match entry.get() {
-            Access::Read => Some(Error::ReadWriteConflict(*entry.key(), resource)),
-            Access::Write => Some(Error::WriteWriteConflict(*entry.key(), resource)),
-        },
-        (Entry::Vacant(entry), access) => {
-            entry.insert(access);
-            None
-        }
-    }
 }

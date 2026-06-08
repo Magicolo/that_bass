@@ -123,7 +123,8 @@ impl<'a, I: Item> Iterator for Tables<'a, I> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (table, state) = self.states.next()?;
-        let count = unsafe { table.lock(self.item.declare(state)) };
+        let count =
+            unsafe { table.lock(self.item.declare(state)) }.unwrap_or_else(|| table.count());
         #[cfg(debug_assertions)]
         let locks = self.item.declare(state).collect::<Vec<_>>();
         #[cfg(debug_assertions)]
@@ -131,7 +132,7 @@ impl<'a, I: Item> Iterator for Tables<'a, I> {
         Some(Guard {
             #[cfg(debug_assertions)]
             locks,
-            count: count.unwrap_or_else(|| table.count()),
+            count,
             item: self.item,
             remove: self.remove,
             state,
@@ -163,15 +164,12 @@ impl<I: Item> Guard<'_, I> {
 
 impl<'a, I: Item> Drop for Guard<'a, I> {
     fn drop(&mut self) {
-        let resolve = unsafe {
+        let _ = unsafe {
             self.table.unlock(
                 self.item.declare(self.state),
                 &mut *self.remove.borrow_mut(),
             )
         };
-        if resolve {
-            let _ = self.table.resolve();
-        }
     }
 }
 

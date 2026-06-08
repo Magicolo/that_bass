@@ -51,16 +51,8 @@ pub(crate) struct State {
 struct Header {
     index: u32,
     count: AtomicU32,
-    unlocked: Condvar,
-    resolved: Condvar,
+    wait: Condvar,
     state: Mutex<State>,
-}
-
-#[test]
-fn boba() {
-    dbg!(size_of::<Table>());
-    dbg!(size_of::<Header>());
-    dbg!(size_of::<State>());
 }
 
 impl Debug for Row<'_> {
@@ -112,7 +104,13 @@ impl Tables {
         &self,
         metas: impl IntoIterator<Item = Meta>,
     ) -> Result<Table, Error> {
-        let metas = sort(metas).ok_or(Error::DuplicateMeta)?;
+        let metas = metas.into_iter().collect::<Vec<_>>();
+        debug_assert!(metas.is_sorted());
+
+        if !is_unique(&metas) {
+            return Err(Error::DuplicateMeta);
+        }
+
         let mut old = self.0.load();
         loop {
             match old
@@ -233,14 +231,6 @@ impl Column {
 }
 
 impl<'a> Row<'a> {
-    pub const fn row(&self) -> u32 {
-        self.row
-    }
-
-    pub fn table(&self) -> u32 {
-        self.table.index()
-    }
-
     pub fn remove(&mut self) {
         self.remove.borrow_mut().push(self.row)
     }
@@ -267,6 +257,10 @@ impl Ord for Row<'_> {
 }
 
 impl<'a> Rows<'a> {
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
     pub fn remove(&mut self) {
         self.remove.borrow_mut().extend(self.rows.clone());
     }
@@ -308,8 +302,7 @@ impl Table {
             Header {
                 index,
                 count: AtomicU32::new(0),
-                unlocked: Condvar::new(),
-                resolved: Condvar::new(),
+                wait: Condvar::new(),
                 state: Mutex::new(State {
                     lock: 0,
                     count: 0,
@@ -364,7 +357,7 @@ impl Table {
                 Lock::Rows => {
                     let mut guard = header.state.lock();
                     header
-                        .resolved
+                        .wait
                         .wait_while(&mut guard, |state| state.remove.len() > 0);
                     guard.lock += 1;
                     count = Some(guard.count);
@@ -383,7 +376,7 @@ impl Table {
         &self,
         locks: impl IntoIterator<Item = Lock>,
         remove: &mut Vec<u32>,
-    ) -> bool {
+    ) -> Result<(), Error> {
         let header = self.header();
         let columns = self.columns();
         let mut rows = false;
@@ -403,18 +396,17 @@ impl Table {
         }
         if rows {
             let mut guard = header.state.lock();
+            debug_assert!(guard.lock > 0);
             guard.lock -= 1;
             guard.remove.append(remove);
-            let lock = guard.lock;
-            let resolve = guard.remove.len() > 0;
-            drop(guard);
-            if lock == 0 {
-                header.unlocked.notify_all();
+            if guard.lock == 0 {
+                Self::resolve(&mut guard, header, columns)?;
+                debug_assert!(guard.remove.is_empty());
+                drop(guard);
+                header.wait.notify_all();
             }
-            resolve
-        } else {
-            false
         }
+        Ok(())
     }
 
     pub(crate) fn insert<F: FnOnce(u32)>(&self, count: u32, apply: F) -> Result<(), Error> {
@@ -434,18 +426,13 @@ impl Table {
         Ok(())
     }
 
-    pub(crate) fn resolve(&self) -> Result<(), Error> {
-        let header = self.header();
-        let columns = self.columns();
-        let mut state = header.state.lock();
-        state.remove.sort_unstable_by_key(|&row| Reverse(row));
-        header
-            .unlocked
-            .wait_while(&mut state, |state| state.lock > 0);
+    fn resolve(state: &mut State, header: &Header, columns: &[Column]) -> Result<(), Error> {
+        debug_assert_eq!(state.lock, 0);
         if state.remove.is_empty() {
             return Ok(());
         }
 
+        state.remove.sort_unstable_by_key(|&row| Reverse(row));
         for column in columns {
             unsafe { column.lock(Access::Write) };
         }
@@ -454,29 +441,26 @@ impl Table {
                 unsafe { column.unlock(Access::Write) };
             }
         });
+        for chunk in state
+            .remove
+            .chunk_by(|&left, &right| left.saturating_sub(right) <= 1)
         {
-            let state = &mut *state;
-            for chunk in state
-                .remove
-                .chunk_by(|&left, &right| left.saturating_sub(right) <= 1)
+            if let Some(&end) = chunk.first()
+                && let Some(&start) = chunk.last()
             {
-                if let Some(&end) = chunk.first()
-                    && let Some(&start) = chunk.last()
-                {
-                    let count = (end - start).checked_add(1).ok_or(Error::TableUnderflow)?;
-                    debug_assert!(start <= end);
-                    debug_assert!(start < state.count);
-                    debug_assert!(end < state.count);
-                    debug_assert!(count <= state.count);
-                    state.count = state
-                        .count
-                        .checked_sub(count)
-                        .ok_or(Error::TableUnderflow)?;
-                    for column in columns {
-                        unsafe { column.drop_at(start, count) };
-                        if start < state.count {
-                            unsafe { column.copy_at(state.count, start, count) };
-                        }
+                let count = (end - start).checked_add(1).ok_or(Error::TableUnderflow)?;
+                debug_assert!(start <= end);
+                debug_assert!(start < state.count);
+                debug_assert!(end < state.count);
+                debug_assert!(count <= state.count);
+                state.count = state
+                    .count
+                    .checked_sub(count)
+                    .ok_or(Error::TableUnderflow)?;
+                for column in columns {
+                    unsafe { column.drop_at(start, count) };
+                    if start < state.count {
+                        unsafe { column.copy_at(state.count, start, count) };
                     }
                 }
             }
@@ -484,8 +468,6 @@ impl Table {
         drop(guard);
         state.remove.clear();
         header.count.store(state.count, Ordering::Release);
-        drop(state);
-        header.resolved.notify_all();
         Ok(())
     }
 
@@ -573,10 +555,4 @@ impl Drop for Table {
             }
         });
     }
-}
-
-fn sort<T: Ord>(items: impl IntoIterator<Item = T>) -> Option<Vec<T>> {
-    let mut items = items.into_iter().collect::<Vec<_>>();
-    items.sort_unstable();
-    if is_unique(&items) { Some(items) } else { None }
 }

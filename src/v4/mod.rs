@@ -15,6 +15,14 @@ pub use error::Error;
 pub use meta::Meta;
 pub use table::{Row, Rows, Table};
 
+/*
+TODO:
+- Simplify the dependency model:
+    - Currently, verifying that the `Meta` of a `Query` are unique is enough to validate it. The whole `Depend` trait is unnecessary.
+    - Same goes for `Insert`.
+    - A more complex dependency model may be needed to validate that multiple queries can run nested.
+*/
+
 #[derive(Default)]
 pub struct Store {
     tables: Tables,
@@ -117,6 +125,7 @@ mod tests {
                 scope.spawn(move || {
                     wait_for(&signal, 10);
                     insert.one(((), 'a'));
+                    insert.resolve()?;
                     anyhow::Ok(())
                 });
                 scope.spawn(move || {
