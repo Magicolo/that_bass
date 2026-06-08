@@ -8,19 +8,21 @@ use crate::v4::{
     table,
     utility::{IntoFlat, Push},
 };
-use core::{marker::PhantomData, slice};
+use core::{cell::RefCell, marker::PhantomData, slice};
 
 pub struct Guard<'a, I: Item> {
     item: &'a I,
     state: &'a mut I::State,
     table: &'a table::Table,
     count: u32,
+    remove: &'a RefCell<Vec<u32>>,
     #[cfg(debug_assertions)]
     locks: Vec<Lock>,
 }
 
 pub struct Tables<'a, I: Item> {
     item: &'a I,
+    remove: &'a RefCell<Vec<u32>>,
     states: slice::IterMut<'a, (table::Table, I::State)>,
 }
 
@@ -32,6 +34,7 @@ pub struct Query<I: Item, F: Filter> {
     filter: F,
     count: u32,
     states: Vec<(table::Table, I::State)>,
+    remove: RefCell<Vec<u32>>,
     tables: table::Tables,
 }
 
@@ -64,6 +67,7 @@ impl<I: Item, F: Filter> Build<I, F> {
             filter: self.1,
             count: 0,
             states: Vec::new(),
+            remove: RefCell::new(Vec::new()),
             tables: store.tables.clone(),
         };
         query.analyze()?;
@@ -82,6 +86,7 @@ impl<I: Item, F: Filter> Query<I, F> {
         self.update();
         Tables {
             item: &self.item,
+            remove: &self.remove,
             states: self.states.iter_mut(),
         }
     }
@@ -124,6 +129,7 @@ impl<'a, I: Item> Iterator for Tables<'a, I> {
             locks: self.item.declare(state).collect(),
             count: count.unwrap_or_else(|| table.count()),
             item: self.item,
+            remove: self.remove,
             state,
             table,
         })
@@ -144,7 +150,7 @@ impl<I: Item> Guard<'_, I> {
         I::Item<'a>: IntoFlat,
     {
         #[cfg(debug_assertions)]
-        let context = Context::new(self.count, self.table, &self.locks);
+        let context = Context::new(self.count, self.table, self.remove, &self.locks);
         #[cfg(not(debug_assertions))]
         let context = Context::new(self.count, self.table);
         unsafe { self.item.get(&mut self.state, context) }.into_flat()
@@ -153,7 +159,12 @@ impl<I: Item> Guard<'_, I> {
 
 impl<'a, I: Item> Drop for Guard<'a, I> {
     fn drop(&mut self) {
-        if unsafe { self.table.unlock_all(self.item.declare(self.state)) } {
+        let mut remove = self.remove.borrow_mut();
+        let resolve = unsafe {
+            self.table
+                .unlock_all(self.item.declare(self.state), &mut remove)
+        };
+        if resolve {
             let _ = self.table.resolve();
         }
     }

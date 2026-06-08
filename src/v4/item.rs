@@ -6,6 +6,7 @@ use crate::v4::{
 };
 use core::{
     any::TypeId,
+    cell::RefCell,
     iter::{empty, once},
     marker::PhantomData,
 };
@@ -27,6 +28,7 @@ pub trait Item: Depend {
 #[derive(Debug, Clone, Copy)]
 pub struct Context<'a> {
     table: &'a table::Table,
+    remove: &'a RefCell<Vec<u32>>,
     count: u32,
     #[cfg(debug_assertions)]
     locks: &'a [Lock],
@@ -56,10 +58,16 @@ impl<'a> Context<'a> {
     }
 
     #[cfg(debug_assertions)]
-    pub const fn new(count: u32, table: &'a table::Table, locks: &'a [Lock]) -> Self {
+    pub const fn new(
+        count: u32,
+        table: &'a table::Table,
+        remove: &'a RefCell<Vec<u32>>,
+        locks: &'a [Lock],
+    ) -> Self {
         Self {
             table,
             count,
+            remove,
             locks,
         }
     }
@@ -72,10 +80,10 @@ impl<'a> Context<'a> {
         self.count
     }
 
-    pub unsafe fn rows(self, remove: &'a mut Vec<u32>) -> table::Rows<'a> {
+    pub unsafe fn rows(self) -> table::Rows<'a> {
         #[cfg(debug_assertions)]
         debug_assert!(self.locks.contains(&Lock::Rows));
-        unsafe { self.table.rows(self.count, remove) }
+        unsafe { self.table.rows(self.count, self.remove) }
     }
 
     pub unsafe fn column<T: 'static>(self, index: u32) -> &'a [T] {
@@ -296,21 +304,21 @@ impl Item for Rows {
         = table::Rows<'a>
     where
         Self: 'a;
-    type State = Vec<u32>;
+    type State = ();
 
     fn initialize(&self, _: &table::Table) -> Option<Self::State> {
-        Some(Vec::new())
+        Some(())
     }
 
     fn declare(&self, _: &Self::State) -> impl Iterator<Item = Lock> {
         once(Lock::Rows)
     }
 
-    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    unsafe fn get<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
     where
         Self: 'a,
     {
-        unsafe { context.rows(state) }
+        unsafe { context.rows() }
     }
 }
 

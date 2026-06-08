@@ -9,6 +9,7 @@ use arc_swap::{ArcSwapAny, AsRaw};
 use core::{
     alloc::Layout,
     any::{Any, TypeId},
+    cell::RefCell,
     cmp::{self, Reverse},
     fmt::{self, Debug, Formatter},
     iter::{FusedIterator, empty},
@@ -35,14 +36,14 @@ pub enum Lock {
 pub struct Row<'a> {
     row: u32,
     table: &'a Table,
-    remove: *mut Vec<u32>,
+    remove: &'a RefCell<Vec<u32>>,
 }
 
 #[derive(Debug)]
 pub(crate) struct State {
-    pub(crate) lock: u32,
-    pub(crate) count: u32,
-    pub(crate) capacity: u32,
+    lock: u32,
+    count: u32,
+    capacity: u32,
     remove: Vec<u32>,
 }
 
@@ -67,7 +68,7 @@ impl Debug for Row<'_> {
 pub struct Rows<'a> {
     rows: Range<u32>,
     table: &'a Table,
-    remove: &'a mut Vec<u32>,
+    remove: &'a RefCell<Vec<u32>>,
 }
 
 #[derive(Debug)]
@@ -232,26 +233,8 @@ impl<'a> Row<'a> {
         self.table.index()
     }
 
-    pub fn remove(&mut self) -> bool {
-        let local = unsafe { &mut *self.remove };
-        match local.last() {
-            Some(&last) if self.row > last => {
-                local.push(self.row);
-                true
-            }
-            Some(&last) if self.row == last => false,
-            Some(_) => match local.binary_search(&self.row) {
-                Ok(_) => false,
-                Err(index) => {
-                    local.insert(index, self.row);
-                    true
-                }
-            },
-            None => {
-                local.push(self.row);
-                true
-            }
-        }
+    pub fn remove(&mut self) {
+        self.remove.borrow_mut().push(self.row)
     }
 }
 
@@ -277,25 +260,15 @@ impl Ord for Row<'_> {
 
 impl<'a> Rows<'a> {
     pub fn remove(&mut self) {
-        self.remove.extend(self.rows.clone());
+        self.remove.borrow_mut().extend(self.rows.clone());
     }
 
     fn row(&mut self, row: u32) -> Row<'a> {
         Row {
             row,
             table: self.table,
-            remove: self.remove as *mut _,
+            remove: self.remove,
         }
-    }
-}
-
-impl Drop for Rows<'_> {
-    fn drop(&mut self) {
-        let header = self.table.header();
-        let mut guard = header.state.lock();
-        debug_assert!(guard.lock > 0);
-        guard.remove.append(&mut self.remove);
-        guard.lock -= 1;
     }
 }
 
@@ -361,7 +334,7 @@ impl Table {
         self.header().count.load(Ordering::Acquire)
     }
 
-    pub(crate) unsafe fn rows<'a>(&'a self, count: u32, remove: &'a mut Vec<u32>) -> Rows<'a> {
+    pub(crate) unsafe fn rows<'a>(&'a self, count: u32, remove: &'a RefCell<Vec<u32>>) -> Rows<'a> {
         Rows {
             rows: 0..count,
             table: self,
@@ -376,7 +349,7 @@ impl Table {
     pub(crate) unsafe fn lock_all(&self, locks: impl IntoIterator<Item = Lock>) -> Option<u32> {
         locks
             .into_iter()
-            .fold(None, |count, lock| unsafe { self.lock_one(lock) }.or(count))
+            .fold(None, |count, lock| unsafe { self.lock_one(lock).or(count) })
     }
 
     pub(crate) unsafe fn lock_one(&self, lock: Lock) -> Option<u32> {
@@ -399,22 +372,30 @@ impl Table {
         }
     }
 
-    pub(crate) unsafe fn unlock_all(&self, locks: impl IntoIterator<Item = Lock>) -> bool {
+    pub(crate) unsafe fn unlock_all(
+        &self,
+        locks: impl IntoIterator<Item = Lock>,
+        remove: &mut Vec<u32>,
+    ) -> bool {
         locks.into_iter().fold(false, |resolve, lock| unsafe {
-            self.unlock_one(lock) | resolve
+            self.unlock_one(lock, remove) || resolve
         })
     }
 
-    pub(crate) unsafe fn unlock_one(&self, lock: Lock) -> bool {
+    pub(crate) unsafe fn unlock_one(&self, lock: Lock, remove: &mut Vec<u32>) -> bool {
         match lock {
             Lock::Rows => {
                 let header = self.header();
                 let mut guard = header.state.lock();
                 guard.lock -= 1;
-                let remove = guard.remove.len() > 0;
+                guard.remove.append(remove);
+                let lock = guard.lock;
+                let resolve = guard.remove.len() > 0;
                 drop(guard);
-                header.wait.notify_all();
-                remove
+                if lock == 0 {
+                    header.wait.notify_all();
+                }
+                resolve
             }
             Lock::Column(column, access) => {
                 if let Some(column) = self.columns().get(column as usize) {
@@ -460,31 +441,29 @@ impl Table {
                 unsafe { column.unlock(Access::Write) };
             }
         });
-
-        let state = &mut *state;
-        for chunk in state
-            .remove
-            .chunk_by(|&left, &right| left.saturating_sub(right) <= 1)
         {
-            if let Some(&end) = chunk.first()
-                && let Some(&start) = chunk.last()
+            let state = &mut *state;
+            for chunk in state
+                .remove
+                .chunk_by(|&left, &right| left.saturating_sub(right) <= 1)
             {
-                let count = end
-                    .checked_sub(start)
-                    .ok_or(Error::TableUnderflow)?
-                    .checked_add(1)
-                    .ok_or(Error::TableUnderflow)?;
-                debug_assert!(start < state.count);
-                debug_assert!(end < state.count);
-                debug_assert!(count <= state.count);
-                state.count = state
-                    .count
-                    .checked_sub(count)
-                    .ok_or(Error::TableUnderflow)?;
-                for column in columns {
-                    unsafe { column.drop_at(start, count) };
-                    if start < state.count {
-                        unsafe { column.copy_at(state.count, start, count) };
+                if let Some(&end) = chunk.first()
+                    && let Some(&start) = chunk.last()
+                {
+                    let count = (end - start).checked_add(1).ok_or(Error::TableUnderflow)?;
+                    debug_assert!(start <= end);
+                    debug_assert!(start < state.count);
+                    debug_assert!(end < state.count);
+                    debug_assert!(count <= state.count);
+                    state.count = state
+                        .count
+                        .checked_sub(count)
+                        .ok_or(Error::TableUnderflow)?;
+                    for column in columns {
+                        unsafe { column.drop_at(start, count) };
+                        if start < state.count {
+                            unsafe { column.copy_at(state.count, start, count) };
+                        }
                     }
                 }
             }
@@ -492,6 +471,8 @@ impl Table {
         drop(guard);
         state.remove.clear();
         header.count.store(state.count, Ordering::Release);
+        drop(state);
+        header.wait.notify_all();
         Ok(())
     }
 
