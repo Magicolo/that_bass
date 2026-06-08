@@ -3,7 +3,7 @@ use crate::v4::{
     error::Error,
     meta::Meta,
     slice::Slice,
-    utility::{self, IteratorExtension, allocate, deallocate, defer},
+    utility::{self, IteratorExtension, allocate, deallocate, defer, is_unique},
 };
 use arc_swap::{ArcSwapAny, AsRaw};
 use core::{
@@ -51,8 +51,16 @@ pub(crate) struct State {
 struct Header {
     index: u32,
     count: AtomicU32,
-    wait: Condvar,
+    unlocked: Condvar,
+    resolved: Condvar,
     state: Mutex<State>,
+}
+
+#[test]
+fn boba() {
+    dbg!(size_of::<Table>());
+    dbg!(size_of::<Header>());
+    dbg!(size_of::<State>());
 }
 
 impl Debug for Row<'_> {
@@ -300,7 +308,8 @@ impl Table {
             Header {
                 index,
                 count: AtomicU32::new(0),
-                wait: Condvar::new(),
+                unlocked: Condvar::new(),
+                resolved: Condvar::new(),
                 state: Mutex::new(State {
                     lock: 0,
                     count: 0,
@@ -355,7 +364,7 @@ impl Table {
                 Lock::Rows => {
                     let mut guard = header.state.lock();
                     header
-                        .wait
+                        .resolved
                         .wait_while(&mut guard, |state| state.remove.len() > 0);
                     guard.lock += 1;
                     count = Some(guard.count);
@@ -380,6 +389,10 @@ impl Table {
         let mut rows = false;
         for lock in locks {
             match lock {
+                // `Rows` unlocking must be deferred otherwise it may cause a deadlock condition
+                // with `Self::insert` if this thread holds a lock on column 'A' and tries to take
+                // the state lock while another thread in `Self::insert` holds the state lock and
+                // tries to lock column 'A' (in `Self::ensure`).
                 Lock::Rows => rows = true,
                 Lock::Column(column, access) => {
                     if let Some(column) = columns.get(column as usize) {
@@ -396,7 +409,7 @@ impl Table {
             let resolve = guard.remove.len() > 0;
             drop(guard);
             if lock == 0 {
-                header.wait.notify_all();
+                header.unlocked.notify_all();
             }
             resolve
         } else {
@@ -426,7 +439,9 @@ impl Table {
         let columns = self.columns();
         let mut state = header.state.lock();
         state.remove.sort_unstable_by_key(|&row| Reverse(row));
-        header.wait.wait_while(&mut state, |state| state.lock > 0);
+        header
+            .unlocked
+            .wait_while(&mut state, |state| state.lock > 0);
         if state.remove.is_empty() {
             return Ok(());
         }
@@ -470,7 +485,7 @@ impl Table {
         state.remove.clear();
         header.count.store(state.count, Ordering::Release);
         drop(state);
-        header.wait.notify_all();
+        header.resolved.notify_all();
         Ok(())
     }
 
@@ -563,10 +578,5 @@ impl Drop for Table {
 fn sort<T: Ord>(items: impl IntoIterator<Item = T>) -> Option<Vec<T>> {
     let mut items = items.into_iter().collect::<Vec<_>>();
     items.sort_unstable();
-    for [left, right] in items.array_windows::<2>() {
-        if left == right {
-            return None;
-        }
-    }
-    Some(items)
+    if is_unique(&items) { Some(items) } else { None }
 }

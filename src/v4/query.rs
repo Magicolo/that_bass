@@ -6,7 +6,7 @@ use crate::v4::{
     filter::{Filter, Has, HasWith, Not},
     item::{self, Context, Item, Read, ReadWith, Try, Write, WriteWith},
     table,
-    utility::{IntoFlat, Push},
+    utility::{IntoFlat, Push, is_unique},
 };
 use core::{cell::RefCell, marker::PhantomData, slice};
 
@@ -127,7 +127,7 @@ impl<'a, I: Item> Iterator for Tables<'a, I> {
         #[cfg(debug_assertions)]
         let locks = self.item.declare(state).collect::<Vec<_>>();
         #[cfg(debug_assertions)]
-        debug_assert!(locks.is_sorted());
+        debug_assert!(locks.is_sorted() && is_unique(&locks));
         Some(Guard {
             #[cfg(debug_assertions)]
             locks,
