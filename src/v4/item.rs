@@ -1,6 +1,6 @@
 use crate::v4::{
     Meta,
-    depend::{Access, Depend, Dependency, Resource},
+    depend::{Access, Depend, Dependency},
     slice::Slice,
     table::{self, Lock},
 };
@@ -296,10 +296,7 @@ impl Item for Key {
 
 unsafe impl Depend for Rows {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        once(Dependency {
-            access: Access::Read,
-            resource: Resource::Table,
-        })
+        once(Dependency::read(Meta::of::<table::Table>()))
     }
 }
 
@@ -328,10 +325,7 @@ impl Item for Rows {
 
 unsafe impl Depend for Table {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        once(Dependency {
-            access: Access::Read,
-            resource: Resource::Table,
-        })
+        once(Dependency::read(Meta::of::<table::Table>()))
     }
 }
 
@@ -360,10 +354,7 @@ impl Item for Table {
 
 unsafe impl<T: 'static> Depend for Read<T> {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        once(Dependency {
-            access: Access::Read,
-            resource: Resource::Column(TypeId::of::<T>()),
-        })
+        once(Dependency::read(Meta::of::<T>()))
     }
 }
 
@@ -400,10 +391,7 @@ impl<T: 'static> Item for Read<T> {
 
 unsafe impl<T: 'static> Depend for Write<T> {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        once(Dependency {
-            access: Access::Write,
-            resource: Resource::Column(TypeId::of::<T>()),
-        })
+        once(Dependency::write(Meta::of::<T>()))
     }
 }
 
@@ -440,10 +428,7 @@ impl<T: 'static> Item for Write<T> {
 
 unsafe impl Depend for ReadWith {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        once(Dependency {
-            access: Access::Read,
-            resource: Resource::Column(self.0.identifier()),
-        })
+        once(Dependency::read(self.0))
     }
 }
 
@@ -472,10 +457,7 @@ impl Item for ReadWith {
 
 unsafe impl Depend for WriteWith {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        once(Dependency {
-            access: Access::Write,
-            resource: Resource::Column(self.0.identifier()),
-        })
+        once(Dependency::write(self.0))
     }
 }
 

@@ -1,15 +1,12 @@
-use crate::v4::{Error, utility::Push};
-use core::{
-    any::TypeId,
-    iter::{empty, from_fn, once},
-};
+use crate::v4::{Error, Meta, utility::Push};
+use core::iter::{empty, once};
 use itertools::Itertools;
 use std::{rc::Rc, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Dependency {
-    pub resource: Resource,
-    pub access: Access,
+    meta: Meta,
+    access: Access,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -18,15 +15,31 @@ pub enum Access {
     Read,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub enum Resource {
-    Column(TypeId),
-    Table,
-    Tables,
-    Store,
-}
-
 pub struct Analysis<D>(D);
+
+impl Dependency {
+    pub const fn read(meta: Meta) -> Self {
+        Self {
+            meta,
+            access: Access::Read,
+        }
+    }
+
+    pub const fn write(meta: Meta) -> Self {
+        Self {
+            meta,
+            access: Access::Write,
+        }
+    }
+
+    pub const fn meta(self) -> Meta {
+        self.meta
+    }
+
+    pub const fn access(self) -> Access {
+        self.access
+    }
+}
 
 impl Analysis<()> {
     pub const fn new() -> Self {
@@ -140,52 +153,20 @@ unsafe impl<D: Depend + ?Sized> Depend for triomphe::Arc<D> {
     }
 }
 
-impl Resource {
-    pub const fn parent(self) -> Option<Self> {
-        match self {
-            Self::Store => None,
-            Self::Tables => Some(Self::Store),
-            Self::Table => Some(Self::Tables),
-            Self::Column(_) => Some(Self::Table),
-        }
-    }
-
-    pub fn ancestors(self) -> impl Iterator<Item = Self> {
-        let mut child = self;
-        from_fn(move || {
-            child = child.parent()?;
-            Some(child)
-        })
-    }
-}
-
 fn analyze(dependencies: impl IntoIterator<Item = Dependency>) -> Option<Error> {
-    let mut last = None::<Dependency>;
-    let errors = dependencies
-        .into_iter()
-        .flat_map(|dependency| {
-            once(dependency).chain(dependency.resource.ancestors().map(|resource| Dependency {
-                resource,
-                access: Access::Read,
-            }))
-        })
-        .filter_map(|dependency| match last {
-            Some(last) if last.resource == dependency.resource => {
-                match (last.access, dependency.access) {
-                    (Access::Read, Access::Write) | (Access::Write, Access::Read) => {
-                        Some(Error::ReadWriteConflict(dependency.resource, last.resource))
-                    }
-                    (Access::Write, Access::Write) => Some(Error::WriteWriteConflict(
-                        dependency.resource,
-                        last.resource,
-                    )),
-                    (Access::Read, Access::Read) => None,
-                }
+    let mut old = None::<Dependency>;
+    let errors = dependencies.into_iter().filter_map(|new| match old {
+        Some(old) if old.meta == new.meta => match (old.access, new.access) {
+            (Access::Read, Access::Write) | (Access::Write, Access::Read) => {
+                Some(Error::ReadWriteConflict(new.meta, old.meta))
             }
-            Some(_) | None => {
-                last = Some(dependency);
-                None
-            }
-        });
+            (Access::Write, Access::Write) => Some(Error::WriteWriteConflict(new.meta, old.meta)),
+            (Access::Read, Access::Read) => None,
+        },
+        Some(_) | None => {
+            old = Some(new);
+            None
+        }
+    });
     Error::all(errors)
 }

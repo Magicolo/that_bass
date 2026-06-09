@@ -1,6 +1,6 @@
 use crate::v4::{
     Error, Meta, Store, Table,
-    depend::{Access, Depend, Dependency, Resource},
+    depend::Dependency,
     template::{Column, ColumnWith, Key, Template},
     utility::{IntoNest, Push},
 };
@@ -36,8 +36,7 @@ impl<T: Template> Insert<T> {
             for (index, item) in self.items.drain(..).enumerate() {
                 let index = start + index as u32;
                 unsafe {
-                    self.template
-                        .apply(&mut self.state, item, index, &self.table);
+                    self.template.apply(&self.state, item, index, &self.table);
                 }
             }
         })?;
@@ -71,26 +70,17 @@ impl<T> Build<T> {
 impl<T: Template> Build<T> {
     pub fn build(self, store: &Store) -> Result<Insert<T>, Error> {
         let template = self.0;
-        let table = store.tables().find_or_add(template.declare())?;
+        let table = store
+            .tables()
+            .find_or_add(template.depend().map(Dependency::meta))?;
         let state = template
             .initialize(&table)
             .ok_or(Error::FailedToInitialize)?;
-        let insert = Insert {
+        Ok(Insert {
             template,
             items: Vec::new(),
             table,
             state,
-        };
-        insert.analyze()?;
-        Ok(insert)
-    }
-}
-
-unsafe impl<T: Template> Depend for Insert<T> {
-    fn depend(&self) -> impl Iterator<Item = Dependency> {
-        self.template.declare().map(|meta| Dependency {
-            access: Access::Write,
-            resource: Resource::Column(meta.identifier()),
         })
     }
 }

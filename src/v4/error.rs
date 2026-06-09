@@ -1,4 +1,4 @@
-use crate::v4::depend::Resource;
+use crate::v4::Meta;
 use core::{alloc::LayoutError, num::TryFromIntError};
 
 #[derive(Debug, thiserror::Error)]
@@ -32,9 +32,9 @@ pub enum Error {
     #[error("no available row slot in table")]
     FailedToReserve,
     #[error("read/write conflict: {0:?} -> {1:?}")]
-    ReadWriteConflict(Resource, Resource),
+    ReadWriteConflict(Meta, Meta),
     #[error("write/write conflict: {0:?} -> {1:?}")]
-    WriteWriteConflict(Resource, Resource),
+    WriteWriteConflict(Meta, Meta),
     #[error("errors: {0:?}")]
     All(Vec<Error>),
     #[error("version overflow")]
