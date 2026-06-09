@@ -3,6 +3,7 @@ pub mod error;
 pub mod filter;
 pub mod insert;
 pub mod item;
+pub mod key;
 pub mod meta;
 pub mod query;
 pub mod slice;

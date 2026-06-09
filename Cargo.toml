@@ -22,6 +22,7 @@ ref-cast = "1.0.25"
 derive_more = { version = "2.1.1", features = ["full"] }
 arc-swap = "1.9.1"
 triomphe = { version = "0.1.15", features = ["arc-swap"] }
+slab = "0.4.12"
 
 [dev-dependencies]
 intx = "0.1.0"
