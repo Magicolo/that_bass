@@ -1,3 +1,4 @@
+pub mod buffer;
 pub mod depend;
 pub mod error;
 pub mod filter;
@@ -11,8 +12,9 @@ pub mod table;
 pub mod template;
 pub mod utility;
 
-use crate::v4::table::Tables;
+use crate::v4::{key::Keys, table::Tables};
 pub use error::Error;
+pub use key::Key;
 pub use meta::Meta;
 pub use table::{Row, Rows, Table};
 
@@ -27,17 +29,23 @@ TODO:
 #[derive(Default)]
 pub struct Store {
     tables: Tables,
+    keys: Keys,
 }
 
 impl Store {
     pub fn new() -> Self {
         Self {
             tables: Tables::new(),
+            keys: Keys::new(),
         }
     }
 
     pub const fn tables(&self) -> &Tables {
         &self.tables
+    }
+
+    pub const fn keys(&self) -> &Keys {
+        &self.keys
     }
 }
 

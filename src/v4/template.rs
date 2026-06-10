@@ -1,10 +1,12 @@
 use crate::v4::{
-    Meta, Table,
+    Meta, Store, Table,
+    buffer::Buffer,
     depend::{Depend, Dependency},
+    key::Keys,
 };
 use core::{
     any::{Any, TypeId},
-    iter::{empty, once},
+    iter::once,
     marker::PhantomData,
 };
 
@@ -12,8 +14,8 @@ pub trait Template: Depend {
     type Item;
     type State;
 
-    fn initialize(&self, table: &Table) -> Option<Self::State>;
-    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table);
+    fn initialize(&self, table: &Table, store: &Store) -> Option<Self::State>;
+    unsafe fn set(&self, state: &Self::State, item: Self::Item, buffer: &mut Buffer);
 }
 
 pub struct Key(pub(crate) ());
@@ -24,12 +26,13 @@ impl<T: Template + ?Sized> Template for &T {
     type Item = T::Item;
     type State = T::State;
 
-    fn initialize(&self, table: &Table) -> Option<Self::State> {
-        T::initialize(self, table)
+    fn initialize(&self, table: &Table, store: &Store) -> Option<Self::State> {
+        T::initialize(self, table, store)
     }
 
-    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
-        unsafe { T::apply(self, state, item, index, table) }
+    #[inline]
+    unsafe fn set(&self, state: &Self::State, item: Self::Item, buffer: &mut Buffer) {
+        unsafe { T::set(self, state, item, buffer) }
     }
 }
 
@@ -37,12 +40,13 @@ impl<T: Template + ?Sized> Template for &mut T {
     type Item = T::Item;
     type State = T::State;
 
-    fn initialize(&self, table: &Table) -> Option<Self::State> {
-        T::initialize(self, table)
+    fn initialize(&self, table: &Table, store: &Store) -> Option<Self::State> {
+        T::initialize(self, table, store)
     }
 
-    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
-        unsafe { T::apply(self, state, item, index, table) }
+    #[inline]
+    unsafe fn set(&self, state: &Self::State, item: Self::Item, buffer: &mut Buffer) {
+        unsafe { T::set(self, state, item, buffer) }
     }
 }
 
@@ -50,45 +54,53 @@ impl Template for () {
     type Item = ();
     type State = ();
 
-    fn initialize(&self, _: &Table) -> Option<Self::State> {
+    fn initialize(&self, _: &Table, _: &Store) -> Option<Self::State> {
         Some(())
     }
 
-    unsafe fn apply(&self, _: &Self::State, _: Self::Item, _: u32, _: &Table) {}
+    #[inline]
+    unsafe fn set(&self, _: &Self::State, _: Self::Item, _: &mut Buffer) {}
 }
 
 impl<T0: Template, T1: Template> Template for (T0, T1) {
     type Item = (T0::Item, T1::Item);
     type State = (T0::State, T1::State);
 
-    fn initialize(&self, table: &Table) -> Option<Self::State> {
-        Some((self.0.initialize(table)?, self.1.initialize(table)?))
+    fn initialize(&self, table: &Table, store: &Store) -> Option<Self::State> {
+        Some((
+            self.0.initialize(table, store)?,
+            self.1.initialize(table, store)?,
+        ))
     }
 
-    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
-        unsafe {
-            self.0.apply(&state.0, item.0, index, table);
-            self.1.apply(&state.1, item.1, index, table);
-        }
+    unsafe fn set(&self, state: &Self::State, item: Self::Item, buffer: &mut Buffer) {
+        unsafe { self.0.set(&state.0, item.0, buffer) };
+        unsafe { self.1.set(&state.1, item.1, buffer) };
     }
 }
 
 unsafe impl Depend for Key {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        empty()
+        once(Dependency::write(Meta::key()))
     }
 }
 
-// TODO: Implement this when `Keys` will be implemented.
 impl Template for Key {
     type Item = ();
-    type State = ();
+    type State = Keys;
 
-    fn initialize(&self, table: &Table) -> Option<Self::State> {
-        None
+    fn initialize(&self, table: &Table, store: &Store) -> Option<Self::State> {
+        if table.columns().get(0)?.meta().is_key() {
+            Some(store.keys().clone())
+        } else {
+            None
+        }
     }
 
-    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {}
+    #[inline]
+    unsafe fn set(&self, _: &Self::State, _: Self::Item, _: &mut Buffer) {
+        todo!()
+    }
 }
 
 unsafe impl Depend for ColumnWith {
@@ -101,18 +113,13 @@ impl Template for ColumnWith {
     type Item = Box<dyn Any>;
     type State = u32;
 
-    fn initialize(&self, table: &Table) -> Option<Self::State> {
+    fn initialize(&self, table: &Table, _: &Store) -> Option<Self::State> {
         table.column(self.0.identifier())
     }
 
-    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
-        assert_eq!(self.0.identifier(), item.type_id());
-        unsafe {
-            table
-                .columns()
-                .get_unchecked(*state as usize)
-                .set_at_with(item, index)
-        };
+    #[inline]
+    unsafe fn set(&self, state: &Self::State, item: Self::Item, buffer: &mut Buffer) {
+        unsafe { buffer.set(*state, item) };
     }
 }
 
@@ -126,16 +133,12 @@ impl<T: 'static> Template for Column<T> {
     type Item = T;
     type State = u32;
 
-    fn initialize(&self, table: &Table) -> Option<Self::State> {
+    fn initialize(&self, table: &Table, _: &Store) -> Option<Self::State> {
         table.column(TypeId::of::<T>())
     }
 
-    unsafe fn apply(&self, state: &Self::State, item: Self::Item, index: u32, table: &Table) {
-        unsafe {
-            table
-                .columns()
-                .get_unchecked(*state as usize)
-                .set_at(item, index)
-        };
+    #[inline]
+    unsafe fn set(&self, state: &Self::State, item: Self::Item, buffer: &mut Buffer) {
+        unsafe { buffer.set(*state, item) };
     }
 }

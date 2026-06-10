@@ -47,6 +47,12 @@ pub enum Error {
     RowsOverflow(TryFromIntError),
     #[error("items overflow: {0}")]
     ItemsOverflow(TryFromIntError),
+    #[error("cannot write to the key column")]
+    CannotWriteKey,
+    #[error("buffer overflow")]
+    BufferOverflow,
+    #[error("insert overflow")]
+    InsertOverflow(TryFromIntError),
 }
 
 impl Error {

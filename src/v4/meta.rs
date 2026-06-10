@@ -1,13 +1,14 @@
-use crate::v4::Error;
+use crate::v4::{Error, key, table};
 use core::{
     alloc::{Layout, LayoutError},
     any::{Any, TypeId, type_name},
+    cmp::Ordering,
     hash::Hash,
     mem::needs_drop,
     ptr::{NonNull, copy_nonoverlapping, slice_from_raw_parts_mut},
 };
 use parking_lot::Mutex;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::LazyLock};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Meta(&'static Inner);
@@ -54,6 +55,16 @@ impl Meta {
         }))
     }
 
+    pub(crate) fn key() -> Self {
+        static KEY: LazyLock<Meta> = LazyLock::new(Meta::of::<key::Key>);
+        *KEY
+    }
+
+    pub(crate) fn table() -> Self {
+        static TABLE: LazyLock<Meta> = LazyLock::new(Meta::of::<table::Table>);
+        *TABLE
+    }
+
     #[inline]
     pub const fn identifier(self) -> TypeId {
         self.0.identifier
@@ -72,6 +83,14 @@ impl Meta {
     #[inline]
     pub const fn drops(self) -> bool {
         self.0.drop.is_some()
+    }
+
+    pub(crate) fn is_key(self) -> bool {
+        self.0.identifier == TypeId::of::<key::Key>()
+    }
+
+    pub(crate) fn is_table(self) -> bool {
+        self.0.identifier == TypeId::of::<table::Table>()
     }
 
     #[inline]
@@ -183,14 +202,19 @@ impl PartialEq for Meta {
 impl Eq for Meta {}
 
 impl PartialOrd for Meta {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.identifier().partial_cmp(&other.identifier())
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
 impl Ord for Meta {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.identifier().cmp(&other.identifier())
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.is_key(), other.is_key()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => self.identifier().cmp(&other.identifier()),
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 use crate::v4::{
     Error, Meta, Store, Table,
+    buffer::Buffer,
     depend::Dependency,
     template::{Column, ColumnWith, Key, Template},
     utility::{IntoNest, Push},
@@ -8,11 +9,16 @@ use core::marker::PhantomData;
 
 pub struct Build<T>(T);
 
+// TODO: Store items in a buffer that mirrors the table's columns such that
+// copying the data can be simply done by 'zipping' the buffer's pointers with
+// the columns and 'ptr::copy_nonoverlapping'. `Table::insert` can then remain
+// non-generic. Add `Template::push` to move the item to the corresponding
+// buffer column.
 pub struct Insert<T: Template> {
     template: T,
     state: T::State,
-    items: Vec<T::Item>,
     table: Table,
+    buffer: Buffer,
 }
 
 impl Insert<()> {
@@ -22,25 +28,32 @@ impl Insert<()> {
 }
 
 impl<T: Template> Insert<T> {
-    pub fn one<N: IntoNest<Nest = T::Item>>(&mut self, item: N) {
-        self.items.push(item.into_nest());
+    #[inline]
+    pub fn one<N: IntoNest<Nest = T::Item>>(&mut self, item: N) -> Result<(), Error> {
+        let item = item.into_nest();
+        self.buffer.reserve(1)?;
+        unsafe { self.template.set(&self.state, item, &mut self.buffer) };
+        unsafe { self.buffer.commit() };
+        Ok(())
     }
 
-    pub fn all<I: IntoIterator<Item: IntoNest<Nest = T::Item>>>(&mut self, items: I) {
-        self.items.extend(items.into_iter().map(I::Item::into_nest));
+    #[inline]
+    pub fn all<I: IntoIterator<IntoIter: ExactSizeIterator, Item: IntoNest<Nest = T::Item>>>(
+        &mut self,
+        items: I,
+    ) -> Result<(), Error> {
+        let items = items.into_iter();
+        let count = items.len().try_into().map_err(Error::InsertOverflow)?;
+        self.buffer.reserve(count)?;
+        for item in items.map(I::Item::into_nest) {
+            unsafe { self.template.set(&self.state, item, &mut self.buffer) };
+            unsafe { self.buffer.commit() };
+        }
+        Ok(())
     }
 
     pub fn resolve(&mut self) -> Result<(), Error> {
-        let count = self.items.len().try_into().map_err(Error::ItemsOverflow)?;
-        self.table.insert(count, |start| {
-            for (index, item) in self.items.drain(..).enumerate() {
-                let index = start + index as u32;
-                unsafe {
-                    self.template.apply(&self.state, item, index, &self.table);
-                }
-            }
-        })?;
-        Ok(())
+        self.table.append(&mut self.buffer)
     }
 }
 
@@ -74,13 +87,13 @@ impl<T: Template> Build<T> {
             .tables()
             .find_or_add(template.depend().map(Dependency::meta))?;
         let state = template
-            .initialize(&table)
+            .initialize(&table, store)
             .ok_or(Error::FailedToInitialize)?;
         Ok(Insert {
             template,
-            items: Vec::new(),
-            table,
             state,
+            buffer: Buffer::new(table.metas()),
+            table,
         })
     }
 }

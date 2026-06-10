@@ -1,9 +1,10 @@
 use crate::v4::{
+    buffer::Buffer,
     depend::Access,
     error::Error,
     meta::Meta,
     slice::Slice,
-    utility::{self, IteratorExtension, allocate, deallocate, defer, is_unique},
+    utility::{self, IteratorExtension, defer, is_unique},
 };
 use arc_swap::{ArcSwapAny, AsRaw};
 use core::{
@@ -185,26 +186,38 @@ impl Column {
     }
 
     #[inline]
-    pub(crate) unsafe fn get<T: 'static>(&self, count: u32) -> &[T] {
+    pub(crate) unsafe fn get_one<T: 'static>(&self, row: u32) -> &T {
+        debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
+        unsafe { self.data().cast::<T>().add(row as usize).as_ref() }
+    }
+
+    #[inline]
+    pub(crate) unsafe fn get_one_mut<T: 'static>(&self, row: u32) -> &mut T {
+        debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
+        unsafe { self.data().cast::<T>().add(row as usize).as_mut() }
+    }
+
+    #[inline]
+    pub(crate) unsafe fn get_all<T: 'static>(&self, count: u32) -> &[T] {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
         unsafe { from_raw_parts(self.data().cast::<T>().as_ptr(), count as usize) }
     }
 
     #[inline]
-    pub(crate) unsafe fn get_mut<T: 'static>(&self, count: u32) -> &mut [T] {
+    pub(crate) unsafe fn get_all_mut<T: 'static>(&self, count: u32) -> &mut [T] {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
         unsafe { from_raw_parts_mut(self.data().cast::<T>().as_ptr(), count as usize) }
     }
 
     #[inline]
-    pub(crate) unsafe fn get_in(&self, slice: &mut Slice, count: u32) {
+    pub(crate) unsafe fn get_all_in(&self, slice: &mut Slice, count: u32) {
         debug_assert_eq!(self.meta, slice.meta());
         unsafe { slice.set_parts(self.data(), count as _) };
     }
 
     #[inline]
     pub(crate) unsafe fn set_at<T: 'static>(&self, item: T, row: u32) {
-        debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
+        debug_assert_eq!(self.meta.identifier(), item.type_id());
         unsafe { self.data().cast::<T>().add(row as usize).write(item) };
     }
 
@@ -212,6 +225,16 @@ impl Column {
     pub(crate) unsafe fn set_at_with(&self, item: Box<dyn Any>, row: u32) {
         debug_assert_eq!(self.meta.identifier(), item.type_id());
         unsafe { self.meta.set_at(self.data(), item, row) };
+    }
+
+    #[inline]
+    pub(crate) unsafe fn copy_from_at(
+        &self,
+        source: (NonNull<u8>, u32),
+        target: u32,
+        count: u32,
+    ) -> bool {
+        unsafe { self.meta.copy_at(source, (self.data(), target), count) }
     }
 
     #[inline]
@@ -225,6 +248,7 @@ impl Column {
         unsafe { self.meta.drop_at(self.data(), row, count) }
     }
 
+    #[inline]
     unsafe fn data(&self) -> NonNull<u8> {
         unsafe { *self.data.data_ptr() }
     }
@@ -314,28 +338,39 @@ impl Table {
         ))
     }
 
+    #[inline]
     pub(crate) fn address(&self) -> usize {
         self.0.as_ptr().addr()
     }
 
+    #[inline]
     pub(crate) fn column(&self, identifier: TypeId) -> Option<u32> {
         utility::find(&self.0.slice, identifier, |column| column.meta.identifier())?
             .try_into()
             .ok()
     }
 
+    #[inline]
     pub fn columns(&self) -> &[Column] {
         &self.0.slice
     }
 
+    #[inline]
     pub fn index(&self) -> u32 {
         self.header().index
     }
 
+    #[inline]
     pub fn count(&self) -> u32 {
         self.header().count.load(Ordering::Acquire)
     }
 
+    #[inline]
+    pub(crate) fn metas(&self) -> impl Iterator<Item = Meta> {
+        self.columns().iter().map(Column::meta)
+    }
+
+    #[inline]
     pub(crate) unsafe fn rows<'a>(&'a self, count: u32, remove: &'a RefCell<Vec<u32>>) -> Rows<'a> {
         Rows {
             rows: 0..count,
@@ -344,6 +379,16 @@ impl Table {
         }
     }
 
+    #[inline]
+    pub(crate) unsafe fn row<'a>(&'a self, row: u32, remove: &'a RefCell<Vec<u32>>) -> Row<'a> {
+        Row {
+            table: self,
+            row,
+            remove,
+        }
+    }
+
+    #[inline]
     pub(crate) fn is(&self, metas: impl IntoIterator<Item = Meta>) -> bool {
         self.columns().iter().map(|column| column.meta()).eq(metas)
     }
@@ -409,18 +454,26 @@ impl Table {
         Ok(())
     }
 
-    pub(crate) fn insert<F: FnOnce(u32)>(&self, count: u32, apply: F) -> Result<(), Error> {
-        if count == 0 {
+    pub(crate) fn append(&self, buffer: &mut Buffer) -> Result<(), Error> {
+        if buffer.count == 0 {
             return Ok(());
         }
 
         let header = self.header();
         let columns = self.columns();
+        debug_assert_eq!(buffer.columns.len(), columns.len());
+
         let mut state = header.state.lock();
         let start = state.count;
-        let end = start.checked_add(count).ok_or(Error::TableOverflow)?;
+        let end = start
+            .checked_add(buffer.count)
+            .ok_or(Error::TableOverflow)?;
         Self::ensure(&mut state, columns, end)?;
-        apply(start);
+        for (source, target) in buffer.columns.iter().zip(columns) {
+            debug_assert_eq!(source.meta(), target.meta());
+            unsafe { target.copy_from_at((source.data(), 0), start, buffer.count) };
+        }
+        buffer.count = 0;
         state.count = end;
         header.count.store(state.count, Ordering::Release);
         Ok(())
@@ -479,14 +532,9 @@ impl Table {
         let capacity = count
             .checked_next_power_of_two()
             .ok_or(Error::TableOverflow)?;
-        let new_layout = columns
-            .iter()
-            .try_fold(Layout::new::<()>(), |layout, column| {
-                Ok(column.meta.extend(layout, capacity)?.0)
-            })?;
         // TODO: Restore a valid state if an error occurs after allocation and/or while
         // some columns have been updated.
-        let new_data = unsafe { allocate(new_layout.pad_to_align())? };
+        let new_data = unsafe { allocate(columns.iter().map(Column::meta), capacity)? };
         let mut old_layout = Layout::new::<()>();
         let mut new_layout = Layout::new::<()>();
         let mut old_data = NonNull::dangling();
@@ -501,17 +549,19 @@ impl Table {
             old_layout = old_pair.0;
             new_layout = new_pair.0;
         }
-        unsafe { deallocate(old_data, old_layout.pad_to_align()) };
+        unsafe { utility::deallocate(old_data, old_layout.pad_to_align()) };
         state.capacity = capacity;
         Ok(())
     }
 
+    #[inline]
     fn header(&self) -> &Header {
         &self.0.header.header
     }
 }
 
 impl PartialEq for Table {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.address().eq(&other.address())
     }
@@ -520,12 +570,14 @@ impl PartialEq for Table {
 impl Eq for Table {}
 
 impl PartialOrd for Table {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         self.address().partial_cmp(&other.address())
     }
 }
 
 impl Ord for Table {
+    #[inline]
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         self.address().cmp(&other.address())
     }
@@ -548,11 +600,30 @@ impl Drop for Table {
                     old_data = unsafe { data.sub(pair.1) };
                     old_layout = pair.0;
                 }
-                unsafe { deallocate(old_data, old_layout.pad_to_align()) };
+                unsafe { utility::deallocate(old_data, old_layout.pad_to_align()) };
                 Ok::<_, Error>(true)
             } else {
                 Ok::<_, Error>(false)
             }
         });
     }
+}
+
+pub(crate) fn layout(
+    metas: impl IntoIterator<Item = Meta>,
+    capacity: u32,
+) -> Result<Layout, Error> {
+    metas
+        .into_iter()
+        .try_fold(Layout::new::<()>(), |layout, meta| {
+            Ok(meta.extend(layout, capacity)?.0)
+        })
+}
+
+pub(crate) unsafe fn allocate(
+    metas: impl IntoIterator<Item = Meta>,
+    capacity: u32,
+) -> Result<NonNull<u8>, Error> {
+    let layout = layout(metas, capacity)?;
+    unsafe { utility::allocate(layout.pad_to_align()) }
 }
