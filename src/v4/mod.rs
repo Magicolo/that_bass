@@ -94,11 +94,11 @@ mod tests {
                 scope.spawn(|| {
                     Analysis::new().add(&query3).add(&query4).analyze()?;
                     for mut outer in query3.tables() {
-                        let (a, b) = outer.get();
+                        let (a, b) = outer.all();
                         let Some(b) = b else { continue };
 
                         for mut inner in query4.tables() {
-                            let (c, d) = inner.get();
+                            let (c, d) = inner.all();
                             for (a, b, c, d) in izip!(&*a, &mut *b, &*c, &*d) {
                                 b.push(*a);
                                 b.push(*c);
@@ -112,7 +112,7 @@ mod tests {
                 });
                 scope.spawn(|| {
                     for mut guard in query1.tables() {
-                        let (a, b) = guard.get();
+                        let (a, b) = guard.all();
                         let Some(b) = b else { continue };
                         for (a, b) in izip!(a, b) {
                             b.push(*a);
@@ -123,7 +123,7 @@ mod tests {
                 });
                 scope.spawn(move || {
                     for mut guard in query2.tables() {
-                        let (a, b) = guard.get();
+                        let (a, b) = guard.all();
                         for (a, b) in izip!(a, b) {
                             *b = *a as u32;
                         }
@@ -140,7 +140,7 @@ mod tests {
                 scope.spawn(move || {
                     wait_for(&signal, 1);
                     for mut guard in query5.tables() {
-                        let (mut rows,) = guard.get();
+                        let (mut rows,) = guard.all();
                         rows.remove();
                     }
                     anyhow::Ok(())
@@ -161,7 +161,7 @@ mod tests {
     //     )?;
     //     let guard = state.guard();
     //     let mut guard = guard.next()?;
-    //     assert!(matches!(guard.get(), Err(Error::ReadWriteConflict(_, _))));
+    //     assert!(matches!(guard.all(), Err(Error::ReadWriteConflict(_, _))));
     //     Ok(())
     // }
 }

@@ -12,6 +12,9 @@ pub(crate) struct Column {
     data: NonNull<u8>,
 }
 
+unsafe impl Send for Column {}
+unsafe impl Sync for Column {}
+
 impl Column {
     pub(crate) const fn new(meta: Meta) -> Self {
         Self {

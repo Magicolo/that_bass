@@ -14,21 +14,13 @@ use itertools::Itertools;
 
 pub trait Item: Depend {
     type State;
-    type All<'a>
-    where
-        Self: 'a;
-    type One<'a>
-    where
-        Self: 'a;
+    type All<'a>;
+    type One<'a>;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State>;
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock>;
-    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a;
-    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a;
+    unsafe fn all<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::All<'a>;
+    unsafe fn one<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::One<'a>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -186,30 +178,20 @@ impl<'a> Context<'a> {
 
     #[inline]
     fn assert_read(self, index: u32) {
-        self.assert_column(index, Access::Read);
+        #[cfg(debug_assertions)]
+        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Read)));
     }
 
     #[inline]
     fn assert_write(self, index: u32) {
-        self.assert_column(index, Access::Write);
-    }
-
-    #[inline]
-    fn assert_column(self, index: u32, access: Access) {
         #[cfg(debug_assertions)]
-        debug_assert!(self.locks.contains(&Lock::Column(index, access)));
+        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Write)));
     }
 }
 
 impl<I: Item + ?Sized> Item for &I {
-    type All<'a>
-        = I::All<'a>
-    where
-        Self: 'a;
-    type One<'a>
-        = I::One<'a>
-    where
-        Self: 'a;
+    type All<'a> = I::All<'a>;
+    type One<'a> = I::One<'a>;
     type State = I::State;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -222,31 +204,19 @@ impl<I: Item + ?Sized> Item for &I {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn all<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::All<'a> {
         unsafe { I::all(self, state, context) }
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn one<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::One<'a> {
         unsafe { I::one(self, state, context) }
     }
 }
 
 impl<I: Item + ?Sized> Item for &mut I {
-    type All<'a>
-        = I::All<'a>
-    where
-        Self: 'a;
-    type One<'a>
-        = I::One<'a>
-    where
-        Self: 'a;
+    type All<'a> = I::All<'a>;
+    type One<'a> = I::One<'a>;
     type State = I::State;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -259,31 +229,19 @@ impl<I: Item + ?Sized> Item for &mut I {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn all<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::All<'a> {
         unsafe { I::all(self, state, context) }
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn one<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::One<'a> {
         unsafe { I::one(self, state, context) }
     }
 }
 
 impl Item for () {
-    type All<'a>
-        = ()
-    where
-        Self: 'a;
-    type One<'a>
-        = ()
-    where
-        Self: 'a;
+    type All<'a> = ();
+    type One<'a> = ();
     type State = ();
 
     fn initialize(&self, _: &table::Table) -> Option<Self::State> {
@@ -296,29 +254,15 @@ impl Item for () {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, _: &'a mut Self::State, _: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
-    }
+    unsafe fn all<'a>(&self, _: &Self::State, _: Context<'a>) -> Self::All<'a> {}
 
     #[inline]
-    unsafe fn one<'a>(&'a self, _: &'a mut Self::State, _: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
-    }
+    unsafe fn one<'a>(&self, _: &Self::State, _: Context<'a>) -> Self::One<'a> {}
 }
 
 impl<I0: Item, I1: Item> Item for (I0, I1) {
-    type All<'a>
-        = (I0::All<'a>, I1::All<'a>)
-    where
-        Self: 'a;
-    type One<'a>
-        = (I0::One<'a>, I1::One<'a>)
-    where
-        Self: 'a;
+    type All<'a> = (I0::All<'a>, I1::All<'a>);
+    type One<'a> = (I0::One<'a>, I1::One<'a>);
     type State = (I0::State, I1::State);
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -331,29 +275,13 @@ impl<I0: Item, I1: Item> Item for (I0, I1) {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
-        unsafe {
-            (
-                self.0.all(&mut state.0, context),
-                self.1.all(&mut state.1, context),
-            )
-        }
+    unsafe fn all<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::All<'a> {
+        unsafe { (self.0.all(&state.0, context), self.1.all(&state.1, context)) }
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
-        unsafe {
-            (
-                self.0.one(&mut state.0, context),
-                self.1.one(&mut state.1, context),
-            )
-        }
+    unsafe fn one<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::One<'a> {
+        unsafe { (self.0.one(&state.0, context), self.1.one(&state.1, context)) }
     }
 }
 
@@ -364,14 +292,8 @@ unsafe impl<I: Item + ?Sized> Depend for Try<I> {
 }
 
 impl<I: Item + ?Sized> Item for Try<I> {
-    type All<'a>
-        = Option<I::All<'a>>
-    where
-        Self: 'a;
-    type One<'a>
-        = Option<I::One<'a>>
-    where
-        Self: 'a;
+    type All<'a> = Option<I::All<'a>>;
+    type One<'a> = Option<I::One<'a>>;
     type State = Option<I::State>;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -387,19 +309,13 @@ impl<I: Item + ?Sized> Item for Try<I> {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
-        Some(unsafe { self.0.all(state.as_mut()?, context) })
+    unsafe fn all<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::All<'a> {
+        Some(unsafe { self.0.all(state.as_ref()?, context) })
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
-        Some(unsafe { self.0.one(state.as_mut()?, context) })
+    unsafe fn one<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::One<'a> {
+        Some(unsafe { self.0.one(state.as_ref()?, context) })
     }
 }
 
@@ -410,14 +326,8 @@ unsafe impl Depend for Key {
 }
 
 impl Item for Key {
-    type All<'a>
-        = &'a [key::Key]
-    where
-        Self: 'a;
-    type One<'a>
-        = &'a key::Key
-    where
-        Self: 'a;
+    type All<'a> = &'a [key::Key];
+    type One<'a> = &'a key::Key;
     type State = u32;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -430,18 +340,12 @@ impl Item for Key {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn all<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::All<'a> {
         unsafe { context.column(*state) }
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn one<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::One<'a> {
         unsafe { context.column_at(*state) }
     }
 }
@@ -453,14 +357,8 @@ unsafe impl Depend for Rows {
 }
 
 impl Item for Rows {
-    type All<'a>
-        = table::Rows<'a>
-    where
-        Self: 'a;
-    type One<'a>
-        = table::Row<'a>
-    where
-        Self: 'a;
+    type All<'a> = table::Rows<'a>;
+    type One<'a> = table::Row<'a>;
     type State = ();
 
     fn initialize(&self, _: &table::Table) -> Option<Self::State> {
@@ -473,18 +371,12 @@ impl Item for Rows {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn all<'a>(&self, _: &Self::State, context: Context<'a>) -> Self::All<'a> {
         unsafe { context.rows() }
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn one<'a>(&self, _: &Self::State, context: Context<'a>) -> Self::One<'a> {
         unsafe { context.row() }
     }
 }
@@ -496,14 +388,8 @@ unsafe impl Depend for Table {
 }
 
 impl Item for Table {
-    type All<'a>
-        = &'a table::Table
-    where
-        Self: 'a;
-    type One<'a>
-        = &'a table::Table
-    where
-        Self: 'a;
+    type All<'a> = &'a table::Table;
+    type One<'a> = &'a table::Table;
     type State = ();
 
     fn initialize(&self, _: &table::Table) -> Option<Self::State> {
@@ -516,18 +402,12 @@ impl Item for Table {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn all<'a>(&self, _: &Self::State, context: Context<'a>) -> Self::All<'a> {
         context.table()
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn one<'a>(&self, _: &Self::State, context: Context<'a>) -> Self::One<'a> {
         context.table()
     }
 }
@@ -547,14 +427,8 @@ impl<T: ?Sized> Clone for Read<T> {
 impl<T: ?Sized> Copy for Read<T> {}
 
 impl<T: 'static> Item for Read<T> {
-    type All<'a>
-        = &'a [T]
-    where
-        Self: 'a;
-    type One<'a>
-        = &'a T
-    where
-        Self: 'a;
+    type All<'a> = &'a [T];
+    type One<'a> = &'a T;
     type State = u32;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -567,18 +441,12 @@ impl<T: 'static> Item for Read<T> {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn all<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::All<'a> {
         unsafe { context.column(*state) }
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn one<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::One<'a> {
         unsafe { context.column_at(*state) }
     }
 }
@@ -598,14 +466,8 @@ impl<T: ?Sized> Clone for Write<T> {
 impl<T: ?Sized> Copy for Write<T> {}
 
 impl<T: 'static> Item for Write<T> {
-    type All<'a>
-        = &'a mut [T]
-    where
-        Self: 'a;
-    type One<'a>
-        = &'a mut T
-    where
-        Self: 'a;
+    type All<'a> = &'a mut [T];
+    type One<'a> = &'a mut T;
     type State = u32;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -618,18 +480,12 @@ impl<T: 'static> Item for Write<T> {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn all<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::All<'a> {
         unsafe { context.column_mut(*state) }
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn one<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::One<'a> {
         unsafe { context.column_at_mut(*state) }
     }
 }
@@ -641,14 +497,8 @@ unsafe impl Depend for ReadWith {
 }
 
 impl Item for ReadWith {
-    type All<'a>
-        = slice::Read<'a>
-    where
-        Self: 'a;
-    type One<'a>
-        = &'a dyn Any
-    where
-        Self: 'a;
+    type All<'a> = slice::Read<'a>;
+    type One<'a> = &'a dyn Any;
     type State = u32;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -661,18 +511,12 @@ impl Item for ReadWith {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn all<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::All<'a> {
         unsafe { context.slice(*state) }
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn one<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::One<'a> {
         unsafe { context.slice_at(*state) }
     }
 }
@@ -684,14 +528,8 @@ unsafe impl Depend for WriteWith {
 }
 
 impl Item for WriteWith {
-    type All<'a>
-        = slice::Write<'a>
-    where
-        Self: 'a;
-    type One<'a>
-        = &'a dyn Any
-    where
-        Self: 'a;
+    type All<'a> = slice::Write<'a>;
+    type One<'a> = &'a dyn Any;
     type State = u32;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
@@ -704,18 +542,12 @@ impl Item for WriteWith {
     }
 
     #[inline]
-    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn all<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::All<'a> {
         unsafe { context.slice_mut(*state) }
     }
 
     #[inline]
-    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
-    where
-        Self: 'a,
-    {
+    unsafe fn one<'a>(&self, state: &Self::State, context: Context<'a>) -> Self::One<'a> {
         unsafe { context.slice_at_mut(*state) }
     }
 }
