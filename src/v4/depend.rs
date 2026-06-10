@@ -155,17 +155,27 @@ unsafe impl<D: Depend + ?Sized> Depend for triomphe::Arc<D> {
 
 fn analyze(dependencies: impl IntoIterator<Item = Dependency>) -> Option<Error> {
     let mut old = None::<Dependency>;
-    let errors = dependencies.into_iter().filter_map(|new| match old {
-        Some(old) if old.meta == new.meta => match (old.access, new.access) {
-            (Access::Read, Access::Write) | (Access::Write, Access::Read) => {
-                Some(Error::ReadWriteConflict(new.meta, old.meta))
+    let errors = dependencies.into_iter().filter_map(|new| {
+        if new.meta.is_key() && new.access == Access::Write {
+            Some(Error::KeyWriteConflict)
+        } else if new.meta.is_table() && new.access == Access::Write {
+            Some(Error::TableWriteConflict)
+        } else {
+            match old {
+                Some(old) if old.meta == new.meta => match (old.access, new.access) {
+                    (Access::Read, Access::Write) | (Access::Write, Access::Read) => {
+                        Some(Error::ReadWriteConflict(new.meta, old.meta))
+                    }
+                    (Access::Write, Access::Write) => {
+                        Some(Error::WriteWriteConflict(new.meta, old.meta))
+                    }
+                    (Access::Read, Access::Read) => None,
+                },
+                Some(_) | None => {
+                    old = Some(new);
+                    None
+                }
             }
-            (Access::Write, Access::Write) => Some(Error::WriteWriteConflict(new.meta, old.meta)),
-            (Access::Read, Access::Read) => None,
-        },
-        Some(_) | None => {
-            old = Some(new);
-            None
         }
     });
     Error::all(errors)

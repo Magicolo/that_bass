@@ -28,8 +28,6 @@ pub struct Context<'a> {
     table: &'a table::Table,
     remove: &'a RefCell<Vec<u32>>,
     row_or_count: u32,
-    #[cfg(debug_assertions)]
-    locks: &'a [Lock],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,14 +52,11 @@ impl<'a> Context<'a> {
         row_or_count: u32,
         table: &'a table::Table,
         remove: &'a RefCell<Vec<u32>>,
-        #[cfg(debug_assertions)] locks: &'a [Lock],
     ) -> Self {
         Context {
             table,
             row_or_count,
             remove,
-            #[cfg(debug_assertions)]
-            locks,
         }
     }
 
@@ -72,19 +67,16 @@ impl<'a> Context<'a> {
 
     #[inline]
     pub unsafe fn rows(self) -> table::Rows<'a> {
-        self.assert_rows();
         unsafe { self.table.rows(self.row_or_count, self.remove) }
     }
 
     #[inline]
     pub unsafe fn row(self) -> table::Row<'a> {
-        self.assert_rows();
         unsafe { self.table.row(self.row_or_count, self.remove) }
     }
 
     #[inline]
     pub unsafe fn column<T: 'static>(self, index: u32) -> &'a [T] {
-        self.assert_read(index);
         unsafe {
             self.table
                 .columns()
@@ -95,7 +87,6 @@ impl<'a> Context<'a> {
 
     #[inline]
     pub unsafe fn column_at<T: 'static>(self, index: u32) -> &'a T {
-        self.assert_read(index);
         unsafe {
             self.table
                 .columns()
@@ -106,7 +97,6 @@ impl<'a> Context<'a> {
 
     #[inline]
     pub unsafe fn column_mut<T: 'static>(self, index: u32) -> &'a mut [T] {
-        self.assert_write(index);
         unsafe {
             self.table
                 .columns()
@@ -117,7 +107,6 @@ impl<'a> Context<'a> {
 
     #[inline]
     pub unsafe fn column_at_mut<T: 'static>(self, index: u32) -> &'a mut T {
-        self.assert_write(index);
         unsafe {
             self.table
                 .columns()
@@ -128,7 +117,6 @@ impl<'a> Context<'a> {
 
     #[inline]
     pub unsafe fn slice_at(self, index: u32) -> &'a dyn Any {
-        self.assert_read(index);
         unsafe {
             self.table
                 .columns()
@@ -139,7 +127,6 @@ impl<'a> Context<'a> {
 
     #[inline]
     pub unsafe fn slice(self, index: u32) -> slice::Read<'a> {
-        self.assert_read(index);
         unsafe {
             self.table
                 .columns()
@@ -150,7 +137,6 @@ impl<'a> Context<'a> {
 
     #[inline]
     pub unsafe fn slice_at_mut(self, index: u32) -> &'a dyn Any {
-        self.assert_write(index);
         unsafe {
             self.table
                 .columns()
@@ -161,31 +147,12 @@ impl<'a> Context<'a> {
 
     #[inline]
     pub unsafe fn slice_mut(self, index: u32) -> slice::Write<'a> {
-        self.assert_write(index);
         unsafe {
             self.table
                 .columns()
                 .get_unchecked(index as usize)
                 .get_slice_mut(self.row_or_count)
         }
-    }
-
-    #[inline]
-    fn assert_rows(self) {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.locks.contains(&Lock::Rows));
-    }
-
-    #[inline]
-    fn assert_read(self, index: u32) {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Read)));
-    }
-
-    #[inline]
-    fn assert_write(self, index: u32) {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Write)));
     }
 }
 
