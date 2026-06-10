@@ -1,11 +1,11 @@
 use crate::v4::{
     Meta,
     depend::{Access, Depend, Dependency},
-    slice::Slice,
+    key, slice,
     table::{self, Lock},
 };
 use core::{
-    any::TypeId,
+    any::{Any, TypeId},
     cell::RefCell,
     iter::{empty, once},
     marker::PhantomData,
@@ -14,13 +14,19 @@ use itertools::Itertools;
 
 pub trait Item: Depend {
     type State;
-    type Item<'a>
+    type All<'a>
+    where
+        Self: 'a;
+    type One<'a>
     where
         Self: 'a;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State>;
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock>;
-    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
+    where
+        Self: 'a;
+    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
     where
         Self: 'a;
 }
@@ -29,7 +35,7 @@ pub trait Item: Depend {
 pub struct Context<'a> {
     table: &'a table::Table,
     remove: &'a RefCell<Vec<u32>>,
-    count: u32,
+    row_or_count: u32,
     #[cfg(debug_assertions)]
     locks: &'a [Lock],
 }
@@ -52,94 +58,156 @@ pub struct ReadWith(pub(crate) Meta);
 pub struct WriteWith(pub(crate) Meta);
 
 impl<'a> Context<'a> {
-    #[cfg(not(debug_assertions))]
-    pub const fn new(count: u32, table: &'a table::Table, remove: &'a RefCell<Vec<u32>>) -> Self {
-        Self {
-            table,
-            count,
-            remove,
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    pub const fn new(
-        count: u32,
+    pub(crate) const fn new(
+        row_or_count: u32,
         table: &'a table::Table,
         remove: &'a RefCell<Vec<u32>>,
-        locks: &'a [Lock],
+        #[cfg(debug_assertions)] locks: &'a [Lock],
     ) -> Self {
-        Self {
+        Context {
             table,
-            count,
+            row_or_count,
             remove,
+            #[cfg(debug_assertions)]
             locks,
         }
     }
 
+    #[inline]
     pub const fn table(self) -> &'a table::Table {
         self.table
     }
 
-    pub const fn count(self) -> u32 {
-        self.count
+    #[inline]
+    pub unsafe fn rows(self) -> table::Rows<'a> {
+        self.assert_rows();
+        unsafe { self.table.rows(self.row_or_count, self.remove) }
     }
 
-    pub unsafe fn rows(self) -> table::Rows<'a> {
+    #[inline]
+    pub unsafe fn row(self) -> table::Row<'a> {
+        self.assert_rows();
+        unsafe { self.table.row(self.row_or_count, self.remove) }
+    }
+
+    #[inline]
+    pub unsafe fn column<T: 'static>(self, index: u32) -> &'a [T] {
+        self.assert_read(index);
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_all(self.row_or_count)
+        }
+    }
+
+    #[inline]
+    pub unsafe fn column_at<T: 'static>(self, index: u32) -> &'a T {
+        self.assert_read(index);
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_one(self.row_or_count)
+        }
+    }
+
+    #[inline]
+    pub unsafe fn column_mut<T: 'static>(self, index: u32) -> &'a mut [T] {
+        self.assert_write(index);
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_all_mut(self.row_or_count)
+        }
+    }
+
+    #[inline]
+    pub unsafe fn column_at_mut<T: 'static>(self, index: u32) -> &'a mut T {
+        self.assert_write(index);
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_one_mut(self.row_or_count)
+        }
+    }
+
+    #[inline]
+    pub unsafe fn slice_at(self, index: u32) -> &'a dyn Any {
+        self.assert_read(index);
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_any(self.row_or_count)
+        }
+    }
+
+    #[inline]
+    pub unsafe fn slice(self, index: u32) -> slice::Read<'a> {
+        self.assert_read(index);
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_slice(self.row_or_count)
+        }
+    }
+
+    #[inline]
+    pub unsafe fn slice_at_mut(self, index: u32) -> &'a dyn Any {
+        self.assert_write(index);
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_any_mut(self.row_or_count)
+        }
+    }
+
+    #[inline]
+    pub unsafe fn slice_mut(self, index: u32) -> slice::Write<'a> {
+        self.assert_write(index);
+        unsafe {
+            self.table
+                .columns()
+                .get_unchecked(index as usize)
+                .get_slice_mut(self.row_or_count)
+        }
+    }
+
+    #[inline]
+    fn assert_rows(self) {
         #[cfg(debug_assertions)]
         debug_assert!(self.locks.contains(&Lock::Rows));
-        unsafe { self.table.rows(self.count, self.remove) }
     }
 
-    pub unsafe fn column<T: 'static>(self, index: u32) -> &'a [T] {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Read)));
-        unsafe {
-            self.table
-                .columns()
-                .get_unchecked(index as usize)
-                .get(self.count)
-        }
+    #[inline]
+    fn assert_read(self, index: u32) {
+        self.assert_column(index, Access::Read);
     }
 
-    pub unsafe fn column_in(self, index: u32, slice: &mut Slice) -> &Slice {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Read)));
-        unsafe {
-            self.table
-                .columns()
-                .get_unchecked(index as usize)
-                .get_in(slice, self.count)
-        };
-        slice
+    #[inline]
+    fn assert_write(self, index: u32) {
+        self.assert_column(index, Access::Write);
     }
 
-    pub unsafe fn column_mut<T: 'static>(self, index: u32) -> &'a mut [T] {
+    #[inline]
+    fn assert_column(self, index: u32, access: Access) {
         #[cfg(debug_assertions)]
-        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Write)));
-        unsafe {
-            self.table
-                .columns()
-                .get_unchecked(index as usize)
-                .get_mut(self.count)
-        }
-    }
-
-    pub unsafe fn column_mut_in(self, index: u32, slice: &mut Slice) -> &mut Slice {
-        #[cfg(debug_assertions)]
-        debug_assert!(self.locks.contains(&Lock::Column(index, Access::Write)));
-        unsafe {
-            self.table
-                .columns()
-                .get_unchecked(index as usize)
-                .get_in(slice, self.count)
-        };
-        slice
+        debug_assert!(self.locks.contains(&Lock::Column(index, access)));
     }
 }
 
 impl<I: Item + ?Sized> Item for &I {
-    type Item<'a>
-        = I::Item<'a>
+    type All<'a>
+        = I::All<'a>
+    where
+        Self: 'a;
+    type One<'a>
+        = I::One<'a>
     where
         Self: 'a;
     type State = I::State;
@@ -148,21 +216,35 @@ impl<I: Item + ?Sized> Item for &I {
         I::initialize(self, table)
     }
 
+    #[inline]
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
         I::declare(self, state)
     }
 
-    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
     where
         Self: 'a,
     {
-        unsafe { I::get(self, state, context) }
+        unsafe { I::all(self, state, context) }
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
+    where
+        Self: 'a,
+    {
+        unsafe { I::one(self, state, context) }
     }
 }
 
 impl<I: Item + ?Sized> Item for &mut I {
-    type Item<'a>
-        = I::Item<'a>
+    type All<'a>
+        = I::All<'a>
+    where
+        Self: 'a;
+    type One<'a>
+        = I::One<'a>
     where
         Self: 'a;
     type State = I::State;
@@ -171,20 +253,34 @@ impl<I: Item + ?Sized> Item for &mut I {
         I::initialize(self, table)
     }
 
+    #[inline]
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
         I::declare(self, state)
     }
 
-    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
     where
         Self: 'a,
     {
-        unsafe { I::get(self, state, context) }
+        unsafe { I::all(self, state, context) }
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
+    where
+        Self: 'a,
+    {
+        unsafe { I::one(self, state, context) }
     }
 }
 
 impl Item for () {
-    type Item<'a>
+    type All<'a>
+        = ()
+    where
+        Self: 'a;
+    type One<'a>
         = ()
     where
         Self: 'a;
@@ -194,11 +290,20 @@ impl Item for () {
         Some(())
     }
 
+    #[inline]
     fn declare(&self, _: &Self::State) -> impl Iterator<Item = Lock> {
         empty()
     }
 
-    unsafe fn get<'a>(&self, _: &'a mut Self::State, _: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, _: &'a mut Self::State, _: Context<'a>) -> Self::All<'a>
+    where
+        Self: 'a,
+    {
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, _: &'a mut Self::State, _: Context<'a>) -> Self::One<'a>
     where
         Self: 'a,
     {
@@ -206,8 +311,12 @@ impl Item for () {
 }
 
 impl<I0: Item, I1: Item> Item for (I0, I1) {
-    type Item<'a>
-        = (I0::Item<'a>, I1::Item<'a>)
+    type All<'a>
+        = (I0::All<'a>, I1::All<'a>)
+    where
+        Self: 'a;
+    type One<'a>
+        = (I0::One<'a>, I1::One<'a>)
     where
         Self: 'a;
     type State = (I0::State, I1::State);
@@ -216,18 +325,33 @@ impl<I0: Item, I1: Item> Item for (I0, I1) {
         Some((self.0.initialize(table)?, self.1.initialize(table)?))
     }
 
+    #[inline]
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
         self.0.declare(&state.0).merge(self.1.declare(&state.1))
     }
 
-    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
     where
         Self: 'a,
     {
         unsafe {
             (
-                self.0.get(&mut state.0, context),
-                self.1.get(&mut state.1, context),
+                self.0.all(&mut state.0, context),
+                self.1.all(&mut state.1, context),
+            )
+        }
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
+    where
+        Self: 'a,
+    {
+        unsafe {
+            (
+                self.0.one(&mut state.0, context),
+                self.1.one(&mut state.1, context),
             )
         }
     }
@@ -240,8 +364,12 @@ unsafe impl<I: Item + ?Sized> Depend for Try<I> {
 }
 
 impl<I: Item + ?Sized> Item for Try<I> {
-    type Item<'a>
-        = Option<I::Item<'a>>
+    type All<'a>
+        = Option<I::All<'a>>
+    where
+        Self: 'a;
+    type One<'a>
+        = Option<I::One<'a>>
     where
         Self: 'a;
     type State = Option<I::State>;
@@ -250,6 +378,7 @@ impl<I: Item + ?Sized> Item for Try<I> {
         Some(self.0.initialize(table))
     }
 
+    #[inline]
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
         state
             .as_ref()
@@ -257,52 +386,79 @@ impl<I: Item + ?Sized> Item for Try<I> {
             .flat_map(|state| self.0.declare(state))
     }
 
-    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
     where
         Self: 'a,
     {
-        Some(unsafe { self.0.get(state.as_mut()?, context) })
+        Some(unsafe { self.0.all(state.as_mut()?, context) })
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
+    where
+        Self: 'a,
+    {
+        Some(unsafe { self.0.one(state.as_mut()?, context) })
     }
 }
 
 unsafe impl Depend for Key {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        empty()
+        once(Dependency::read(Meta::key()))
     }
 }
 
-// TODO: Implement
 impl Item for Key {
-    type Item<'a>
-        = ()
+    type All<'a>
+        = &'a [key::Key]
     where
         Self: 'a;
-    type State = ();
+    type One<'a>
+        = &'a key::Key
+    where
+        Self: 'a;
+    type State = u32;
 
-    fn initialize(&self, _: &table::Table) -> Option<Self::State> {
-        None
+    fn initialize(&self, table: &table::Table) -> Option<Self::State> {
+        table.column(TypeId::of::<key::Key>())
     }
 
-    fn declare(&self, _: &Self::State) -> impl Iterator<Item = Lock> {
-        empty()
+    #[inline]
+    fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
+        once(Lock::Column(*state, Access::Read))
     }
 
-    unsafe fn get<'a>(&'a self, _: &'a mut Self::State, _: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
     where
         Self: 'a,
     {
+        unsafe { context.column(*state) }
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
+    where
+        Self: 'a,
+    {
+        unsafe { context.column_at(*state) }
     }
 }
 
 unsafe impl Depend for Rows {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        once(Dependency::read(Meta::of::<table::Table>()))
+        once(Dependency::read(Meta::table()))
     }
 }
 
 impl Item for Rows {
-    type Item<'a>
+    type All<'a>
         = table::Rows<'a>
+    where
+        Self: 'a;
+    type One<'a>
+        = table::Row<'a>
     where
         Self: 'a;
     type State = ();
@@ -311,26 +467,40 @@ impl Item for Rows {
         Some(())
     }
 
+    #[inline]
     fn declare(&self, _: &Self::State) -> impl Iterator<Item = Lock> {
         once(Lock::Rows)
     }
 
-    unsafe fn get<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
     where
         Self: 'a,
     {
         unsafe { context.rows() }
     }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
+    where
+        Self: 'a,
+    {
+        unsafe { context.row() }
+    }
 }
 
 unsafe impl Depend for Table {
     fn depend(&self) -> impl Iterator<Item = Dependency> {
-        once(Dependency::read(Meta::of::<table::Table>()))
+        once(Dependency::read(Meta::table()))
     }
 }
 
 impl Item for Table {
-    type Item<'a>
+    type All<'a>
+        = &'a table::Table
+    where
+        Self: 'a;
+    type One<'a>
         = &'a table::Table
     where
         Self: 'a;
@@ -340,11 +510,21 @@ impl Item for Table {
         Some(())
     }
 
+    #[inline]
     fn declare(&self, _: &Self::State) -> impl Iterator<Item = Lock> {
         empty()
     }
 
-    unsafe fn get<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
+    where
+        Self: 'a,
+    {
+        context.table()
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, _: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
     where
         Self: 'a,
     {
@@ -367,8 +547,12 @@ impl<T: ?Sized> Clone for Read<T> {
 impl<T: ?Sized> Copy for Read<T> {}
 
 impl<T: 'static> Item for Read<T> {
-    type Item<'a>
+    type All<'a>
         = &'a [T]
+    where
+        Self: 'a;
+    type One<'a>
+        = &'a T
     where
         Self: 'a;
     type State = u32;
@@ -377,15 +561,25 @@ impl<T: 'static> Item for Read<T> {
         table.column(TypeId::of::<T>())
     }
 
+    #[inline]
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
         once(Lock::Column(*state, Access::Read))
     }
 
-    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
     where
         Self: 'a,
     {
         unsafe { context.column(*state) }
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
+    where
+        Self: 'a,
+    {
+        unsafe { context.column_at(*state) }
     }
 }
 
@@ -404,8 +598,12 @@ impl<T: ?Sized> Clone for Write<T> {
 impl<T: ?Sized> Copy for Write<T> {}
 
 impl<T: 'static> Item for Write<T> {
-    type Item<'a>
+    type All<'a>
         = &'a mut [T]
+    where
+        Self: 'a;
+    type One<'a>
+        = &'a mut T
     where
         Self: 'a;
     type State = u32;
@@ -414,15 +612,25 @@ impl<T: 'static> Item for Write<T> {
         table.column(TypeId::of::<T>())
     }
 
+    #[inline]
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
         once(Lock::Column(*state, Access::Write))
     }
 
-    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
     where
         Self: 'a,
     {
         unsafe { context.column_mut(*state) }
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
+    where
+        Self: 'a,
+    {
+        unsafe { context.column_at_mut(*state) }
     }
 }
 
@@ -433,25 +641,39 @@ unsafe impl Depend for ReadWith {
 }
 
 impl Item for ReadWith {
-    type Item<'a>
-        = &'a Slice
+    type All<'a>
+        = slice::Read<'a>
     where
         Self: 'a;
-    type State = (u32, Slice);
+    type One<'a>
+        = &'a dyn Any
+    where
+        Self: 'a;
+    type State = u32;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
-        Some((table.column(self.0.identifier())?, Slice::empty(self.0)))
+        Some(table.column(self.0.identifier())?)
     }
 
+    #[inline]
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
-        once(Lock::Column(state.0, Access::Read))
+        once(Lock::Column(*state, Access::Read))
     }
 
-    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
     where
         Self: 'a,
     {
-        unsafe { context.column_in(state.0, &mut state.1) }
+        unsafe { context.slice(*state) }
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
+    where
+        Self: 'a,
+    {
+        unsafe { context.slice_at(*state) }
     }
 }
 
@@ -462,24 +684,38 @@ unsafe impl Depend for WriteWith {
 }
 
 impl Item for WriteWith {
-    type Item<'a>
-        = &'a mut Slice
+    type All<'a>
+        = slice::Write<'a>
     where
         Self: 'a;
-    type State = (u32, Slice);
+    type One<'a>
+        = &'a dyn Any
+    where
+        Self: 'a;
+    type State = u32;
 
     fn initialize(&self, table: &table::Table) -> Option<Self::State> {
-        Some((table.column(self.0.identifier())?, Slice::empty(self.0)))
+        Some(table.column(self.0.identifier())?)
     }
 
+    #[inline]
     fn declare(&self, state: &Self::State) -> impl Iterator<Item = Lock> {
-        once(Lock::Column(state.0, Access::Write))
+        once(Lock::Column(*state, Access::Write))
     }
 
-    unsafe fn get<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::Item<'a>
+    #[inline]
+    unsafe fn all<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::All<'a>
     where
         Self: 'a,
     {
-        unsafe { context.column_mut_in(state.0, &mut state.1) }
+        unsafe { context.slice_mut(*state) }
+    }
+
+    #[inline]
+    unsafe fn one<'a>(&'a self, state: &'a mut Self::State, context: Context<'a>) -> Self::One<'a>
+    where
+        Self: 'a,
+    {
+        unsafe { context.slice_at_mut(*state) }
     }
 }
