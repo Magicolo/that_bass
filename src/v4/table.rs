@@ -3,7 +3,7 @@ use crate::v4::{
     depend::Access,
     error::Error,
     meta::Meta,
-    slice::Slice,
+    slice::{self, Slice},
     utility::{self, IteratorExtension, defer, is_unique},
 };
 use arc_swap::{ArcSwapAny, AsRaw};
@@ -192,9 +192,19 @@ impl Column {
     }
 
     #[inline]
+    pub(crate) unsafe fn get_any(&self, row: u32) -> &dyn Any {
+        unsafe { self.meta.get_at(self.data(), row) }
+    }
+
+    #[inline]
     pub(crate) unsafe fn get_one_mut<T: 'static>(&self, row: u32) -> &mut T {
         debug_assert_eq!(self.meta.identifier(), TypeId::of::<T>());
         unsafe { self.data().cast::<T>().add(row as usize).as_mut() }
+    }
+
+    #[inline]
+    pub(crate) unsafe fn get_any_mut(&self, row: u32) -> &mut dyn Any {
+        unsafe { self.meta.get_mut_at(self.data(), row) }
     }
 
     #[inline]
@@ -210,19 +220,23 @@ impl Column {
     }
 
     #[inline]
-    pub(crate) unsafe fn get_all_in(&self, slice: &mut Slice, count: u32) {
-        debug_assert_eq!(self.meta, slice.meta());
-        unsafe { slice.set_parts(self.data(), count as _) };
+    pub(crate) unsafe fn get_slice(&self, count: u32) -> slice::Read {
+        unsafe { Slice::from_raw_parts(self.meta, self.data(), count as _) }.into()
     }
 
     #[inline]
-    pub(crate) unsafe fn set_at<T: 'static>(&self, item: T, row: u32) {
+    pub(crate) unsafe fn get_slice_mut(&self, count: u32) -> slice::Write {
+        unsafe { Slice::from_raw_parts(self.meta, self.data(), count as _) }.into()
+    }
+
+    #[inline]
+    pub(crate) unsafe fn set_one_at<T: 'static>(&self, item: T, row: u32) {
         debug_assert_eq!(self.meta.identifier(), item.type_id());
         unsafe { self.data().cast::<T>().add(row as usize).write(item) };
     }
 
     #[inline]
-    pub(crate) unsafe fn set_at_with(&self, item: Box<dyn Any>, row: u32) {
+    pub(crate) unsafe fn set_any_at(&self, item: Box<dyn Any>, row: u32) {
         debug_assert_eq!(self.meta.identifier(), item.type_id());
         unsafe { self.meta.set_at(self.data(), item, row) };
     }

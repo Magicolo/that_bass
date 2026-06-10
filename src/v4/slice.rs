@@ -1,22 +1,31 @@
 use crate::v4::Meta;
 use core::{
     any::{Any, TypeId},
+    marker::PhantomData,
     ptr::NonNull,
     slice,
 };
+use derive_more::{Deref, DerefMut, From};
 
-pub struct Slice {
+#[derive(Deref, From)]
+pub struct Read<'a>(Slice<'a>);
+#[derive(Deref, DerefMut, From)]
+pub struct Write<'a>(Slice<'a>);
+
+pub(crate) struct Slice<'a> {
     data: NonNull<u8>,
     len: usize,
     meta: Meta,
+    _marker: PhantomData<&'a ()>,
 }
 
-impl Slice {
-    pub const fn empty(meta: Meta) -> Self {
+impl Slice<'_> {
+    pub(crate) const unsafe fn from_raw_parts(meta: Meta, data: NonNull<u8>, len: usize) -> Self {
         Self {
-            data: NonNull::dangling(),
-            len: 0,
+            data,
+            len,
             meta,
+            _marker: PhantomData,
         }
     }
 
@@ -42,11 +51,6 @@ impl Slice {
         } else {
             None
         }
-    }
-
-    pub(crate) const unsafe fn set_parts(&mut self, data: NonNull<u8>, len: usize) {
-        self.data = data;
-        self.len = len;
     }
 
     pub fn downcast_ref<T: 'static>(&self) -> Option<&[T]> {
